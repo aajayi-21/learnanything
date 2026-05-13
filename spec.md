@@ -4,7 +4,11 @@
 
 **LearnLoop** is a standalone, local-first Python application for adaptive learning. It is built around a Textual TUI, a local learning vault, and an optional Codex app-server integration through the Python SDK.
 
-LearnLoop is **not** a fork of Codex and does not depend on a checked-out Codex source tree. Codex is an AI runtime that LearnLoop can call through the `openai-codex` / app-server SDK. The LearnLoop application, schemas, scheduler, TUI, storage layer, and vault tools live in their own Python package.
+LearnLoop is **not** a fork of Codex and does not depend on a checked-out Codex source tree. Codex is an AI runtime that LearnLoop calls through the `openai-codex` / app-server SDK using the user's ChatGPT subscription (not the metered API). The LearnLoop application, schemas, scheduler, TUI, storage layer, and vault tools live in their own Python package.
+
+Codex is **required for the daily loop** — grading, diagnosis, generation, ingestion, and ephemeral diagnostic items all depend on it. When Codex is unavailable (no auth, network down, rate-limited), LearnLoop drops into a **degraded offline mode** that allows: reviewing existing content, attempting Practice Items with self-grading, manual error tagging, browsing notes/concept graph/errors, and viewing scheduler explanations. The model-bound paths (LLM grading, agent diagnosis, generation, canonical ingestion, ephemeral diagnostic generation) are disabled in offline mode and resume when Codex becomes available again.
+
+MVP is **single-user and local-first**. There are no accounts, shared tenants, or multi-user permission models in the core product. A "learner" is the person who owns the vault, and all learner-state beliefs are derived from that vault's own attempts unless the user explicitly imports data.
 
 The user creates or opens a local vault like:
 
@@ -32,7 +36,7 @@ or use focused CLI commands:
 ```bash
 learnloop review
 learnloop diagnose
-learnloop generate
+learnloop generate-practice
 learnloop inbox recent
 ```
 
@@ -43,6 +47,7 @@ LearnLoop uses Codex to:
 * read the learner’s profile,
 * inspect notes,
 * generate retrieval questions,
+* guide structured observations and reflections,
 * diagnose errors,
 * grade free-text answers against rubrics,
 * propose changes to Learning Objects, Practice Items, concept graphs, rubrics, and error logs,
@@ -126,7 +131,7 @@ This gives you:
 └─────────────────────────────────────┘
 ```
 
-LearnLoop’s core must work without Codex for manual content, review, scheduling, and attempt logging. Codex is used for tasks that need language understanding, generation, or free-text grading.
+Codex is required for the full daily loop. Without Codex, LearnLoop drops to **degraded offline mode**: review existing content, attempt items with self-grading, manual error tagging, scheduler explanations, and browsing. Free-text LLM grading, agent diagnosis, generation, canonical ingestion, and ephemeral diagnostic items are model-bound and disabled offline. Authentication uses the user's ChatGPT subscription via the SDK's `chatgpt` auth mode; the metered API is not the intended cost path.
 
 The **LearnLoop Codex SDK adapter** is a small wrapper around the public Python SDK. It starts or connects to Codex app-server, creates/resumes threads, streams turns to the TUI, requests structured outputs where appropriate, and maps SDK events into LearnLoop UI events.
 
@@ -145,16 +150,23 @@ learning-vault/
   README.md
   state.sqlite                  # canonical mutable state (see "Source of truth" below)
 
+  concepts/                     # vault-global concept registry (concept IDs are vault-global, not subject-scoped)
+    concepts.yaml               # canonical concept definitions; one entry per global concept id
+    relations.yaml              # vault-wide prerequisite / confusable / contains edges
+
   profile/                      # narrative memory
     student.md
-    goals.md
+    goals.md                    # narrative goals
+    goals.yaml                  # structured goals: ids, priorities, deadlines, retention horizons (see §7)
     preferences.md
     constraints.md
 
   subjects/
     linear-algebra/
       subject.md
-      concept-graph.yaml        # concepts, prerequisites, confusables
+      concept-graph.yaml        # subject view: lists which global concept ids are in scope here,
+                                # plus subject-specific prerequisite ordering. Concept definitions
+                                # live in vault-level concepts/concepts.yaml.
       notes/                    # long-form learner-authored notes
         eigenvectors.md
         svd.md
@@ -201,6 +213,17 @@ learning-vault/
       practice-items/
       errors.md
 
+    overwatch-review/
+      subject.md
+      concept-graph.yaml        # mechanics, game-sense concepts, team patterns
+      media-index.yaml          # VOD references + timestamp ranges
+      vod-reviews/
+      mechanics-drills.yaml
+      tactical-patterns.yaml
+      learning-objects/
+      practice-items/
+      errors.md
+
   inbox/                        # AI-generated content awaiting review
     pending/
       2026-05-12-svd-variants.yaml
@@ -220,6 +243,9 @@ learning-vault/
     grading-goldens/            # local grading regression fixtures
       short-answer.yaml
       proof-reconstruction.yaml
+    scheduler-goldens/          # deterministic queue/explanation fixtures
+      due-queue-basic.yaml
+      surprise-followup.yaml
 
   exports/                      # generated agent context (read-only, regenerated)
     current-state.md
@@ -240,6 +266,7 @@ learning-vault/
     socratic_tutor.md
     interleaving_set.md
     ingest_canonical_source.md
+    observation_review.md
 
   rubrics/                      # default rubrics by practice_mode × knowledge_type
     short_answer.yaml
@@ -259,10 +286,23 @@ This lets the agent work naturally because everything is inspectable and editabl
 | --- | --- | --- |
 | **Markdown** | Narrative memory: profile, goals, subject overviews, notes, error notebooks, sessions, reflections, codex-readable context | Human + agent |
 | **YAML** | Structured human-editable content: concept graphs, learning objects, practice items, rubrics, error taxonomy, domain templates, difficulty priors | Human + agent |
-| **`state.sqlite`** | Mutable computed state: practice attempts, FSRS item-memory state, learning-object + concept mastery, due queue, generated-item registry, error events, session metadata, grading evidence, Practice Item content hashes, active/dormant status | LearnLoop core + scheduler (humans read via CLI/TUI views, not directly) |
+| **`state.sqlite`** | Mutable computed state: practice attempts, FSRS item-memory state, learning-object + concept mastery, learner-state uncertainty, elicitation decisions, Bayesian surprise, due queue, generated-item registry, error events, session metadata, grading evidence, Practice Item content hashes, active/dormant status | LearnLoop core + scheduler (humans read via CLI/TUI views, not directly) |
 | **`exports/`** | Read-only derived context for the agent: snapshots of "what is due", "weak concepts", "recent errors", mastery summary | Regenerated by `learnloop` before each session and after attempt batches |
 
 Rule of thumb: if the user or the agent should comfortably edit it by hand and it benefits from being human-readable, it's Markdown or YAML. If it's an event log, a schedule, or a computed state requiring consistency, it's SQLite.
+
+### Local embedding index
+
+LearnLoop maintains a local embedding index (sentence-transformers, model pinned in `learnloop.toml`) over concepts, Learning Objects, Practice Items, and note paragraphs. Embeddings are stored as BLOBs in SQLite alongside the entity id and content hash, and are recomputed whenever the content hash changes.
+
+The index powers:
+
+- **Concept-merge suggestions.** When the canonical ingestor or the agent proposes a new concept, embedding similarity against existing global concepts surfaces near-duplicates *before* the merge prompt is shown to the learner. Aliases and surface-form normalization are tried first; embeddings catch the rest.
+- **Near-duplicate Practice Item detection.** Auto-accepted variants are dedup-checked against the existing PI pool for the same Learning Object; high-similarity duplicates are marked `pending_review` instead of auto-accepted.
+- **Related-LO lookup in the TUI.** "See related" surfaces neighbors of the current LO across subjects (relevant once concept IDs are vault-global).
+- **Note-to-LO grounding.** When the agent extracts a concept from a note, the source paragraph is recorded; later inspection can show "this LO came from these note paragraphs."
+
+The embedding step is local-only — no model call. It runs synchronously for single-item writes and in batched background jobs for ingestion. If the embedding model is missing or fails to load, the features above degrade gracefully (the merge prompt falls back to alias-only matching, and "related" lookups return empty), but core read/write/scheduling never depends on embeddings.
 
 ### Global (cross-vault) profile
 
@@ -279,7 +319,7 @@ When a vault loads, `profile/student.md` is merged on top of `~/.learnloop/profi
 
 ### Subject and domain extension model
 
-LearnLoop must be extensible across subjects. A subject is the learner-facing unit (`linear-algebra`, `korean`, `research-papers`, `vod-review`). A domain is an implementation hint that chooses templates, rubrics, practice modes, and import helpers.
+LearnLoop must be extensible across subjects. A subject is the learner-facing unit (`linear-algebra`, `korean`, `research-papers`, `overwatch-review`). A domain is a plugin-like module that chooses templates, rubrics, practice modes, attempt capture, learner-state mappings, scheduler hooks, and import helpers.
 
 Recommended first-party domains:
 
@@ -287,20 +327,182 @@ Recommended first-party domains:
 | --- | --- | --- |
 | `math_stats_ml` | linear algebra, statistics, ML, proofs, derivations | Text prompts, LaTeX, worked examples, proof reconstruction, transfer |
 | `research_papers` | paper reading, method understanding, assumptions, claims, replications | Canonical-source ingestion from PDFs/notes, claim/evidence maps, active recall, critique prompts |
-| `language` | Korean, vocabulary, grammar, reading, writing | Text-based vocab/grammar/translation/dictation metadata; audio and live chat later |
-| `motor_vod` | self VOD review, dance, esports, instrument practice, sport technique | Timestamped observations, error patterns, cue recall, practice plans; automated video/audio analysis later |
+| `language` | Korean, vocabulary, grammar, reading, writing, conversation | Text-based vocab/grammar/translation/dictation; conversation tests and audio later |
+| `motor_vod` | dance, instrument practice, sport technique, generic VOD review | Timestamped observations, error patterns, cue recall, practice plans; automated video/audio analysis later |
+| `esports_overwatch` | Overwatch VOD review, mechanics, game sense, team coordination | Manual VOD reflection, mechanics/game-sense prompts, Bayesian hidden-state review, drill recommendations; automated telemetry/video later |
 | `general` | any structured learning subject | Generic Learning Objects, Practice Items, notes, errors, and scheduling |
 
 Every domain extension can provide:
 
 - subject scaffold templates,
-- default `KnowledgeType` and `PracticeMode` recommendations,
+- core and namespaced `KnowledgeType` / `PracticeMode` recommendations,
 - rubrics,
 - error taxonomy additions,
 - import/ingestion helpers,
-- TUI panels or commands.
+- domain-specific attempt schemas,
+- mappings from domain evidence facets into the five core mastery axes,
+- scheduler hooks for candidate generation and next-action selection,
+- TUI panels or commands,
+- optional SQLite migrations for domain-owned tables.
 
-Domain-specific features must degrade gracefully to the generic model. For MVP, all domains are text-first; audio-based language practice, live chat, and automated VOD/media analysis are later extensions.
+Domain-specific features must degrade gracefully to the generic model. If a plugin is missing, LearnLoop can still show the subject as Learning Objects, Practice Items, notes, attempts, errors, and scheduler state. For MVP, all domains are text/manual-first; audio-based language practice, live chat, telemetry ingestion, and automated VOD/media analysis are later extensions.
+
+Practice modes and error types are extensible. Core modes use plain names like `retrieval` or `transfer`; domain-owned modes should be namespaced when they are not generally meaningful, such as `language:conversation_turn` or `esports_overwatch:vod_belief_reconstruction`.
+
+### Domain module contract
+
+A domain module should expose:
+
+```python
+class DomainModule(Protocol):
+    id: str
+    version: str
+    capabilities: DomainCapabilities
+
+    def scaffold_subject(self, subject_id: str) -> DomainScaffold: ...
+    def practice_modes(self) -> list[PracticeModeSpec]: ...
+    def knowledge_types(self) -> list[KnowledgeTypeSpec]: ...
+    def error_taxonomy(self) -> ErrorTaxonomyPatch: ...
+    def rubrics(self) -> list[RubricTemplate]: ...
+    def evidence_mappings(self) -> list[EvidenceMapping]: ...
+    def scheduler_hooks(self) -> list[SchedulerHook]: ...
+    def tui_panels(self) -> list[TuiPanelSpec]: ...
+    def migrations(self) -> list[SqlMigration]: ...
+```
+
+Domain modules do not own the global storage contract. They can add namespaced tables and files, but attempts, surprise, mastery axes, content provenance, and scheduler explanations still flow through the LearnLoop core tables.
+
+Capabilities tell the core which workflows a domain supports:
+
+```python
+class DomainCapabilities(BaseModel):
+    supports_fsrs: bool = true
+    supports_free_text_grading: bool = true
+    supports_conversation: bool = false
+    supports_observation_templates: bool = false
+    supports_vod_review: bool = false
+    supports_external_media: bool = false
+    supports_telemetry_import: bool = false
+    supports_auto_grading: bool = false
+    supports_scheduler_hooks: bool = true
+```
+
+The core uses capabilities to choose UI panels, CLI affordances, import options, and safe fallbacks. For example, `esports_overwatch` can set `supports_fsrs = false` for some VOD-review activities while still using LearnLoop's attempts, evidence facets, surprise, and scheduler explanations.
+
+### Language conversation domain
+
+The language module starts text-first but should be designed to grow into audio and live conversation. Conversation tests should be Practice Items that evaluate whether the learner can understand context, produce an appropriate response, repair misunderstandings, and stay calibrated about uncertainty.
+
+Recommended language domain modes:
+
+```text
+language:conversation_turn
+language:roleplay_dialogue
+language:listening_comprehension
+language:conversation_repair
+language:free_response_translation
+language:pronunciation_shadowing
+```
+
+Default language evidence facets should map into the core axes:
+
+| Facet | Core axes |
+| --- | --- |
+| `vocab_recall` | memory |
+| `grammar_selection` | understanding, execution |
+| `sentence_production` | execution, generalization |
+| `conversation_repair` | understanding, calibration |
+| `pragmatic_appropriateness` | generalization |
+| `pronunciation_accuracy` | execution |
+| `listening_discrimination` | memory, understanding |
+
+The module should support both strict item grading (vocab, cloze, grammar) and conversation rubrics where multiple responses can be acceptable.
+
+### Esports / Overwatch-first domain
+
+The first esports module should target Overwatch because it has clear mechanical execution, tactical perception, hidden-state inference, and team-coordination demands.
+
+Recommended subject layout:
+
+```text
+subjects/overwatch-review/
+  subject.md
+  concept-graph.yaml
+  media-index.yaml
+  vod-reviews/
+    2026-05-12-kings-row.md
+  mechanics-drills.yaml
+  tactical-patterns.yaml
+  learning-objects/
+  practice-items/
+  errors.md
+```
+
+The esports model should not treat every failure as failed memory. A fight can be lost after a correct decision, and a bad decision can succeed because of variance, opponent error, or teammate compensation. Review should separate outcome from decision quality.
+
+Core review prompts:
+
+- What did you believe was true at this moment?
+- What evidence supported that belief?
+- What alternative hypotheses were plausible?
+- Which cue would have changed the posterior most?
+- Was the action good in expectation, or only good/bad in outcome?
+- What drill or focus cue should be used next game?
+
+Initial Overwatch error families:
+
+| Error family | Meaning | Examples |
+| --- | --- | --- |
+| `execution_error` | Intended action was reasonable, execution failed | aim, timing, movement, mechanics |
+| `selection_error` | Wrong action given the learner's beliefs | bad target priority, wrong cooldown, poor path |
+| `estimation_error` | Belief state was wrong or missing key hidden-state inference | enemy location, cooldowns, ult economy, sightline threat |
+| `coordination_error` | Individually plausible action was poor relative to team state | desynced engage, unsupported angle, ignored teammate resource |
+| `attention_error` | Relevant information was visible but not sampled or prioritized | wrong threat, missed flank, focused low-value cue |
+
+Mechanics diagnostics should support manual labels first:
+
+- hitscan overshoot / undershoot,
+- smooth tracking vs jerkiness,
+- reaction timing,
+- click timing,
+- movement aim,
+- projectile lead too little / too much,
+- prediction anchored to current rather than future position,
+- timing wrong against acceleration, verticality, or state change,
+- bad prior over opponent movement options.
+
+Game-sense diagnostics should use a Bayesian hidden-state frame. The learner maintains beliefs over enemy positions, cooldowns, ultimates, sightlines being watched, opponent intentions, teammate resources, and likely fight plans. VOD review trains which cues matter and how beliefs should update under uncertainty.
+
+Default esports evidence facets should map into the core axes:
+
+| Facet | Core axes |
+| --- | --- |
+| `aim_precision` | execution |
+| `aim_smoothness` | execution |
+| `click_timing` | execution |
+| `projectile_lead_model` | execution, generalization |
+| `movement_mechanics` | execution |
+| `threat_detection` | understanding, generalization |
+| `hidden_state_inference` | understanding, calibration |
+| `cooldown_tracking` | memory, understanding |
+| `ultimate_tracking` | memory, understanding |
+| `sightline_model` | understanding, generalization |
+| `action_selection_ev` | generalization, calibration |
+| `team_state_coordination` | generalization |
+
+The scheduler for esports should recommend focus blocks rather than pure due-card review: one mechanics focus, one VOD belief reconstruction, one tactical perception prompt, or one coordination review. FSRS can still schedule recurring concepts and error patterns, but the main loop is deliberate focus, VOD reflection, and drill selection.
+
+Recommended esports domain modes:
+
+```text
+esports_overwatch:vod_review
+esports_overwatch:mechanics_focus
+esports_overwatch:belief_reconstruction
+esports_overwatch:tactical_perception
+esports_overwatch:decision_postmortem
+esports_overwatch:coordination_review
+esports_overwatch:expert_comparison
+```
 
 ---
 
@@ -374,18 +576,40 @@ default_session_minutes = 75
 [ai]
 provider = "codex-sdk"                  # use the Python openai-codex SDK
 preferred_model = "gpt-5.5"
-auth_mode = "chatgpt"
+auth_mode = "chatgpt"                   # subscription-backed, not metered API
 structured_output = true
 grader_role = "rubric-grader"
 server_startup_timeout_seconds = 10
 server_shutdown_timeout_seconds = 5
 restart_on_crash = true
-offline_mode_allowed = true             # review/scheduling still work without Codex
+required_for_daily_loop = true          # daily loop requires Codex; offline runs degraded mode
+degraded_offline_mode = true            # allow review + self-grade + manual error tagging when Codex is unavailable
+rate_limit_backoff_seconds = 30         # subscription tiers throttle; back off rather than fail hard
+rate_limit_strategy = "queue_then_self_grade"  # queue retries; fall back to self-grade after N failures
 
 [scheduler]
-algorithm = "fsrs_plus_object_mastery"  # py-fsrs at the item layer; EMA at the object layer
+algorithm = "fsrs_object_mastery_greedy_eig"  # py-fsrs + object mastery + uncertainty-aware queue
 default_retention = 0.9
 review_intervals = [1, 3, 7, 14, 30, 60, 120]
+adaptive_elicitation = true
+elicitation_policy = "heuristic_greedy_eig"   # heuristic_greedy_eig (MVP); simulator_eig (later, gated)
+elicitation_target_scope = "active_goals"
+surprise_modulates_fsrs = true
+surprise_diagnostic_threshold = 1.5
+information_gain_weight = 0.15
+error_uncertainty_weight = 0.10
+# Codex-simulator ephemeral diagnostic generation
+simulator_ephemerals_enabled = true       # propose ephemeral PIs when heuristic EIG plateaus
+simulator_ephemerals_per_session_max = 3
+simulator_ephemeral_min_uncertainty = 0.3 # only fire when variance on the target belief is above this
+# Later: full predictive-LM EIG pass
+deep_diagnostic_pass_enabled = false
+deep_diagnostic_candidate_pool = 20
+deep_diagnostic_samples_per_candidate = 8
+deep_diagnostic_latency_budget_ms = 15000
+mcts_enabled = false
+mcts_min_attempts = 500
+mcts_latency_budget_ms = 750
 
 [storage]
 database = "state.sqlite"
@@ -418,6 +642,18 @@ disguised_retest_after_resolution = true       # retest resolved misconceptions 
 inherit_global = true                          # merge ~/.learnloop/profile.md into vault profile
 global_path = "~/.learnloop"
 
+[embeddings]
+enabled = true
+model = "sentence-transformers/all-MiniLM-L6-v2"
+dim = 384
+similarity_threshold_dedup = 0.92         # PI near-duplicate marks as pending_review at or above this
+similarity_threshold_merge = 0.85         # concept-merge suggestion threshold
+related_lookup_top_k = 8
+batch_size = 64
+
+[domains]
+enabled = ["math_stats_ml", "research_papers", "language", "motor_vod", "esports_overwatch", "general"]
+
 [inbox]
 # AI-generated content review policy. See "Provenance, Inbox, and Canonical Sources".
 auto_accept_canonical_direct = true            # verbatim extraction from canonical sources
@@ -445,12 +681,15 @@ manual_review_triggers = [
 ]
 
 [mastery]
-update_rule = "ema"                            # EMA per dimension per Learning Object
+update_rule = "ema"                            # EMA per core axis per Learning Object
 ema_alpha = 0.2
 difficulty_aware = true                        # hard success raises more; easy failure lowers more
-error_aware_cross_dimension = true             # apply error_impacts from error-taxonomy.yaml
+error_aware_cross_axis = true                  # apply error_impacts from error-taxonomy.yaml
 flag_high_confidence_wrong = true              # mark as misconception; trigger repair loop
 fluency_signals = ["latency_vs_expected", "hints_used", "pause_count", "consistency"]
+belief_uncertainty = true                      # store uncertainty around learner-state estimates
+assume_independent_axes = false                # axes/facets can be correlated; avoid double-counting evidence
+surprise_observation_fields = ["score_bucket", "error_type", "confidence", "latency_bucket", "hints_bucket"]
 
 [import_export]
 allow_anki_import = false                      # later extension; text/YAML import/export first
@@ -513,6 +752,62 @@ Retention horizon: 1 year
 Priority: high
 ```
 
+## `profile/goals.yaml`
+
+`goals.md` is the narrative companion. `goals.yaml` is the structured source the scheduler reads for `active_goal_importance` and `deadline_pressure`. Every active goal has a stable id, a numeric priority in `[0, 1]`, an optional deadline, and a set of concept anchors (vault-global concept ids) that scope the goal into the concept graph.
+
+```yaml
+goals:
+  - id: goal_linear_algebra_for_ml
+    title: Linear Algebra for ML
+    status: active
+    priority: 0.9
+    target: transfer_ready
+    retention_horizon_days: 365
+    deadline: null
+    concept_anchors:
+      - eigenvectors
+      - svd
+      - principal_components
+      - orthogonality
+    notes_md: "See goals.md → Linear Algebra for ML"
+
+  - id: goal_korean_conversational
+    title: Korean conversational + grammar accuracy
+    status: active
+    priority: 0.6
+    target: ongoing
+    retention_horizon_days: null
+    deadline: null
+    concept_anchors:
+      - korean_grammar_topic_particle
+      - korean_grammar_subject_particle
+      - korean_conversation_repair
+    notes_md: "See goals.md → Korean"
+
+  - id: goal_qual_exam_2026_08
+    title: Quals: causal survival modeling
+    status: active
+    priority: 1.0
+    target: research_level
+    retention_horizon_days: 365
+    deadline: 2026-08-15                        # YYYY-MM-DD; drives deadline_pressure
+    concept_anchors:
+      - fine_gray_competing_risks
+      - cox_partial_likelihood
+      - cumulative_incidence_function
+    notes_md: "See goals.md → Fine-Gray"
+```
+
+Scheduler inputs derived from `goals.yaml`:
+
+- `active_goal_importance(item)` = max over active goals whose `concept_anchors` reach `item.learning_object.concept` (via the concept-graph prerequisite closure) of `goal.priority`.
+- `deadline_pressure(item)` = max over those same goals of a smooth function of `days_until(deadline)`, zero when deadline is null.
+
+Concept anchors are expanded through the global concept graph: a goal anchored on `svd` covers `lo_svd_decomposition`, `lo_pca_via_svd`, and any LO under prerequisite concepts the goal has not yet mastered.
+
+A status of `active`, `dormant`, or `completed` controls inclusion in the daily queue without deleting the goal record.
+
 ## `subjects/linear-algebra/subject.md`
 
 ```markdown
@@ -538,45 +833,84 @@ Understand linear algebra deeply enough to use it in ML, statistics, optimizatio
 
 # 8. Concept graph format
 
-Use YAML because it is human-editable and Codex-readable.
+**Concept IDs are vault-global, not subject-scoped.** A single concept (e.g. `probability`) can be referenced from multiple subjects (`statistics`, `ml`, `survival-analysis`) without duplication. The authoritative concept registry lives at the vault root in `concepts/concepts.yaml` and `concepts/relations.yaml`. Per-subject `concept-graph.yaml` files are *views* that select which global concepts are in scope and add subject-specific ordering hints.
+
+## Vault-level `concepts/concepts.yaml`
 
 ```yaml
 concepts:
   eigenvectors:
     title: Eigenvectors
     type: concept
-    prerequisites:
-      - matrix_multiplication
-      - linear_maps
-    mastery:
-      recall: 0.86
-      procedure: 0.74
-      schema: 0.58
-      transfer: 0.41
+    aliases: [eigen-vectors, "eigen vector"]   # used by concept-merge suggestions
     common_confusions:
       - singular_vectors
       - principal_components
-    next_action: interleaved_discrimination
+    next_action_hint: contrastive_discrimination
 
   svd:
     title: Singular Value Decomposition
     type: procedure
-    prerequisites:
-      - orthogonality
-      - eigenvectors
-      - matrix_transpose
-    mastery:
-      recall: 0.62
-      procedure: 0.48
-      schema: 0.39
-      transfer: 0.22
-    next_action: worked_example_completion
+    aliases: ["singular value decomposition"]
+
+  probability:                                  # shared across statistics, ml, survival-analysis
+    title: Probability
+    type: concept
 ```
 
-The important thing is that mastery is multidimensional:
+## Vault-level `concepts/relations.yaml`
+
+```yaml
+prerequisites:
+  - from: matrix_multiplication
+    to: eigenvectors
+  - from: linear_maps
+    to: eigenvectors
+  - from: orthogonality
+    to: svd
+  - from: eigenvectors
+    to: svd
+confusables:
+  - [eigenvectors, singular_vectors]
+  - [eigenvectors, principal_components]
+```
+
+Relations are stored separately from definitions so that adding a new prerequisite edge doesn't churn the definition file.
+
+## Per-subject `subjects/<subject>/concept-graph.yaml` (view)
+
+```yaml
+subject: linear-algebra
+in_scope:                                       # global concept ids relevant to this subject
+  - matrix_multiplication
+  - linear_maps
+  - eigenvectors
+  - svd
+  - orthogonality
+subject_ordering_hints:                         # optional, subject-specific learning order
+  - eigenvectors
+  - svd
+learning_objects:                               # subject-owned LOs grouped by concept
+  eigenvectors:
+    - lo_eigenvectors_def
+    - lo_eigenvectors_procedure
+  svd:
+    - lo_svd_decomposition
+    - lo_svd_geometric_interpretation
+```
+
+A subject view never redefines a concept. If a concept is missing, the view fails validation and `learnloop doctor` reports it. Learning Objects reference concepts by their global id (`concept: eigenvectors`).
+
+## Concept merge
+
+`concept.merge` is required when an extracted concept matches an existing one (by alias, embedding similarity, or learner confirmation). Merging collapses two global ids into one, rewrites all references across `concepts/`, subject views, Learning Objects, Practice Items, and SQLite, and writes a `change_batches` row with the inverse mapping for rollback.
+
+## Mastery
+
+Mutable mastery is not stored in concept files; it lives in SQLite and derived exports. The important thing is that mastery is multi-axis, with lower-level facets:
 
 ```text
-Recall ≠ procedure ≠ schema ≠ transfer.
+Memory ≠ understanding ≠ execution ≠ generalization ≠ calibration.
 ```
 
 That is the whole point of the app.
@@ -595,7 +929,7 @@ Concept             — a node in the concept graph (e.g. "Fine-Gray competing r
                           (e.g. "Define it from memory", "Contrast with cause-specific hazard")
 ```
 
-A Learning Object can have many Practice Items across many practice modes. The Practice Item is what gets scheduled by FSRS; the Learning Object is what carries multi-dimensional mastery. The Concept aggregates over its Learning Objects.
+A Learning Object can have many Practice Items across many practice modes. The Practice Item is what gets scheduled by FSRS; the Learning Object is what carries multi-axis mastery. The Concept aggregates over its Learning Objects.
 
 ## Learning Object (`learning-objects/<lo_id>.yaml`)
 
@@ -617,7 +951,7 @@ provenance:
 created_at: 2026-05-01
 ```
 
-Mastery dimensions (recall, schema, procedure, transfer, fluency, explanation, calibration) are **not** stored in this YAML — they live in `state.sqlite` and are updated from attempts. The YAML is a stable, human-editable description.
+Mastery axes and evidence facets are **not** stored as mutable estimates in this YAML — they live in `state.sqlite` and are updated from attempts. The YAML is a stable, human-editable description.
 
 ## Practice Item (`practice-items/<pi_id>.yaml`)
 
@@ -629,14 +963,16 @@ attempt_types_allowed:              # see AttemptType enum
   - independent_attempt
   - hinted_attempt
   - dont_know
-target_mastery_dimensions:          # what an attempt at this item is evidence for
+target_mastery_axes:                # broad latent capabilities this item updates
+  - memory
+  - understanding
+evidence_facets:                    # lower-level evidence channels
   - recall
   - schema
   - explanation
-mastery_weights:                    # how much each dimension is updated by this item
-  recall: 0.45
-  schema: 0.45
-  explanation: 0.10
+mastery_weights:                    # how much each axis is updated by this item
+  memory: 0.45
+  understanding: 0.55
 prompt: "Define the Fine-Gray subdistribution hazard in your own words."
 expected_answer: >
   It models the subdistribution hazard for a target event in the presence
@@ -644,6 +980,22 @@ expected_answer: >
   so the model targets the cumulative incidence function.
 difficulty: 0.72
 tags: [survival, competing-risks, definition]
+hints:                                # first-class hint ladder; nth hint = hints[n-1]
+  - "Think about how competing risks are handled in the risk set."
+  - "Compare against the cause-specific hazard: what's different about who stays in the risk set?"
+  - "It targets the cumulative incidence function rather than ordinary cause-specific hazard."
+hint_policy:
+  max_useful_hints: 3                 # source of truth for hints_used capping
+  fsrs_rating_cap_by_hint:            # FSRS rating cap as hints accumulate (idx = hints_used)
+    0: easy                           # no hints → no cap
+    1: good
+    2: hard
+    3: again
+  mastery_alpha_dampening_by_hint:    # multiplier on effective_alpha in update_mastery
+    0: 1.00
+    1: 0.75
+    2: 0.50
+    3: 0.25
 provenance:
   origin: human
   source_id: null
@@ -672,6 +1024,18 @@ grading_rubric:                     # optional inline rubric; falls back to defa
       description: "Defines hazard as a probability without qualification."
       max_grade: 3
 ```
+
+## Hint ladders
+
+`hints` is an ordered list of progressively-revealing nudges. The TUI's [Hint] button reveals the next entry. `hints_used` on each attempt is the number of hint-reveals the learner took, and it is the canonical source for:
+
+- FSRS rating cap (from `hint_policy.fsrs_rating_cap_by_hint`),
+- mastery EMA dampening (`hint_policy.mastery_alpha_dampening_by_hint` multiplies `effective_alpha`),
+- the `hints_bucket` field used in surprise prediction.
+
+Items without an explicit `hints` array fall back to the per-mode default ladder shipped in `prompts/hint_ladder_<mode>.md`. Items with `hints: []` advertise that no hints are available and the [Hint] button is disabled.
+
+Hinted attempts log as `attempt_type: hinted_attempt`. The grading pipeline runs normally; only the FSRS rating cap and mastery dampening change.
 
 ## Item-memory state (SQLite, not YAML)
 
@@ -721,6 +1085,7 @@ Codex SDK adapter
 │ Due Reviews: 34                            │
 │ Weak Concepts: 7                           │
 │ Transfer Gaps: 4                           │
+│ Active-Goal Uncertainty: 3 high            │
 │ Suggested Session: 75 min                  │
 ├────────────────────────────────────────────┤
 │ 1. Start Today's Loop                      │
@@ -744,12 +1109,30 @@ Shown before every session if `[learning].readiness_gate = true`. Captured to th
 │ Energy:        ( ) low  (•) med  ( ) high  │
 │ Sleep last:    ( ) <6h  (•) 6-8h  ( ) >8h  │
 │ Available:     [ 75 ] minutes              │
-│ Focus pattern: (•) pomodoro 25/5           │
+│ Focus pattern: ( ) short  (•) pomodoro 25/5│
 │                ( ) continuous              │
 ├────────────────────────────────────────────┤
 │ [Start Session]                            │
 └────────────────────────────────────────────┘
 ```
+
+### Short-session mode
+
+When `available_minutes < 20` (or the learner picks "short" explicitly), the readiness gate switches the entire daily loop to a stripped-down flow. No deep-work block, no transfer challenge, no new material. The queue collapses to warm-up retrieval on items closest to forgetting, plus any open misconception-repair items in a contrastive-discrimination format. Cold opens, commutes, and stolen 10-minute slots become useful instead of being skipped.
+
+```text
+┌────────────────────────────────────────────┐
+│ Short Session (15 min)                     │
+├────────────────────────────────────────────┤
+│ Warm-up retrieval        12 min            │
+│   • items closest to forgetting only       │
+│   • no new material, no transfer           │
+│ Open misconception drill  3 min            │
+│   • contrastive_discrimination, if any     │
+└────────────────────────────────────────────┘
+```
+
+Short-session sessions still log normally and update FSRS state, but the scheduler suppresses the surprise-driven diagnostic-followup interruption (low-time sessions don't have time for a diagnostic detour). Ephemeral diagnostic generation is also suppressed.
 
 ## Today’s loop
 
@@ -759,11 +1142,10 @@ When `focus_blocks = "pomodoro"`, deep-work blocks are 25 min with 5-min retriev
 ┌────────────────────────────────────────────┐
 │ Today’s Learning Loop  (pomodoro 25/5)     │
 ├────────────────────────────────────────────┤
-│ Warm-up Retrieval       12 min             │
+│ Warm-up Retrieval       10 min             │
 │ Deep Work block 1       25 min             │
 │   ↳ break: retrieval     5 min             │
-│ Deep Work block 2       25 min             │
-│ Weakness Repair         18 min             │
+│ Weakness Repair         20 min             │
 │ Transfer Challenge      15 min             │
 └────────────────────────────────────────────┘
 ```
@@ -775,7 +1157,7 @@ When `focus_blocks = "pomodoro"`, deep-work blocks are 25 min with 5-min retriev
 │ Concept: SVD → PCA                         │
 │ Mode: Explain from memory                  │
 │ Difficulty: 0.78                           │
-│ Why now: transfer gap + recent error        │
+│ Why now: info gain + transfer gap + error   │
 ├────────────────────────────────────────────┤
 │ Prompt:                                    │
 │ Explain how PCA can be computed using SVD. │
@@ -792,6 +1174,8 @@ The `Why now` line opens a scheduler explanation panel. It shows the score compo
 ```text
 Why this item?
   Forgetting risk        0.24   due today, retrievability 0.21
+  Information gain       0.13   active-goal uncertainty is high
+  Error uncertainty      0.09   recall failure vs schema confusion unresolved
   Transfer gap           0.15   recall 0.86, transfer 0.38
   Recent error           0.12   missed centering assumption yesterday
   Readiness adjustment  +0.00   medium energy
@@ -808,6 +1192,7 @@ Why this item?
 │ Error type: Missing centering assumption   │
 │ Confidence: 4/5                            │
 │ Hint usage: 0                              │
+│ Surprise: negative, moderate               │
 ├────────────────────────────────────────────┤
 │ Diagnosis:                                 │
 │ You remembered the SVD connection, but did │
@@ -818,6 +1203,32 @@ Why this item?
 │ Schedule contrastive PCA/SVD repair drill. │
 └────────────────────────────────────────────┘
 ```
+
+## Forgetting curve
+
+Per-LO retention visualization. The y-axis is retrievability (FSRS-derived); marker points are actual attempt scores. The curve is reconstructed from `practice_item_state` history and `practice_attempts` rather than recomputed from scratch.
+
+```text
+┌────────────────────────────────────────────┐
+│ Forgetting Curve: lo_svd_decomposition     │
+│ retrievability over the last 60 days       │
+├────────────────────────────────────────────┤
+│ 1.0 ●                                      │
+│     │ ●  ●                                 │
+│ 0.8 │      ●                               │
+│     │           ●         ●                │
+│ 0.6 │                ●            ●        │
+│     │                         ✕            │
+│ 0.4 │                                      │
+│     └──────────────────────────────────── │
+│      d0     d7   d14   d28   d42   d60     │
+│                                            │
+│ ●  attempt (score)    ✕  forgotten (<0.30) │
+│ Next due: in 3 days                        │
+└────────────────────────────────────────────┘
+```
+
+Subject-level aggregate replaces the marker dots with a band (10th–90th percentile across LOs in scope). Useful for motivation and for spotting decayed concepts after a long break.
 
 ## Recently added review
 
@@ -882,6 +1293,12 @@ learnloop generate-practice --concept svd --mode retrieval
 learnloop generate-transfer --concept pca
 learnloop diagnose solution.md --concept fine-gray
 learnloop why <pi_id>                              # explain why an item is scheduled now
+learnloop forgetting-curve <lo_id>                 # plot retrievability over time for an LO
+learnloop forgetting-curve --subject linear-algebra # aggregate curve for a subject
+learnloop uncertainty                              # inspect active-goal uncertainty and surprise signals
+learnloop surprise <attempt_id>                    # inspect the prediction and surprise from one attempt
+learnloop observe <template_id>                     # fill a structured observation/reflection template
+learnloop replay-model                              # recompute mastery, beliefs, surprise from raw attempts
 learnloop errors
 learnloop misconceptions                           # list active misconception LOs
 learnloop lineage <pi_id>                          # provenance tree for a Practice Item
@@ -889,6 +1306,7 @@ learnloop graph linear-algebra
 learnloop session-summary
 learnloop exports refresh
 learnloop eval grading                             # run local grading regression fixtures
+learnloop eval scheduler                           # run deterministic queue/explanation fixtures
 learnloop doctor                                   # validate vault health
 learnloop backup create
 learnloop backup list
@@ -945,6 +1363,8 @@ Restore must require an explicit backup id and should refuse to overwrite an ope
 - broken concept references,
 - missing source ids for canonical content,
 - stale content hashes,
+- stale learner-state beliefs or missing surprise records for recent attempts,
+- replayed learner-state mismatch against the current algorithm version,
 - orphaned SQLite rows,
 - invalid due dates or timezone values,
 - missing prompt templates and rubrics,
@@ -1002,12 +1422,19 @@ These are Python service methods, not JSON-RPC method names:
 | --- | --- | --- |
 | `lo.create` / `lo.update` | Create or edit a Learning Object | `learning-objects/*.yaml` |
 | `pi.create` / `pi.update` | Create or edit a Practice Item | `practice-items/*.yaml` + SQLite registry |
-| `attempt.log` | Record a graded attempt | `state.sqlite` (attempts, FSRS, mastery, errors) |
+| `attempt.log` | Record a graded attempt | `state.sqlite` (attempts, FSRS, mastery, beliefs, surprise, errors) |
 | `inbox.submit` | Send generated content to the inbox with provenance | `inbox/pending/*.yaml` |
 | `inbox.accept` / `inbox.reject` | Move inbox items to canonical location | YAML + SQLite |
 | `grade.rubric` | Run SDK-backed grading and store evidence | grading evidence in SQLite |
 | `mastery.update` | Apply EMA + error-impact updates from an attempt | SQLite |
-| `schedule.next` | Compute next due item(s) using FSRS + object mastery | reads SQLite |
+| `surprise.record` | Compare predicted vs observed answer evidence and store Bayesian surprise | SQLite |
+| `elicitation.score` | Score candidate questions by expected information gain against active goals | reads SQLite + optional ephemeral candidates |
+| `schedule.next` | Compute next due item(s) using FSRS + object mastery + greedy information gain | reads SQLite |
+| `uncertainty.inspect` | Summarize active-goal belief uncertainty and recent surprise | reads SQLite |
+| `surprise.inspect` | Explain one attempt's prior prediction, observation, surprise, and actions | reads SQLite |
+| `observation.start` / `observation.complete` | Fill and record a structured observation template | SQLite + optional Markdown |
+| `model.replay` | Rebuild mastery, beliefs, surprise, due queue, and explanations from raw events | SQLite derived tables |
+| `scheduler.eval` | Run scheduler golden fixtures and compare expected queues/explanations | reads fixture vaults |
 | `concept.merge` | Canonicalize two concept IDs | `concept-graph.yaml` + SQLite remap |
 | `exports.refresh` | Regenerate `exports/*` from current state | `exports/*` |
 | `error.record` | Log an error event with type + severity | SQLite + `errors.md` append |
@@ -1050,8 +1477,9 @@ One LearnLoop process can work across multiple vaults, but only one vault is act
 - No maintenance burden from a Codex fork.
 - No hand-rolled protocol layer in MVP.
 - Streaming, turn state, thread resume, and auth stay delegated to the SDK.
+- Subscription-backed auth (ChatGPT) avoids per-call metered cost; rate limits, not dollars, are the binding constraint.
 - LearnLoop keeps authoritative state local and validated.
-- The system remains usable offline for existing content, due reviews, attempt logging, and scheduling.
+- The system remains usable in **degraded offline mode** for review, self-graded attempts, and manual error tagging when Codex is unreachable.
 
 ---
 
@@ -1272,20 +1700,93 @@ The ingestor returns everything as a single proposed patch the learner can accep
 
 ## Ephemeral session items
 
-When a learner asks for more practice mid-session, the agent generates items inline. These are stored as ephemeral and **not** promoted to permanent Practice Items by default. At session end (or any time), the TUI surfaces:
+When a learner asks for more practice mid-session, the agent generates items inline. These are stored as ephemeral and **not** promoted to permanent Practice Items by default. Ephemeral diagnostic items may also be generated by the Codex-simulator EIG path (Layer 4, §16) when no existing PI is informative enough about a high-priority belief.
+
+## End-of-session promotion sweep
+
+When a session ends with unpromoted ephemerals, LearnLoop runs a **promotion sweep** that proposes which items deserve to become permanent Practice Items. The sweep is local (no extra Codex calls); rationale text was generated and cached when the ephemeral was first created. Each item gets a per-item recommendation (`promote`, `skip`, `revise`) and a one-line rationale:
 
 ```text
-The session generated 4 ephemeral items. Promote any to permanent practice?
-  [ ] "Explain PCA on uncentered data — what changes?"   → lo_pca_via_svd
-  [ ] "Sketch a counterexample where SVD ≠ eigendecomposition"  → lo_svd_decomposition
-  ...
+┌──────────────────────────────────────────────────────────────────────┐
+│ End-of-Session Sweep                                                 │
+│ The session generated 4 ephemeral items. Recommendations:            │
+├──────────────────────────────────────────────────────────────────────┤
+│ [✓] Promote  "Explain PCA on uncentered data — what changes?"        │
+│              → lo_pca_via_svd                                        │
+│              Why: discriminated recall vs schema (high info gain);   │
+│                   no existing PI on this contrast.                   │
+│                                                                      │
+│ [✓] Promote  "Sketch a counterexample where SVD ≠ eigendecomposition"│
+│              → lo_svd_decomposition                                  │
+│              Why: targets active misconception "SVD = eig of A".     │
+│                                                                      │
+│ [ ] Skip     "Compute SVD of [[1,0],[0,1]]" → lo_svd_decomposition   │
+│              Why: near-duplicate of pi_svd_identity_001 (sim 0.94).  │
+│                                                                      │
+│ [~] Revise   "What is PCA?"                                          │
+│              Why: too broad; suggest narrowing to specific axis      │
+│                   (e.g. "Why centering matters") before promoting.   │
+├──────────────────────────────────────────────────────────────────────┤
+│ [Promote checked] [Edit selected] [Skip all] [Defer to inbox]        │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-Promotion runs the item through standard inbox policy (likely auto-accept as a variant if it descends from an approved item; review otherwise).
+Sweep recommendations are scored from:
+
+- **Information gain achieved** during the session (how much did the learner's belief variance drop after this item?),
+- **Existing-pool coverage** (embedding similarity to existing PIs on the same LO; high similarity → skip),
+- **Misconception linkage** (items that successfully exercised a misconception LO are strong promote candidates),
+- **Item quality heuristics** (length, prompt clarity, presence of canonical expected_answer or rubric).
+
+The "Defer to inbox" path routes selected items to standard inbox policy (auto-accept as variant if descending from an approved item; review otherwise). Skipped ephemerals are deleted from `ephemeral_session_items` after the session ends; promoted ones are linked through `promoted_to_practice_item_id`.
+
+If a session ends without an explicit sweep (interrupted, force-quit), the sweep runs on the next `learnloop today` or `learnloop resume`.
 
 ## Active vs dormant
 
 Practice Items have an `active` flag in SQLite. Dormant items are kept (with full history) but not scheduled. This is the safe path for "I made too many items" without losing data. Reactivating restores FSRS state.
+
+## Observation templates
+
+Not every useful learning event is a card-like prompt. Domains can define structured observation templates for reflection, VOD review, lab notes, conversation turns, debugging sessions, or deliberate-practice drills. Observation templates are YAML, versioned, and can produce attempts/evidence without pretending the activity was a simple recall card.
+
+```yaml
+id: obs_overwatch_hidden_state_review
+domain: esports_overwatch
+title: Overwatch hidden-state VOD review
+applies_to:
+  - esports_overwatch:belief_reconstruction
+fields:
+  - id: timestamp
+    type: media_timestamp
+    required: true
+  - id: believed_state
+    type: long_text
+    prompt: "What did you believe was true?"
+  - id: evidence
+    type: long_text
+    prompt: "What evidence supported that belief?"
+  - id: alternatives
+    type: long_text
+    prompt: "What alternative hypotheses were plausible?"
+  - id: decision_quality
+    type: enum
+    options: [good_ev, mixed_ev, poor_ev, unclear]
+  - id: outcome
+    type: enum
+    options: [won, lost, neutral]
+emits:
+  evidence_facets:
+    - hidden_state_inference
+    - action_selection_ev
+    - calibration
+  possible_error_types:
+    - estimation_error
+    - selection_error
+    - coordination_error
+```
+
+Completed observations are stored in SQLite and may also render to Markdown under the subject (for example `vod-reviews/*.md`) when the domain requests a human-readable log.
 
 ---
 
@@ -1293,20 +1794,63 @@ Practice Items have an `active` flag in SQLite. Dormant items are kept (with ful
 
 Free-text answers (definitions, explanations, derivations, transfer) are graded by the `rubric-grader` role using a 0-4 rubric. The grader returns structured evidence, not a free-text verdict.
 
+## Grader routing
+
+Not every attempt needs an LLM call. LearnLoop routes attempts through a tiered grader pipeline; the LLM grader is reserved for free-text where it is actually needed. Route by `practice_mode` and item structure:
+
+| Tier | Grader | Modes |
+| --- | --- | --- |
+| 1. Exact-match | Local | `cloze` with single canonical fill, `recognition`, `multiple_choice`, `dictation`, `cued_recall` with explicit short canonical answer |
+| 2. Rubric-template | Local | `short_answer` with structured `expected_answer` (e.g. enumerable key-terms), `vocabulary`, `formula` items with a normalized canonical form |
+| 3. Embedding-similarity | Local | `short_answer` factual items where the rubric has no enumerable criteria; flag below `similarity_threshold` as `pending_review` for tier-4 escalation |
+| 4. LLM rubric-grader | Codex | `explain_from_memory`, `teach_back`, `derivation_reconstruction`, `proof_reconstruction`, `transfer`, `near_transfer`, `far_transfer`, `error_diagnosis`, `misconception_repair`, `contrastive_discrimination`, free-text `short_answer` with no normalizable answer, any item flagged `high_stakes_canonical_item` |
+
+Tiers 1–3 are local-only, deterministic, sub-100ms, and **work in degraded offline mode**. Tier 4 requires Codex; offline it routes to self-grade.
+
+Tier-2 rubric templates are domain-shipped (e.g. `rubrics/short_answer.yaml`) and operate on normalized text:
+
+```yaml
+# rubrics/short_answer.yaml (fragment)
+normalize:
+  - lowercase
+  - strip_punctuation
+  - collapse_whitespace
+  - latex_canonicalize
+match:
+  type: key_terms_subset      # also: exact | regex | numeric_with_tolerance
+  required_terms_from: expected_answer.key_terms
+  fatal_omissions_from: expected_answer.must_mention
+```
+
+The Practice Item's `expected_answer` can be a string (tier 3/4) or a structured block (tier 2):
+
+```yaml
+expected_answer:
+  key_terms: [modified risk set, cumulative incidence, competing risks]
+  must_mention: [competing risks]
+  forbidden: [same as cause-specific]
+```
+
+When a Practice Item declares both a structured expected_answer and an inline grading_rubric, the inline rubric wins for tier 4. The structured expected_answer is used by tiers 2–3 and as evidence in the tier-4 prompt.
+
+## Grading evidence and provenance
+
+Every grade — local or LLM — produces a `grading_evidence` row with `agent_run_id` (LLM) or `local_grader_id` (local) and `grader_tier` (1–4). Local graders are versioned alongside `algorithm_version`; their version is recorded so replay can re-grade if needed.
+
 ## Pipeline
 
 ```text
 Learner answer
    ↓
-Rubric resolved (item-level rubric → default rubric for practice_mode × knowledge_type)
+Tier router (mode + item shape → tier 1/2/3/4)
    ↓
-rubric-grader role (structured JSON output)
+Tier 1–3 local OR Tier 4 LLM rubric-grader
    ↓
 Validation (grade in 0-4, criterion ids match rubric, fatal-error caps respected)
    ↓
 Mastery update (Layer 2 EMA; skipped until confirmation if manual review is triggered)
    ↓
-Feedback + scheduling (FSRS rating + next-action mode)
+Surprise logging + feedback + scheduling (FSRS rating + next-action mode)
 ```
 
 ## Rubric structure
@@ -1335,7 +1879,7 @@ Shipped in `rubrics/` and used when an item has no inline rubric. Suggested defa
 
 | Mode family | Rubric focus |
 | --- | --- |
-| `short_answer`, `definition`, `cloze` | Key terms present; precision; no misconception |
+| `short_answer`, `retrieval`, `cloze` for `knowledge_type=definition` | Key terms present; precision; no misconception |
 | `explain_from_memory`, `teach_back` | Correct concept; structure (premise → mechanism → consequence); examples; absence of misconception |
 | `derivation_reconstruction`, `proof_reconstruction` | Subgoal coverage; justification of each step; correct invariants; no fatal logical gap |
 | `transfer`, `near_transfer`, `far_transfer` | Correct concept selection; correct application to novel context; handling of edge cases; avoidance of surface-form overfit |
@@ -1367,6 +1911,34 @@ expected:
 
 `learnloop eval grading` runs the current rubric-grader prompt/model against these fixtures and reports score agreement, required error flags, forbidden error flags, and confidence calibration. This is a development and prompt-maintenance tool; it should never update learner mastery.
 
+## Scheduler golden tests
+
+Because scheduling controls what the learner sees next, queue generation must also be regression-tested locally. Each scheduler golden fixture defines a small vault state and expected top-N queue with explanation components.
+
+```yaml
+id: scheduler_surprise_followup_001
+domain: math_stats_ml
+given:
+  active_goal: fine_gray_research_understanding
+  attempts_fixture: attempts.yaml
+  content_fixture: content/
+  config_overrides:
+    scheduler.elicitation_policy: greedy_eig
+expected:
+  top_queue:
+    - practice_item_id: pi_fg_hazard_probability_contrast_001
+      selected_mode: contrastive_discrimination
+      must_include_reasons:
+        - negative_surprise
+        - active_goal_importance
+    - practice_item_id: pi_fg_subhazard_define_001
+      selected_mode: retrieval
+  forbidden:
+    - practice_item_id: pi_unrelated_linear_algebra_001
+```
+
+`learnloop eval scheduler` rebuilds the queue from the fixture, compares top-N item ids, selected modes, and required explanation components, and exits non-zero on drift. It should run without Codex/model calls.
+
 ## Attempt-type handling
 
 - `independent_attempt` — graded normally; full mastery update.
@@ -1375,7 +1947,7 @@ expected:
 - `guided_walkthrough` — not graded as independent mastery; mastery update suppressed; schedules `reconstruction_after_walkthrough`.
 - `reconstruction_after_walkthrough` — graded normally; this is where mastery updates resume.
 - `skip` — no update beyond a small priority penalty next time.
-- `self_report` — learner self-grade; only updates `calibration` dimension.
+- `self_report` — learner self-grade; only updates the `calibration` axis.
 
 ## Manual review triggers
 
@@ -1441,7 +2013,11 @@ If `[learning].disguised_retest_after_resolution = true`, resolved misconception
 
 # 16. Scheduler design
 
-The scheduler is three layers stacked. **Always store raw attempts forever** so the mastery model is replaceable without re-collecting data.
+The scheduler is four layers stacked. **Always store raw attempts forever** so the mastery and uncertainty models are replaceable without re-collecting data.
+
+FSRS answers "when is this concrete Practice Item due?" The object/concept mastery model answers "what does the learner appear to understand?" The uncertainty-aware elicitation layer answers "which next question would most reduce uncertainty about the learner's likely future answers on active goals?"
+
+The core learner model uses five broad mastery axes that are designed to be closer to a basis for scheduling and UI: `memory`, `understanding`, `execution`, `generalization`, and `calibration`. They are still not guaranteed to be mathematically independent, but they are less redundant than raw facets like recall/schema/explanation. Lower-level evidence facets feed these axes.
 
 ## Layer 1 — Item memory (FSRS, via `py-fsrs`)
 
@@ -1470,16 +2046,28 @@ The 0-4 rubric grade is mapped through:
 GRADE_TO_SCORE = {0: 0.00, 1: 0.25, 2: 0.55, 3: 0.80, 4: 1.00}
 ```
 
-## Layer 2 — Learning Object mastery (multi-dimensional, EMA)
+If `[scheduler].surprise_modulates_fsrs = true`, the base FSRS result is adjusted after surprise is recorded:
+
+```python
+def surprise_interval_factor(bayesian_surprise, direction):
+    if direction == "negative":
+        return max(0.40, 1.0 - 0.20 * bayesian_surprise)
+    if direction == "positive":
+        return min(1.25, 1.0 + 0.08 * bayesian_surprise)
+    return 1.0
+```
+
+Negative surprise can also cap an apparent `easy` rating at `good` or `hard` when the observed error type conflicts with the score. Positive surprise lengthens intervals conservatively; repeated evidence should matter more than a single unexpectedly good answer.
+
+## Layer 2 — Learning Object mastery (axis + facet model)
 
 Per Learning Object, in `state.sqlite`:
 
 ```text
-recall, recognition, schema, procedure, transfer,
-fluency, explanation, discrimination, calibration
+memory, understanding, execution, generalization, calibration
 ```
 
-Each dimension is updated independently from attempts that target it. The update rule is **difficulty-aware, error-aware EMA**:
+Each axis has its own stored estimate. Evidence facets are lower-level observations that update one or more axes through `mastery_weights`, domain evidence mappings, and error-impact maps. The base update rule is **difficulty-aware, error-aware EMA**:
 
 ```python
 def update_mastery(prev, score, item_difficulty, dim_weight, grader_confidence, alpha=0.2):
@@ -1492,55 +2080,67 @@ def update_mastery(prev, score, item_difficulty, dim_weight, grader_confidence, 
     return min(1.0, max(0.0, prev + effective_alpha * (gain - prev)))
 ```
 
-`dim_weight` is the practice item's `mastery_weights[dim]`. `grader_confidence` can soften updates for accepted automatic grades, but grades below `grader_confidence_floor` are held for manual review and do not update mastery until confirmed.
+`dim_weight` is the practice item's `mastery_weights[axis]`. `grader_confidence` can soften updates for accepted automatic grades, but grades below `grader_confidence_floor` are held for manual review and do not update mastery until confirmed.
 
-### Mode → dimension default map
+### Axes and evidence facets
 
-When a Practice Item omits `target_mastery_dimensions`, fall back to:
+| Core axis | Default evidence facets | Meaning |
+| --- | --- | --- |
+| `memory` | `recall`, `recognition` | Can the learner retrieve or recognize the target? |
+| `understanding` | `schema`, `explanation` | Can the learner organize, explain, and relate the idea? |
+| `execution` | `procedure`, `fluency` | Can the learner perform the skill accurately and smoothly? |
+| `generalization` | `transfer`, `discrimination` | Can the learner apply it in new contexts and distinguish confusable cases? |
+| `calibration` | `metacognitive_accuracy` | Does confidence match actual performance and uncertainty? |
 
-| `practice_mode`          | Updates                                |
-| ------------------------ | -------------------------------------- |
-| `retrieval`, `cloze`, `cued_recall`, `free_recall` | recall |
-| `recognition`, `multiple_choice` | recognition |
-| `short_answer`           | recall + schema |
-| `worked_example`, `annotated_example` | schema, procedure |
-| `completion_problem`     | procedure, schema |
-| `procedure_execution`    | procedure |
-| `interleaving`, `contrastive_discrimination` | discrimination, schema |
-| `transfer`, `near_transfer`, `far_transfer` | transfer, schema |
-| `explain_from_memory`, `teach_back` | explanation, schema, recall |
-| `derivation_reconstruction`, `proof_reconstruction` | schema, procedure |
-| `timed_drill`, `fluency_drill` | fluency, procedure |
-| `error_diagnosis`, `misconception_repair` | schema, transfer |
-| `self_assessment`        | calibration |
+Domain modules may add facets such as `conversation_repair`, `pronunciation_accuracy`, `aim_smoothness`, `projectile_lead_model`, or `hidden_state_inference`, but they must map those facets into one or more core axes.
 
-### Error-aware cross-dimension updates
+### Mode → axis/facet default map
 
-An error can damage dimensions the item didn't explicitly target. The taxonomy file owns the impact map:
+When a Practice Item omits `target_mastery_axes` and `evidence_facets`, fall back to:
+
+| `practice_mode`          | Core axes | Evidence facets |
+| ------------------------ | --------- | --------------- |
+| `retrieval`, `cloze`, `cued_recall`, `free_recall` | memory | recall |
+| `recognition`, `multiple_choice` | memory | recognition |
+| `short_answer`           | memory, understanding | recall, schema |
+| `worked_example`, `annotated_example` | understanding, execution | schema, procedure |
+| `faded_worked_example` | execution, understanding | procedure, schema |
+| `completion_problem`     | execution, understanding | procedure, schema |
+| `procedure_execution`    | execution | procedure |
+| `interleaving`, `contrastive_discrimination` | generalization, understanding | discrimination, schema |
+| `transfer`, `near_transfer`, `far_transfer` | generalization, understanding | transfer, schema |
+| `explain_from_memory`, `teach_back` | understanding, memory | explanation, schema, recall |
+| `derivation_reconstruction`, `proof_reconstruction` | understanding, execution | schema, procedure |
+| `timed_drill`, `fluency_drill` | execution | fluency, procedure |
+| `error_diagnosis`, `misconception_repair` | understanding, generalization | schema, transfer |
+| `self_assessment`        | calibration | metacognitive_accuracy |
+
+### Error-aware cross-axis/facet updates
+
+An error can damage axes or facets the item didn't explicitly target. The taxonomy file owns the impact map:
 
 ```yaml
 # errors/error-taxonomy.yaml
 error_impacts:
   recall_failure:
-    recall: -0.25
+    memory: -0.25
   conceptual_error:
-    schema: -0.25
-    transfer: -0.10
+    understanding: -0.25
+    generalization: -0.10
   theorem_selection_error:
-    schema: -0.30
-    transfer: -0.20
+    understanding: -0.30
+    generalization: -0.20
   procedure_error:
-    procedure: -0.25
-    fluency: -0.05
+    execution: -0.25
   transfer_failure:
-    transfer: -0.30
-    schema: -0.10
+    generalization: -0.30
+    understanding: -0.10
   high_confidence_wrong:                    # misconception flag
-    schema: -0.20
+    understanding: -0.20
     calibration: -0.30
     # also: open repair_loop, append to errors/global-error-log.md
   fluency_issue:
-    fluency: -0.25
+    execution: -0.25
 ```
 
 `flag_high_confidence_wrong` triggers when `confidence >= 4` and `score < 0.30`: the item is treated as a misconception, not a recall miss. A repair-loop is scheduled (contrastive examples, then retest) and the error is logged.
@@ -1553,6 +2153,114 @@ Not just from `timed_drill`. Compute fluency from: `latency_vs_expected`, `hints
 
 Per Concept: prerequisite-weighted average of its Learning Objects' mastery. Used for the concept-graph view, weakness detection, and prerequisite-aware scheduling — not directly updated by attempts.
 
+## Layer 4 — Adaptive elicitation and Bayesian surprise
+
+Adaptive elicitation influences **every daily queue**, not only cold-start or diagnostic sessions. The goal is to improve the latent single-user learner profile while still respecting due reviews, readiness, repair loops, and active goals.
+
+The default target set is **active goals of learning and understanding** from `goals.yaml` (with `profile/goals.md` as the narrative companion), expanded through the concept graph into relevant Learning Objects, prerequisites, confusable concepts, unresolved error types, and active misconception LOs. The scheduler should not spend daily queue budget reducing uncertainty about dormant or irrelevant concepts unless the user asks for a diagnostic sweep.
+
+### Two policy variants
+
+LearnLoop uses two distinct elicitation policies, applied at different points in the loop:
+
+1. **Heuristic-bucket EIG (the workhorse, MVP).** A local, deterministic, model-free scorer used on every queue generation. It computes expected information gain from a parametric surrogate over learner state. This is **not** a faithful implementation of the predictive-LM elicitation literature (e.g. Hu et al., "Adaptive Elicitation of Latent Information Using Natural Language", 2025); it is a parametric stand-in inspired by that framing, tuned to LearnLoop's already-structured latent (FSRS state, five mastery axes, evidence facets, error-type propensities, misconception LOs, calibration). It runs sub-second, works offline, is reproducible under scheduler golden tests, and never calls the model.
+
+2. **Codex-simulator EIG, narrow path (MVP, gated).** When heuristic EIG plateaus on existing Practice Items for a high-priority belief — i.e. no current PI is informative enough about a specific active-goal uncertainty — LearnLoop asks Codex to propose 1–3 **ephemeral diagnostic items** designed to discriminate plausible learner states. The model is used as a question proposer informed by learner profile, recent attempts, and the target belief, not as a full predictive simulator over a large candidate pool. Generated items follow the ephemeral-items policy (§15.5) and are not promoted unless the learner says so. Requires Codex; disabled in degraded offline mode.
+
+The heuristic policy generates every queue; the simulator policy adds a handful of ephemeral diagnostics per session when (and only when) heuristic information gain is saturated on existing items.
+
+### Later: full predictive-LM elicitation
+
+A full predictive-LM elicitation pass — sample plausible learner answers to candidate questions, score by predicted-observation entropy reduction — is a **later** addition behind an explicit "deep diagnostic pass" command, with a hard latency and API-call budget. It is not in MVP because (a) LearnLoop already has a strongly parametric latent that heuristic EIG can exploit, (b) per-queue simulator calls don't fit the TUI-first latency target, (c) it breaks scheduler golden test determinism, and (d) it requires Codex for every queue generation, breaking the degraded offline contract.
+
+MCTS/lookahead remains a later policy after enough local attempts exist (`mcts_min_attempts`).
+
+For each candidate Practice Item `q`, LearnLoop estimates a predictive distribution over the joint observation:
+
+```text
+o = (
+  score_bucket,      # e.g. again / hard / good / easy or 0-4 rubric bucket
+  error_type,        # taxonomy id or null
+  confidence_bucket, # learner confidence
+  latency_bucket,    # relative to expected time
+  hints_bucket       # none / low / high
+)
+```
+
+Default deterministic buckets:
+
+| Field | Buckets |
+| --- | --- |
+| `score_bucket` | `again` < 0.30, `hard` < 0.65, `good` < 0.90, `easy` otherwise |
+| `confidence_bucket` | `low` = 1-2, `medium` = 3, `high` = 4-5 |
+| `latency_bucket` | `fast` <= 0.5x expected, `normal` <= 1.5x, `slow` > 1.5x, `unknown` if no expected time |
+| `hints_bucket` | `none` = 0, `low` = 1, `high` >= 2 |
+
+The local single-user belief state `z` includes Learning Object mastery means, per-axis and selected per-facet variance, error-type propensities, misconception states, and calibration. MVP uses a transparent local surrogate model from current mastery, item difficulty, recent attempts, error impacts, confidence, latency, and hints. No cross-user model or hosted profile is assumed.
+
+Heuristic expected information gain (the MVP scoring function):
+
+```text
+EIG(q) = E_o [ KL( P(z | o, q) || P(z) ) ]
+       = H(z) - E_o[H(z | o, q)]
+```
+
+Both `P(o | z, q)` and the posterior update `P(z | o, q)` are computed from the surrogate, not from a language model. The expectation `E_o` ranges over the discrete joint buckets defined above. MVP scores each candidate question independently and picks high-value items inside the normal queue (greedy). The scorer must be deterministic, reproducible, and runnable without Codex.
+
+Codex-simulator EIG (ephemeral diagnostic generation) does not score the existing PI pool; it proposes new items targeted at the highest-variance axis on a high-priority active-goal LO. The proposer prompt receives: the LO and its current belief means/variances, the recent attempt history for that LO, and a short list of plausible learner states to discriminate. The result is 1–3 ephemeral PIs added to the session, never to the permanent pool unless the learner promotes them.
+
+After an attempt, LearnLoop records surprise:
+
+```text
+predictive_surprise = -log P(observed score, error_type, confidence, latency, hints | prior state, q)
+bayesian_surprise   = KL( posterior learner-state belief || prior learner-state belief )
+```
+
+Predictive surprise means "the observed answer was unlikely." Bayesian surprise means "the learner model changed." They are related but not interchangeable. Because LearnLoop classifies error types, a low score caused by `recall_failure` and the same low score caused by `conceptual_error` can produce different posterior updates, different repair actions, and different FSRS modulation.
+
+Bayesian surprise affects both scheduling and diagnosis:
+
+- **Negative surprise**: the learner performs much worse than expected, shows an unexpected error type, uses many hints, or has high confidence while wrong. FSRS intervals are shortened or rating is capped, the related LO/error belief uncertainty increases, and a diagnostic or repair follow-up can be inserted.
+- **Positive surprise**: the learner performs much better than expected with low hints and calibrated confidence. Mastery uncertainty shrinks and the FSRS interval may be modestly lengthened, but not beyond conservative bounds until repeated evidence confirms it.
+- **High surprise with low grader confidence**: store the evidence, skip automatic mastery/FSRS modulation, and ask for manual review.
+
+The FSRS update remains grounded in the observed score. Surprise only modulates the resulting interval within configured bounds so one unusual answer cannot wildly distort long-term scheduling.
+
+### Belief staleness
+
+Mastery should become less certain when evidence is old. Staleness does not automatically lower mastery; it increases variance and can make a review or diagnostic question more valuable.
+
+```python
+def apply_staleness(mean, variance, days_since_evidence, stale_after_days):
+    if days_since_evidence <= stale_after_days:
+        return mean, variance
+    age = days_since_evidence - stale_after_days
+    variance = min(1.0, variance + 0.01 * age)
+    return mean, variance
+```
+
+Default `stale_after_days` can vary by axis and domain: memory may stale quickly, understanding more slowly, and esports VOD-read beliefs may stale after patches, role changes, or long gaps in play.
+
+### Replayable learner model
+
+`learnloop replay-model` rebuilds all derived learner-state tables by **re-running the current algorithm version** over raw attempts, observation events, and current content hashes. This is the canonical migration path when mastery, surprise, or scheduler formulas change.
+
+**Replay semantics are fixed: drop-and-recompute with version-tagged pre-replay snapshot.**
+
+Replay must:
+
+1. snapshot current derived tables into `replay_snapshots` rows tagged with the **old** algorithm version (so the previous learner-state can be inspected or restored if needed),
+2. clear and recompute derived learner-state tables in a single transaction using the **current** algorithm version,
+3. write a `model_replay_runs` row with old → new algorithm version, snapshot id, row-change summary, and warnings,
+4. emit a **replay diff view** — the top-N Learning Objects, Practice Items, and beliefs whose mastery or variance moved most, with the magnitude and direction of the change, surfaced in the TUI and via `learnloop replay-model --diff`,
+5. leave raw attempts, observations, and content files untouched.
+
+Restoring a snapshot is supported via `learnloop replay-model --restore <snapshot_id>`: it copies the snapshotted derived tables back over the live ones and writes a new `model_replay_runs` row with `status = restored`. Raw events are never touched.
+
+The "carry old derived state forward and switch forward only" alternative is **not** supported. Algorithm changes always re-derive from raw events.
+
+Algorithm versions follow semantic versioning. `algorithm_version` is recorded on every `learner_state_beliefs` row, `learning_object_mastery` row, `attempt_surprise` row, and `scheduler_explanations` row written, so derived rows always know which formula version produced them.
+
 ## SQLite tables (canonical)
 
 ```sql
@@ -1564,7 +2272,8 @@ CREATE TABLE practice_attempts (
   concept TEXT,
   practice_mode TEXT,
   attempt_type TEXT,                 -- independent_attempt | hinted_attempt | dont_know | ...
-  target_mastery_dimensions TEXT,    -- JSON array
+  target_mastery_axes TEXT,          -- JSON array
+  evidence_facets TEXT,              -- JSON array
   rubric_score INTEGER,              -- 0-4
   correctness REAL,                  -- GRADE_TO_SCORE[rubric_score]
   confidence INTEGER,                -- 1-5
@@ -1581,7 +2290,9 @@ CREATE TABLE grading_evidence (
   criterion_id TEXT,
   points_awarded REAL,
   notes TEXT,
-  agent_run_id TEXT,
+  agent_run_id TEXT,                 -- set when grader_tier = 4 (LLM); null for local tiers
+  local_grader_id TEXT,              -- set when grader_tier in (1,2,3); null for LLM
+  grader_tier INTEGER,               -- 1 = exact-match, 2 = rubric-template, 3 = embedding-similarity, 4 = LLM
   PRIMARY KEY (attempt_id, criterion_id)
 );
 
@@ -1598,9 +2309,11 @@ CREATE TABLE practice_item_state (
 
 CREATE TABLE learning_object_mastery (
   learning_object_id TEXT PRIMARY KEY,
-  recall REAL, recognition REAL, schema REAL, procedure REAL,
-  transfer REAL, fluency REAL, explanation REAL,
-  discrimination REAL, calibration REAL,
+  memory REAL,
+  understanding REAL,
+  execution REAL,
+  generalization REAL,
+  calibration REAL,
   updated_at TEXT
 );
 
@@ -1608,9 +2321,26 @@ CREATE TABLE concept_mastery (
   subject TEXT,
   concept TEXT,
   aggregate REAL,
-  weakest_dimension TEXT,
+  weakest_axis TEXT,
   updated_at TEXT,
   PRIMARY KEY (subject, concept)
+);
+
+CREATE TABLE learner_state_beliefs (
+  id TEXT PRIMARY KEY,
+  subject TEXT,
+  scope_type TEXT,                   -- learning_object | concept | error_type | misconception | calibration
+  scope_id TEXT,
+  belief_key TEXT,                    -- core axis, evidence facet, or error propensity
+  mean REAL,
+  variance REAL,
+  evidence_count INTEGER,
+  last_surprise REAL,
+  last_evidence_at TEXT,
+  stale_after_days INTEGER,
+  algorithm_version TEXT,
+  updated_at TEXT,
+  UNIQUE(subject, scope_type, scope_id, belief_key)
 );
 
 CREATE TABLE error_events (
@@ -1644,7 +2374,12 @@ CREATE TABLE ephemeral_session_items (
   learning_object_id TEXT,
   session_id TEXT,
   prompt TEXT,
+  origin TEXT,                       -- learner_requested | simulator_eig | walkthrough_followup
+  target_belief_json TEXT,           -- which belief/uncertainty this item was meant to reduce (simulator origin)
   used_at TEXT,
+  info_gain_observed REAL,           -- variance drop on the target belief after the attempt
+  promotion_recommendation TEXT,     -- promote | skip | revise (filled at sweep time)
+  promotion_rationale TEXT,          -- one-line why (cached at sweep time)
   promoted_to_practice_item_id TEXT  -- null unless learner promotes
 );
 
@@ -1654,8 +2389,32 @@ CREATE TABLE sessions (
   ended_at TEXT,
   energy TEXT,
   sleep_quality REAL,
-  planned_minutes INTEGER,
+  available_minutes INTEGER,
   notes_md_path TEXT
+);
+
+CREATE TABLE observation_templates (
+  id TEXT PRIMARY KEY,
+  domain TEXT,
+  version TEXT,
+  title TEXT,
+  template_yaml TEXT,
+  active INTEGER,
+  created_at TEXT
+);
+
+CREATE TABLE observation_events (
+  id TEXT PRIMARY KEY,
+  template_id TEXT,
+  subject TEXT,
+  session_id TEXT,
+  related_learning_object_id TEXT,
+  related_practice_item_id TEXT,
+  media_ref TEXT,
+  response_json TEXT,
+  emitted_attempt_id TEXT,
+  template_version TEXT,
+  created_at TEXT
 );
 
 CREATE TABLE content_events (
@@ -1716,7 +2475,66 @@ CREATE TABLE scheduler_explanations (
   priority REAL,
   components_json TEXT,
   readiness_factor REAL,
+  expected_information_gain REAL,
+  expected_surprise REAL,
+  target_scope_json TEXT,
   plain_english_json TEXT,
+  created_at TEXT
+);
+
+CREATE TABLE model_replay_runs (
+  id TEXT PRIMARY KEY,
+  old_algorithm_version TEXT,
+  new_algorithm_version TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  status TEXT,                       -- completed | failed | cancelled | restored
+  input_event_count INTEGER,
+  changed_rows_json TEXT,            -- top-N diff: largest mastery/variance deltas
+  warnings_json TEXT,
+  snapshot_id TEXT                   -- references replay_snapshots(id)
+);
+
+CREATE TABLE replay_snapshots (
+  id TEXT PRIMARY KEY,
+  algorithm_version TEXT,            -- the version active when the snapshot was taken
+  created_at TEXT,
+  learning_object_mastery_json TEXT, -- compact serialized derived-table snapshot
+  learner_state_beliefs_json TEXT,
+  practice_item_state_json TEXT,
+  attempt_surprise_json TEXT,
+  scheduler_explanations_json TEXT,
+  note TEXT                          -- e.g. "pre-replay for v3 → v4"
+);
+
+CREATE TABLE elicitation_events (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  selected_practice_item_id TEXT,
+  target_scope_json TEXT,
+  policy TEXT,                       -- heuristic_greedy_eig | simulator_ephemerals | deep_diagnostic | mcts
+  candidate_scores_json TEXT,        -- includes priority, EIG, uncertainty, readiness, load
+  entropy_before REAL,
+  expected_information_gain REAL,
+  expected_surprise REAL,
+  selected_reason TEXT,
+  created_at TEXT
+);
+
+CREATE TABLE attempt_surprise (
+  attempt_id TEXT PRIMARY KEY,
+  predicted_score_dist_json TEXT,
+  predicted_error_type_dist_json TEXT,
+  predicted_confidence_dist_json TEXT,
+  predicted_latency_dist_json TEXT,
+  predicted_hints_dist_json TEXT,
+  observed_joint_bucket_json TEXT,
+  predictive_surprise REAL,
+  bayesian_surprise REAL,
+  surprise_direction TEXT,            -- positive | negative | mixed
+  fsrs_interval_factor REAL,
+  posterior_delta_json TEXT,
+  triggered_actions_json TEXT,
   created_at TEXT
 );
 
@@ -1730,6 +2548,17 @@ CREATE TABLE session_checkpoints (
   updated_at TEXT
 );
 
+CREATE TABLE embeddings (
+  entity_type TEXT,                  -- concept | learning_object | practice_item | note_paragraph
+  entity_id TEXT,
+  content_hash TEXT,                 -- recompute when this changes
+  model TEXT,
+  dim INTEGER,
+  vector BLOB,                       -- float32 little-endian, length = dim
+  updated_at TEXT,
+  PRIMARY KEY (entity_type, entity_id)
+);
+
 CREATE TABLE schema_migrations (
   version INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -1739,11 +2568,14 @@ CREATE TABLE schema_migrations (
 CREATE INDEX idx_attempts_item_time ON practice_attempts(practice_item_id, created_at);
 CREATE INDEX idx_attempts_lo_time ON practice_attempts(learning_object_id, created_at);
 CREATE INDEX idx_item_state_due ON practice_item_state(active, due_at);
+CREATE INDEX idx_learner_state_beliefs_scope ON learner_state_beliefs(subject, scope_type, scope_id);
 CREATE INDEX idx_error_events_status ON error_events(status, learning_object_id);
 CREATE INDEX idx_generated_items_review ON generated_items(review_status, generated_at);
+CREATE INDEX idx_observation_events_subject ON observation_events(subject, created_at);
 CREATE INDEX idx_content_events_recent ON content_events(created_at, event_type);
 CREATE INDEX idx_content_events_batch ON content_events(change_batch_id);
 CREATE INDEX idx_scheduler_explanations_session ON scheduler_explanations(session_id, practice_item_id);
+CREATE INDEX idx_elicitation_events_session ON elicitation_events(session_id, selected_practice_item_id);
 ```
 
 ## Storage invariants
@@ -1751,7 +2583,12 @@ CREATE INDEX idx_scheduler_explanations_session ON scheduler_explanations(sessio
 - All timestamps are stored as ISO-8601 UTC strings. The TUI renders them in `[student].timezone`.
 - `state.sqlite` enables foreign keys where both sides are SQL-owned. YAML-owned ids are validated by the storage layer before commits.
 - Every schema change is a numbered migration recorded in `schema_migrations`.
-- Attempt logging is atomic: `practice_attempts`, `grading_evidence`, `practice_item_state`, `learning_object_mastery`, `error_events`, `generated_items`, and `content_events` commit or roll back together.
+- Attempt logging is atomic: `practice_attempts`, `grading_evidence`, `practice_item_state`, `learning_object_mastery`, `learner_state_beliefs`, `attempt_surprise`, `error_events`, `generated_items`, and `content_events` commit or roll back together.
+- Surprise is computed from predictions captured **before** the attempt updates mastery. The prior prediction, observed joint bucket, posterior delta, and any FSRS interval factor are stored so scheduler decisions are auditable.
+- Elicitation uses only this vault's local learner data in MVP. Any future cross-user or meta-trained model must be opt-in and represented in `agent_runs` / provenance metadata.
+- Derived learner-state tables (`practice_item_state`, `learning_object_mastery`, `concept_mastery`, `learner_state_beliefs`, `attempt_surprise`, cached scheduler explanations) must be replayable from raw attempts, observations, content state, and algorithm version.
+- Observation templates are versioned. Observation events keep the template id/version and raw response JSON so future algorithms can reinterpret the evidence.
+- Beliefs can go stale. `last_evidence_at` and `stale_after_days` let the scheduler increase uncertainty over time without inventing new failures.
 - Related writes are grouped under `change_batches`. Any AI-generated or import-generated content must have a `change_batch_id`.
 - Rollback creates a new `change_batches` row with `reason = "rollback"` and links it to the original batch. It should deactivate or restore, not silently erase history.
 - YAML writes use atomic temp-file replacement. The storage layer computes and stores `content_hash` after a successful write.
@@ -1763,35 +2600,40 @@ CREATE INDEX idx_scheduler_explanations_session ON scheduler_explanations(sessio
 
 ## Attempt → updates
 
-One attempt updates three things atomically:
+One attempt updates the item state, mastery state, learner-state beliefs, surprise record, and error model atomically:
 
 ```text
 attempt (practice_item_id=pi_x, learning_object_id=lo_x, score=0.45, confidence=4,
          hints=2, error_type=hazard_probability_confusion)
    ↓
 1. practice_item_state[pi_x]: FSRS update via score_to_fsrs_rating(score)
-2. learning_object_mastery[lo_x]: EMA update for each target dimension,
-                                  then apply error_impacts cross-dimension corrections
-3. error_events: append; if high_confidence_wrong → open repair_loop
+2. learning_object_mastery[lo_x]: EMA update for each target axis,
+                                  then apply error_impacts cross-axis corrections
+3. learner_state_beliefs: update means/uncertainty for target axes, evidence facets, and error propensities
+4. attempt_surprise: compare predicted vs observed joint evidence and store Bayesian surprise
+5. practice_item_state[pi_x]: modulate FSRS interval within configured bounds if surprise is high
+6. error_events: append; if high_confidence_wrong or negative surprise → open repair_loop / diagnostic follow-up
 ```
 
 Then `concept_mastery` is recomputed lazily on read or on `exports.refresh`.
 
 ## Next-action selection
 
-A two-stage policy. First, the per-item priority score chooses **which** Practice Items to surface. Then a rule layer picks **what mode** the next item should be in.
+A two-stage policy. First, the per-item priority score chooses **which** Practice Items to surface. Then a rule layer picks **what mode** the next item should be in. Adaptive elicitation is part of the priority score for every daily queue, with active goals as the default uncertainty-reduction target.
 
 ### Priority score (queue ordering)
 
 ```text
 priority =
-  0.30 * forgetting_risk            # 1 - retrievability
-+ 0.20 * prerequisite_importance    # graph centrality + downstream blocked LOs
-+ 0.15 * recent_error_severity      # boost items in same LO/concept as recent errors
-+ 0.15 * transfer_gap               # high recall but low transfer
-+ 0.10 * deadline_pressure          # from profile/goals.md
-+ 0.10 * learner_interest
-- 0.20 * cognitive_overload_risk    # session length consumed, novelty already added
+  0.25 * forgetting_risk              # 1 - retrievability
++ 0.15 * active_goal_importance       # from profile/goals.md + concept graph
++ 0.15 * expected_information_gain    # uncertainty reduction over active goals
++ 0.10 * error_type_entropy           # uncertainty over likely error mode
++ 0.10 * recent_error_severity        # boost items in same LO/concept as recent errors
++ 0.10 * transfer_gap                 # high recall but low transfer
++ 0.05 * deadline_pressure            # from profile/goals.md
++ 0.05 * learner_interest
+- 0.15 * cognitive_overload_risk      # session length consumed, novelty already added
 ```
 
 ### Scheduler explanations
@@ -1805,7 +2647,9 @@ Every scheduled Practice Item should carry an explanation object. This is not ju
   "priority": 0.71,
   "components": {
     "forgetting_risk": 0.24,
-    "prerequisite_importance": 0.08,
+    "active_goal_importance": 0.08,
+    "expected_information_gain": 0.13,
+    "error_type_entropy": 0.09,
     "recent_error_severity": 0.12,
     "transfer_gap": 0.15,
     "deadline_pressure": 0.02,
@@ -1813,8 +2657,14 @@ Every scheduled Practice Item should carry an explanation object. This is not ju
     "cognitive_overload_risk": -0.04
   },
   "readiness_factor": 1.0,
+  "target_scope": {
+    "type": "active_goals",
+    "goal_ids": ["fine_gray_research_understanding"]
+  },
   "plain_english": [
     "This item is due today.",
+    "It would reduce uncertainty about an active goal.",
+    "The model is uncertain whether the likely error is recall or schema.",
     "Recall is strong but transfer is weak.",
     "A related error appeared in the last session."
   ]
@@ -1847,7 +2697,7 @@ def readiness_factor(mode: str, energy: str, sleep: float) -> float:
     return base
 ```
 
-`readiness_factor` multiplies the candidate item's priority score before queue ordering. New material is gated more aggressively than review. If `available_minutes < 20`, the queue collapses to warm-up retrieval only and skips the deep-work block entirely.
+`readiness_factor` multiplies the candidate item's priority score before queue ordering. New material is gated more aggressively than review. When `available_minutes < 20` (or the user explicitly picks `short` focus pattern), the daily loop switches to **short-session mode** (§10): the queue collapses to warm-up retrieval plus one optional misconception-repair drill, the deep-work / weakness-repair / transfer blocks are skipped entirely, ephemeral diagnostic generation is suppressed, and surprise-driven diagnostic-followup interruptions are suppressed (no time for a detour). FSRS and mastery still update normally on every attempt logged.
 
 ### Cold-start curriculum
 
@@ -1855,39 +2705,76 @@ For a subject with zero attempts, the scheduler falls back to:
 
 1. **Difficulty prior + prerequisite order** if Learning Objects are seeded (e.g. from canonical-source ingestion). Items at the leaves of the prerequisite DAG come first.
 2. **Diagnostic mode** if requested (`learnloop today --diagnostic`): a 5-10 minute probe of likely prerequisite LOs (short_answer + recognition) seeds initial mastery values that subsequent sessions refine.
+3. **Greedy elicitation over active goals** once the first few items exist: prefer questions that distinguish between plausible learner states, such as recall failure vs schema confusion, while staying within the session's readiness budget.
 
-Cold-start mastery defaults to `0.5` across dimensions and is dampened heavily (`ema_alpha * 0.5`) for the first 5 attempts on each LO.
+Cold-start mastery defaults to `0.5` across axes and is dampened heavily (`ema_alpha * 0.5`) for the first 5 attempts on each LO.
 
 ### Mode selection (after item is chosen)
 
 ```python
-def choose_next_action(lo_mastery, last_attempt, repair_loop_active):
+def choose_next_action(lo_mastery, last_attempt, repair_loop_active, surprise_threshold):
     if repair_loop_active:
         return "misconception_repair"
-    if lo_mastery["schema"] < 0.4 and lo_mastery["procedure"] < 0.5:
-        return "worked_example_completion"
+    if last_attempt and last_attempt.get("bayesian_surprise", 0) > surprise_threshold and last_attempt.get("surprise_direction") == "negative":
+        return "error_diagnosis"
+    if lo_mastery["understanding"] < 0.4 and lo_mastery["execution"] < 0.5:
+        return "completion_problem"
     if last_attempt and last_attempt["error_type"] == "theorem_selection_error":
         return "contrastive_discrimination"
     if last_attempt and last_attempt["score"] < 0.5 and last_attempt["hints_used"] >= 2:
-        return "walkthrough"  # then schedule reconstruction_after_walkthrough next time
-    if lo_mastery["recall"] > 0.8 and lo_mastery["transfer"] < 0.5:
+        return "walkthrough"  # begin faded-worked-example sequence; see "Fading worked-example sequence"
+    if last_attempt and last_attempt.get("attempt_type") == "dont_know":
+        return "walkthrough"
+    if lo_mastery["memory"] > 0.8 and lo_mastery["generalization"] < 0.5:
         return "transfer"
-    if lo_mastery["recall"] > 0.85 and lo_mastery["fluency"] < 0.5:
+    if lo_mastery["memory"] > 0.85 and lo_mastery["execution"] < 0.5:
         return "fluency_drill"
     return "retrieval"
 ```
 
+### Fading worked-example sequence
+
+When a learner triggers a `walkthrough` (after `dont_know` or repeated hints), the scheduler does **not** drop the learner straight back into `retrieval`. It enrolls them in a short fading sequence that gradually transfers cognitive load back to the learner:
+
+```text
+walkthrough                       — full guided solution; mastery update suppressed
+   ↓ next session (or same session if energy permits)
+faded_worked_example              — same problem with ~50% of steps elided for the learner
+   ↓ next session
+completion_problem                — only the final answer/derivation step is left to the learner
+   ↓ next session
+reconstruction_after_walkthrough  — full independent attempt; mastery updates resume
+```
+
+The sequence is tracked as a per-LO state machine and persists across sessions until the learner reaches `reconstruction_after_walkthrough` successfully (or skips out). The `walkthrough` itself produces a generated `worked_example` content artifact (when Codex is available) or pulls the LO's existing `worked-examples/*.md` (when offline). Faded variants are Codex-generated by the `variant-generator` role with explicit "elide these step ids" instructions, or pulled from a pre-authored faded variant if one exists.
+
+Sequence state is recorded so it survives interruptions:
+
+```sql
+CREATE TABLE faded_sequence_state (
+  learning_object_id TEXT PRIMARY KEY,
+  current_stage TEXT,                -- walkthrough | faded | completion | reconstruction
+  started_at TEXT,
+  last_attempt_id TEXT,
+  failed_stage_count INTEGER,        -- regress to earlier stage if a stage fails repeatedly
+  updated_at TEXT
+);
+```
+
+If a stage fails (score < 0.5), the scheduler regresses one step (e.g. completion fail → faded). If a stage fails twice in a row, escalate back to `walkthrough`. This avoids the trap of repeating the same independent attempt against a stuck learner.
+
 ---
 
-# 16.5. Type enums
+# 16.5. Type enums and extensible registries
 
-Four enums govern the data model. Each answers a different question.
+Core enums govern the generic data model. Domain modules may register additional namespaced values for practice modes, knowledge types, evidence facets, error types, rubrics, and attempt schemas.
 
 ```text
 knowledge_type      — What kind of thing is being learned?
 practice_mode       — What activity tests or teaches it?
 attempt_type        — How independently did the learner engage?
-mastery_dimension   — What ability does an attempt provide evidence for?
+mastery_axis        — Which broad latent capability is updated?
+evidence_facet      — What lower-level signal provided the evidence?
 ```
 
 ## `KnowledgeType`
@@ -1906,6 +2793,8 @@ KnowledgeType = Literal[
     "metacognitive_strategy",
 ]
 ```
+
+`KnowledgeType` accepts either a core value or a namespaced domain value when a module needs a specialized type.
 
 | Type | Examples |
 | --- | --- |
@@ -1943,9 +2832,9 @@ KnowledgeType = Literal[
 ## `PracticeMode`
 
 ```python
-PracticeMode = Literal[
+CorePracticeMode = Literal[
     "read", "observe",
-    "worked_example", "annotated_example", "completion_problem",
+    "worked_example", "annotated_example", "faded_worked_example", "completion_problem",
     "retrieval", "cued_recall", "free_recall", "recognition",
     "cloze", "multiple_choice", "short_answer",
     "explain_from_memory", "teach_back",
@@ -1961,10 +2850,12 @@ PracticeMode = Literal[
     "pronunciation_drill", "shadowing", "copying",
     "motor_imitation", "external_focus_drill",
     "scenario_simulation",
-    "walkthrough", "hinted_attempt", "reconstruction_after_walkthrough",
+    "walkthrough",
     "self_assessment",
 ]
 ```
+
+`PracticeMode` accepts either a `CorePracticeMode` value or a namespaced domain value matching `<domain_id>:<mode_id>`, for example `language:conversation_turn` or `esports_overwatch:vod_review`.
 
 A short selection of "best for" mappings:
 
@@ -1972,6 +2863,7 @@ A short selection of "best for" mappings:
 | --- | --- |
 | `read`, `observe` | Initial exposure; motor/tactical reference |
 | `worked_example`, `annotated_example` | Novices; high-load material |
+| `faded_worked_example` | Step between worked example and full solving: some steps shown, others elided for the learner to fill in |
 | `completion_problem` | Transition from example to solving |
 | `retrieval`, `cloze`, `cued_recall`, `free_recall` | Durable retention |
 | `recognition`, `multiple_choice` | Low-friction checks, fragile knowledge |
@@ -1988,7 +2880,7 @@ A short selection of "best for" mappings:
 | `dictation`, `translation`, `sentence_production`, `pronunciation_drill`, `shadowing` | Language |
 | `copying`, `motor_imitation`, `external_focus_drill` | Motor learning |
 | `scenario_simulation` | Esports, clinical/legal/statistical cases |
-| `walkthrough`, `hinted_attempt`, `reconstruction_after_walkthrough` | "I don't know" / assisted retrieval |
+| `walkthrough` | Guided instruction after "I don't know"; independence is tracked by `attempt_type` |
 
 ## `AttemptType`
 
@@ -2008,10 +2900,24 @@ AttemptType = Literal[
 
 Mastery and FSRS updates depend on attempt type — see "Attempt-type handling" under Rubric-Based Grading.
 
-## `MasteryDimension`
+## `MasteryAxis`
 
 ```python
-MasteryDimension = Literal[
+MasteryAxis = Literal[
+    "memory",
+    "understanding",
+    "execution",
+    "generalization",
+    "calibration",
+]
+```
+
+These are the stable axes used by the scheduler, dashboards, and cross-domain learner-state model.
+
+## `EvidenceFacet`
+
+```python
+CoreEvidenceFacet = Literal[
     "recall",
     "recognition",
     "schema",
@@ -2020,11 +2926,13 @@ MasteryDimension = Literal[
     "fluency",
     "explanation",
     "discrimination",
-    "calibration",
+    "metacognitive_accuracy",
 ]
 ```
 
-Each Practice Item declares its `target_mastery_dimensions` and (optionally) `mastery_weights` so an attempt updates the right things. Defaults come from the mode → dimension table in §16.
+Domain modules may register additional evidence facets. Each facet must map into one or more core `MasteryAxis` values.
+
+Each Practice Item declares its `target_mastery_axes`, optional `evidence_facets`, and optional `mastery_weights` so an attempt updates the right learner-state estimates. Defaults come from the mode → axis/facet table in §16.
 
 ---
 
@@ -2046,7 +2954,7 @@ For development, onboarding, and screenshots:
 learnloop init --sample
 ```
 
-This creates a tiny demo vault with one math/stats subject, a few Learning Objects, Practice Items, attempts, errors, generated-item provenance, scheduler explanations, and grading goldens. The sample vault must be deterministic so tests and documentation can rely on it.
+This creates a tiny demo vault with one math/stats subject, a few Learning Objects, Practice Items, attempts, errors, learner-state beliefs, surprise records, generated-item provenance, scheduler explanations, and grading goldens. The sample vault must be deterministic so tests and documentation can rely on it.
 
 ## Add a subject
 
@@ -2158,11 +3066,12 @@ Python                       # 3.11+
 Typer                        # CLI
 Textual                      # TUI
 Rich                         # rendering primitives shared with Textual
-SQLite                       # state.sqlite via stdlib sqlite3
+SQLite                       # state.sqlite via stdlib sqlite3 (incl. vec embeddings as BLOBs)
 PyYAML                       # YAML round-trips for LO / PI / concept-graph
 Markdown                     # narrative memory (no parser dependency for writes)
 Pydantic                     # schemas for SDK outputs, YAML validation, service inputs
 py-fsrs                      # item-memory scheduling
+sentence-transformers        # local embeddings for concept merge, near-duplicate detection, related-LO lookup
 anyio + asyncio              # TUI/background tasks, SDK streaming, cancellation
 openai-codex SDK             # Codex app-server integration
 ```
@@ -2213,19 +3122,26 @@ learnloop/
     tui.py
 
     core/
-      scheduler.py            # priority score, mode selection, readiness modulation
-      mastery.py              # FSRS + EMA, error-impact maps, three-layer aggregation
+      scheduler.py            # priority score, mode selection, readiness + EIG integration
+      mastery.py              # FSRS + EMA, error-impact maps, mastery aggregation
+      beliefs.py              # single-user learner-state means/uncertainty
+      elicitation.py          # greedy EIG candidate scoring; MCTS later
+      surprise.py             # predictive/Bayesian surprise and FSRS modulation
       review.py
       attempts.py
+      observations.py          # structured observation templates and event emission
       errors.py
       sessions.py
       inbox.py                # provenance routing, accept/reject, ephemeral promotion
       changes.py              # change batches, rollback/deactivation
+      exports.py              # regenerate exports/* agent context snapshots
       import_export.py        # bundles, note imports, portable exports
       backup.py               # local backup create/list/restore
       doctor.py               # vault health checks and safe repairs
       grading.py              # rubric resolution, evidence storage, manual review triggers
       grading_eval.py         # local grading regression harness
+      scheduler_eval.py       # queue/explanation golden tests
+      replay.py               # recompute derived learner-state tables from raw events
       readiness.py            # session-start prompt and modulation factor
       lineage.py              # variant lineage walks (parent_item_id chain)
       misconception.py        # misconception LO lifecycle (promote, repair, resolve)
@@ -2236,6 +3152,7 @@ learnloop/
       markdown.py             # narrative memory round-trips
       yaml_store.py           # YAML round-trips with content-hash tracking
       vault.py                # vault layout discovery, global profile merge
+      embeddings.py           # local sentence-transformer index; concept-merge & related-LO queries
 
     codex/
       client.py               # CodexSdkClient (SDK lifecycle, threads, typed API)
@@ -2245,10 +3162,13 @@ learnloop/
       validators.py           # SDK output validation + proposal normalization
 
     domains/
+      registry.py              # load enabled domain modules and validate contracts
+      base.py                  # DomainModule protocol + shared specs
       math_stats_ml.py
       research_papers.py
       language.py
       motor_vod.py
+      esports_overwatch.py
       general.py
 
     templates/
@@ -2259,6 +3179,7 @@ learnloop/
       prompts/
       rubrics/
       evals/
+      observation-templates/
       sample-vault/
 ```
 
@@ -2277,10 +3198,29 @@ learnloop/
 * note ingestion
 * manual Learning Object and Practice Item creation
 * YAML practice items
+* domain registry with namespaced practice modes and evidence facets
+* domain capability flags
+* structured observation templates and `learnloop observe`
 * SQLite migrations and attempt logging
 * due queue computed from SQLite state
 * FSRS-style item scheduler using `py-fsrs`
+* single-user learner-state beliefs with per-axis and selected per-facet uncertainty
+* surprise logging over score + error type + confidence + latency + hints
+* belief staleness from `last_evidence_at`
+* surprise-modulated FSRS intervals within conservative bounds
+* heuristic-bucket greedy information-gain scoring in every daily queue, targeting active goals
+* Codex-simulator ephemeral diagnostic generation (gated on Codex availability)
 * scheduler explanation object and `learnloop why`
+* scheduler golden tests (`learnloop eval scheduler`)
+* replayable learner model (`learnloop replay-model`) with version-tagged snapshot + diff view
+* hint ladders on Practice Items (FSRS rating cap + mastery dampening from `hints_used`)
+* local embedding index for concept-merge suggestions and near-duplicate detection
+* tiered grader routing (exact-match / rubric-template / embedding-similarity / LLM)
+* fading worked-example sequence after `walkthrough` / `dont_know`
+* structured `goals.yaml` driving `active_goal_importance` and `deadline_pressure`
+* `learnloop forgetting-curve` per LO and per subject
+* end-of-session ephemeral promotion sweep with auto-rationale
+* short-session mode for sub-20-minute slots
 * TUI daily review
 * error tagging
 * recent auto-accepted content review view
@@ -2307,6 +3247,9 @@ learnloop/
 * automatic error repair drills
 * confidence calibration
 * review rescheduling
+* richer uncertainty dashboard
+* language conversation-test scaffolding
+* Overwatch-first esports/VOD review scaffolding
 
 ## Later
 
@@ -2318,6 +3261,8 @@ learnloop/
 * live language chat
 * automated video/audio analysis for VOD review
 * mobile companion
+* MCTS/lookahead elicitation after enough local attempt data exists
+* opt-in meta-learned elicitation models
 
 ---
 
@@ -2415,6 +3360,7 @@ You attempt.
 Codex diagnoses.
 The app logs errors.
 The scheduler retests you.
+Surprise updates the learner-state model.
 The concept graph updates.
 Your future sessions adapt.
 ```
@@ -2431,20 +3377,27 @@ Build in this order:
 1. Standalone Python package scaffold
 2. Vault layout, config loading, migrations
 3. Textual TUI shell and Today's Loop screen
-4. YAML Learning Object / Practice Item stores
-5. SQLite attempt logging + due queue
-6. FSRS + Learning Object mastery updates
-7. Scheduler explanations + `learnloop why`
-8. Error tagging, session summaries, exports refresh
-9. Change batches, rollback, session checkpoints, and `learnloop doctor`
-10. Recent auto-accepted content review
-11. Backup + sample vault
-12. Codex SDK adapter + one structured AI workflow
-13. Prompt/model provenance + grading eval harness
-14. Text-first import/export
-15. Codex-generated practice and diagnosis
-16. Concept graph updates
-17. Interleaving and transfer engine
+4. Domain registry + generic domain module
+5. Domain capability flags + observation template registry
+6. YAML Learning Object / Practice Item stores
+7. SQLite attempt logging + due queue
+8. FSRS + Learning Object mastery axis updates
+9. Learner-state beliefs + surprise logging + belief staleness
+10. Replayable learner model
+11. Greedy information-gain queue scoring over active goals
+12. Scheduler explanations + `learnloop why`
+13. Scheduler golden tests
+14. Error tagging, session summaries, exports refresh
+15. Change batches, rollback, session checkpoints, and `learnloop doctor`
+16. Recent auto-accepted content review
+17. Backup + sample vault
+18. Codex SDK adapter + one structured AI workflow
+19. Prompt/model provenance + grading eval harness
+20. Text-first import/export
+21. Codex-generated practice and diagnosis
+22. Concept graph updates
+23. Interleaving and transfer engine
+24. Language and Overwatch domain scaffolds
 ```
 
 The minimal useful version could be built around this command set:
@@ -2460,6 +3413,9 @@ learnloop diagnose
 learnloop errors
 learnloop inbox recent
 learnloop why <pi_id>
+learnloop uncertainty
+learnloop observe <template_id>
+learnloop replay-model
 learnloop doctor
 ```
 
@@ -2471,6 +3427,7 @@ Do not start with a full GUI.
 Do not put memory inside the model.
 Do not make one giant memory file.
 Do not fork Codex for LearnLoop-specific behavior.
+Do not require cross-user data for the uncertainty model.
 
 Start with a TUI-first local learning application:
 Markdown for human-readable memory,
@@ -2487,13 +3444,29 @@ Codex SDK for AI tutoring and structured proposals.
 The following decisions are now fixed for implementation:
 
 - LearnLoop is a standalone Python package.
+- MVP is single-user and local-first; no multi-user account or tenant model is required.
 - LearnLoop is TUI-first; CLI is secondary.
-- Codex integration is SDK-first, not fork-based and not raw JSON-RPC-first.
+- Codex integration is SDK-first via the user's ChatGPT subscription (not metered API), and Codex is required for the daily loop; offline runs degraded mode (review + self-grade + manual error tagging).
+- Concept IDs are vault-global; per-subject `concept-graph.yaml` files are views over the vault-level `concepts/` registry.
+- Replay semantics are fixed to "drop-and-recompute current formulas, version-tagged pre-replay snapshot, diff view of the largest movers."
+- Adaptive elicitation in MVP is heuristic-bucket greedy EIG plus a narrow Codex-simulator path for ephemeral diagnostic items. Full predictive-LM EIG is a later, gated "deep diagnostic pass."
 - The authoritative content model is Learning Objects + Practice Items.
+- LearnLoop uses five stable mastery axes (`memory`, `understanding`, `execution`, `generalization`, `calibration`) plus extensible evidence facets; axes are basis-like for scheduling/UI but not assumed mathematically independent.
+- Adaptive elicitation influences every daily queue, with active goals as the default target set.
+- MVP uses local single-user learner-state beliefs and greedy expected-information-gain scoring.
+- Bayesian surprise is modeled over the joint observation of score, error type, confidence, latency, and hints.
+- Bayesian surprise can modulate FSRS intervals within conservative bounds and trigger diagnostic follow-ups.
+- Beliefs become stale by increasing uncertainty, not by silently lowering mastery.
+- Learner-state derived tables must be replayable from raw attempts, observations, content state, and algorithm version.
+- Scheduler behavior must have local golden tests through `learnloop eval scheduler`.
+- MCTS/lookahead elicitation is a later feature after enough local attempt data exists.
 - Canonical transforms and variants of approved Practice Items auto-accept by default, with TUI alerts and a recent-change review surface.
 - Agent grading updates mastery automatically unless low confidence or another manual-review trigger fires.
-- The application must support multiple subject domains through extension modules.
-- Audio-based language features, live chat, and automated media analysis are later extensions.
+- The application must support multiple subject domains through extension modules with namespaced practice modes, evidence facets, error taxonomies, rubrics, scheduler hooks, TUI panels, and optional domain tables.
+- Domain modules declare capability flags so the core can route UI, scheduling, import, media, and grading behavior safely.
+- Structured observation templates are first-class learning events for non-card workflows.
+- Text-first language conversation tests and Overwatch-first esports/VOD scaffolding are first-class domain goals.
+- Audio-based language features, live chat, telemetry ingestion, and automated media analysis are later extensions.
 - Generated/imported changes are grouped into rollbackable change batches.
 - Scheduler decisions must be explainable through the TUI and `learnloop why`.
 - Vault health checks, backups, session resume, prompt/model provenance, grading eval fixtures, import/export, and a deterministic sample vault are part of the implementation surface.
@@ -2504,17 +3477,26 @@ The following decisions are now fixed for implementation:
 2. **Vocabulary scale.** For language subjects, use `vocab.yaml` as a compact bulk format, but each vocabulary entry must still have a stable synthetic Learning Object id for scheduling and mastery.
 3. **Worked examples as content vs Learning Objects.** A worked example file is content; the pattern it teaches is a `worked_example_pattern` LO. Implement explicit two-way links: `lo.references_worked_example: <path>` and worked-example frontmatter `teaches_lo: <lo_id>`.
 4. **Media references.** For VOD/motor subjects, MVP should store local media references and timestamps in `media-index.yaml`; no binary media is copied into the vault unless the user explicitly imports it.
+5. **Belief representation granularity.** MVP stores per-axis and selected per-facet means and variances. Later covariance tracking may help avoid double-counting correlated axes/facets, but it is not required for the first implementation.
+6. **FSRS modulation bounds.** The spec sets conservative default bounds, but implementation should expose config and tests for how surprise caps or stretches intervals.
+7. **Domain migration policy.** Domain modules may add namespaced SQLite tables. Define how those migrations are versioned, validated, and disabled if a plugin is removed.
+8. **Observation-to-attempt mapping.** Define which observation templates emit formal attempts automatically and which only update narrative logs until reviewed.
+9. **Replay algorithm versions.** Define semantic versioning for learner-state algorithms so replay results are attributable and reproducible.
 
 ## Remaining interaction questions
 
-5. **Answer input widget.** The TUI needs short inline answers, `$EDITOR` long answers, LaTeX-friendly math answers, and code-block answers. MVP can support inline + `$EDITOR`; rendering/sandboxing can follow.
-6. **Recent auto-accepted review.** The TUI should show "Recently Added" after auto-accept events and expose deactivate/edit/open-lineage actions. The exact layout still needs a final design pass.
-7. **Calibration dashboard.** Confidence is collected per attempt. The first implementation can log it; a calibration chart can wait until dashboard work.
+10. **Answer input widget.** The TUI needs short inline answers, `$EDITOR` long answers, LaTeX-friendly math answers, and code-block answers. MVP can support inline + `$EDITOR`; rendering/sandboxing can follow.
+11. **Recently Added review.** The TUI should show "Recently Added" after auto-accept events and expose deactivate/edit/open-lineage actions. The exact layout still needs a final design pass.
+12. **Uncertainty dashboard.** MVP should expose `learnloop uncertainty` and "Why now?" explanations; richer charts can wait until dashboard work.
+13. **Surprise follow-up UX.** Decide whether a high-surprise diagnostic follow-up interrupts the current queue immediately or is inserted as the next item after feedback.
+14. **Domain-specific TUI panels.** Define the minimal panel contract for language conversation review and Overwatch VOD review without making the TUI framework domain-specific.
+15. **Replay UX.** Decide whether replay is automatic after algorithm upgrades or a prompted/manual operation.
 
 ## Remaining operations questions
 
-8. **Git policy.** Vaults should be git-friendly, but default behavior should be hands-off: do not autocommit unless `[storage].autocommit = true`.
-9. **Privacy / telemetry.** Default policy: no product analytics. Local content leaves the machine only through explicit Codex/model calls initiated by the user or an AI-backed workflow.
+16. **Git policy.** Vaults should be git-friendly, but default behavior should be hands-off: do not autocommit unless `[storage].autocommit = true`.
+17. **Privacy / telemetry.** Default policy: no product analytics. Local content leaves the machine only through explicit Codex/model calls initiated by the user or an AI-backed workflow.
+18. **Media and telemetry privacy.** For VOD/esports domains, local media paths and optional telemetry should stay local by default; any model upload or automated analysis must be explicit.
 
 # 27. Incorporated extensions
 
@@ -2522,6 +3504,18 @@ These were proposed earlier as "new ideas worth considering" and are now first-c
 
 | Idea | Spec home |
 | --- | --- |
+| Codex required for daily loop; degraded offline = review + self-grade + manual error tagging | §1, §3, §6 `[ai]`, §12 |
+| Vault-global concept IDs | §4 (`concepts/`), §8 (concept graph format with subject views) |
+| Replay (a): drop-and-recompute with version-tagged snapshots + diff view | §16 (Replayable learner model), `replay_snapshots` table, `learnloop replay-model --diff` |
+| Heuristic-bucket EIG MVP + Codex-simulator ephemeral diagnostic generation | §16 (Layer 4, "Two policy variants"), `[scheduler]` config, `elicitation_events.policy` |
+| Hint ladder as first-class on Practice Items | §9 (PI YAML `hints` + `hint_policy`), §9 (Hint ladders subsection) |
+| Local embedding index (sentence-transformers) | §4 (Local embedding index), §6 `[embeddings]`, `embeddings` table, §19 stack, §20 (`storage/embeddings.py`) |
+| Tiered grader routing (exact-match / rubric-template / embedding-similarity / LLM) | §15.6 (Grader routing), `grading_evidence.grader_tier` |
+| Fading worked-example sequence after `walkthrough` / `dont_know` | §16 (Fading worked-example sequence), `PracticeMode.faded_worked_example`, `faded_sequence_state` table |
+| Structured `goals.yaml` sidecar for active_goal_importance and deadline_pressure | §4 (`profile/goals.yaml`), §7 (`profile/goals.yaml`) |
+| Forgetting-curve view (`learnloop forgetting-curve`) | §10 (Forgetting curve), §11 CLI |
+| End-of-session ephemeral promotion sweep with auto-rationale | §15.5 (End-of-session promotion sweep), `ephemeral_session_items` extra columns |
+| Short-session mode (<20 min) | §10 (Short-session mode), §16 (Readiness modulation) |
 | Misconceptions as first-class Learning Objects | §9 (LO `status` + `contradicts`), §15.7 (lifecycle), §16 mode selection, §16.5 enum (`disguised_retest`) |
 | Readiness gate at session start | §6 (`[learning].readiness_gate`), §10 (Session start screen), §16 (Readiness modulation), `readiness.record` tool |
 | Disguised re-test | §16.5 (`disguised_retest` in `PracticeMode`), §15.7 (post-resolution retests), `variant-generator` role |
@@ -2534,6 +3528,18 @@ These were proposed earlier as "new ideas worth considering" and are now first-c
 | Import/export | §11.5 (`learnloop import`, `learnloop export`, `learnloop-bundle`) |
 | Grading evaluation harness | §15.6 (`evals/grading-goldens`, `learnloop eval grading`) |
 | Scheduler explainability | §10 (`Why now` panel), §16 (`scheduler_explanations`), §11 (`learnloop why`) |
+| Adaptive elicitation / greedy EIG | §6 (`[scheduler]`), §16 (Layer 4), §16 SQLite tables (`elicitation_events`), §21 MVP |
+| Bayesian surprise over joint observations | §6 (`[mastery]`), §16 (Layer 4 + `attempt_surprise`), §11 (`learnloop surprise`) |
+| Single-user learner-state uncertainty | §1 (single-user/local), §16 (`learner_state_beliefs`), §20 (`beliefs.py`) |
+| Belief staleness | §16 (Belief staleness), §16 SQLite table (`learner_state_beliefs`) |
+| Replayable learner model | §16 (Replayable learner model), §11 (`learnloop replay-model`), §16 SQLite table (`model_replay_runs`) |
+| Scheduler golden tests | §15.6 (Scheduler golden tests), §11 (`learnloop eval scheduler`), §4 (`evals/scheduler-goldens`) |
+| Observation templates | §15.5 (Observation templates), §11 (`learnloop observe`), §16 SQLite tables (`observation_templates`, `observation_events`) |
+| Hierarchical mastery axes + evidence facets | §16 (Layer 2), §16.5 (`MasteryAxis`, `EvidenceFacet`) |
+| Extensible domain modules | §4 (Domain module contract), §6 (`[domains]`), §20 (`domains/registry.py`) |
+| Domain capability flags | §4 (`DomainCapabilities`), §21 MVP |
+| Language conversation tests | §4 (Language conversation domain), namespaced `language:*` practice modes |
+| Overwatch-first esports/VOD review | §4 (Esports / Overwatch-first domain), `esports_overwatch.py`, namespaced `esports_overwatch:*` practice modes |
 | Vault health checks and backups | §11.5 (`learnloop doctor`, `learnloop backup`) |
 | Prompt/model provenance | §13 prompt frontmatter, §16 (`agent_runs`), §15.5 provenance fields |
 | Session interruption/resume | §10 (Session resume), §16 (`session_checkpoints`), §6 (`[sessions]`) |
