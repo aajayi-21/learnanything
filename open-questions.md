@@ -8,91 +8,69 @@ Each question has my recommended answer in *italics*. Treat these as proposals t
 
 ## A. Scheduler & elicitation
 
-### A1. Heuristic surrogate functional form — **Blocking** (Layer 4)
+### A1. Heuristic surrogate functional form — **Resolved** (§16 Layer 4)
 
-The spec says the local surrogate predicts `P(score_bucket, error_type, confidence_bucket, latency_bucket, hints_bucket | z, q)` from "current mastery, item difficulty, recent attempts, error impacts, confidence, latency, hints." But the concrete functional form is unspecified. Without it, the heuristic-EIG scorer can't be implemented and scheduler goldens can't be authored.
+Dual representation: 5-way score bucket alphabet for EIG / surprise / scheduler explanations / goldens, continuous raw score for EMA and analytics. Surrogate factorizes as `P(o | z, q) = P(score) · P(error | score) · P(confidence | score) · P(latency | score) · P(hints | score)` with parametric heads (cumulative logistic for score, Dirichlet-shrunk per-learner propensity for error, calibration-modulated confidence, log-normal latency, hint-request logistic). Parameters live in `algorithm_priors.yaml`. Latency uses graceful-fallback bucket: `unknown` when no calibrated mean exists, contributes nothing to EIG/surprise for that attempt.
 
-*Recommendation:* Factorize as `P(o | z, q) = P(score | z,q) · P(error | score, z,q) · P(confidence | score, z,q) · P(latency | score, z,q) · P(hints | score, z,q)`. Each factor is a small parametric form (logistic over `lo_mastery[axis] · weights[axis] − difficulty`, with axis weights from PI `mastery_weights`). Calibrate the parameters from a few hundred seeded golden attempts in the sample vault, then refine from the user's own attempts after N=200. Document the exact form and parameter table in §16, version it as part of `algorithm_version`.
+### A2. Cross-LO update propagation — **Resolved** (§16 Layer 2 "Cross-LO propagation")
 
-### A2. Cross-LO update propagation — **Blocking**
+Bounded transitive propagation, not direct-only, not full closure. Default `max_depth=3`, `hop_decay=0.5`, `total_propagated_weight_cap=0.7`. Success: variance shrink only on prereqs. Failure: mean *and* variance, gated by **error type** — `recall_failure` propagates weakly, `conceptual_error` propagates to all, `procedure_error` to procedural prereqs only, `transfer_failure` to conceptual prereqs lightly, `high_confidence_wrong` propagates strongly and triggers misconception repair. Magnitude scaled by depth decay × score severity × grader_confidence × hint_dampening × mastery_weights[axis]. Per-domain overrides and per-LO override knobs (`receives_propagation_from`, `block_propagation_from`, `max_depth_in`). Audit trail in new `attempt_propagation_events` table.
 
-An attempt is logged against one Practice Item → one Learning Object. But the prompt may legitimately exercise prerequisite LOs (a PCA item touches SVD). Does evidence propagate up the prerequisite DAG?
+### A3. Axis correlation — **Resolved** (§16 Layer 2 "Axis correlation")
 
-*Recommendation:* Yes, but only as an **uncertainty update**, not a mean update. A successful PCA attempt does not raise SVD mastery (the learner might have memorized PCA without understanding SVD), but it can *lower variance* on SVD beliefs by a small factor. Failure propagates as a mean *and* variance update (failing PCA suggests SVD understanding is weaker than estimated). Configurable per-LO via `propagate_failure_to_prereqs: true` (default), `propagate_success_to_prereqs: variance_only` (default).
+`mastery_weights` is a partition of evidence with sum-to-one invariant enforced by the storage layer. Single observed score, split across axes via `effective_alpha[axis] = base_alpha · mastery_weights[axis] · grader_confidence · hint_dampening · cold_start_factor`. `error_impacts` apply as additive deltas on top, can affect non-targeted axes. Two-step structure (EMA on targeted axes + additive error corrections) lets correlated axes coexist without inflating evidence.
 
-### A3. Axis correlation — **Blocking**
+### A4. Disguised-retest / resolved-misconception queue load cap — **Resolved** (§15.7 "Disguised retest policy")
 
-The config says `assume_independent_axes = false` but the EMA update treats each axis independently. If a `transfer` item dings both `understanding` and `generalization`, do we update each from its own evidence, or compute one update and split it?
+`per_session_max: 1`, `intervals_days: [14, 30, 60, 120, 365]`, `reopen_on_failures: 1`, `selection: oldest_eligible_first`, `active_goal_scope_required: true`. Disguised retests sit on top of, not inside, the queue budget — they replace one slot in the daily review block. Tunable in `algorithm_priors.yaml`.
 
-*Recommendation:* Sum-to-one `mastery_weights` on each PI act as the split. The single observed score produces one `gain` value; each axis update uses `effective_alpha = alpha · mastery_weights[axis] · grader_confidence · hint_dampening` against that same gain. This prevents double-counting because the *update magnitude* is split, even though each axis carries its own running estimate. Mention this explicitly in §16 next to `update_mastery`.
+### A5. Surprise follow-up UX: interrupt vs enqueue — **Resolved** (§16 "Surprise follow-up insertion")
 
-### A4. Disguised-retest / resolved-misconception queue load cap — **Soon**
+Negative surprise above threshold inserts a follow-up at position 1 of the remaining queue (never interrupts). Feedback screen shows the inserted mode and reason, with `[Skip follow-up]` for this one-time dismissal. Positive surprise does **not** insert any item — only the existing modest FSRS interval stretch applies. Skip rate above a threshold over a window of attempts flags doctor as evidence the surprise threshold may be miscalibrated.
 
-A mature vault accumulates resolved misconceptions all wanting periodic disguised retests. Without a cap, the queue gets eaten by a long tail.
+### A6. Mode→axis mapping for domain-registered modes — **Resolved** (§4 `PracticeModeSpec`)
 
-*Recommendation:* Per-session cap: at most 1 disguised retest per session, prioritized by oldest-since-last-disguised-retest among resolved misconceptions whose contradicted LO is in scope for an active goal. Retest interval grows geometrically (14d → 30d → 60d → 120d) after each successful disguised retest, capped at 365d. A failed disguised retest reopens the misconception and resets the interval clock.
+`PracticeModeSpec` schema added in §4 with `default_target_mastery_axes`, `default_evidence_facets`, `default_mastery_weights` (sum-to-1 invariant), `default_grader_tier`, `fsrs_eligible`, `plausible_error_types`, `short_session_eligible`. Resolution order: PI explicit > domain `PracticeModeSpec` > core mode→axis table > hard fail (doctor flags the PI, scheduler refuses to surface it).
 
-### A5. Surprise follow-up UX: interrupt vs enqueue — **Soon**
+### A7. Replay trigger: automatic or manual — **Resolved** (§16 "Replay trigger and nag cadence")
 
-When `bayesian_surprise > diagnostic_threshold` with negative direction, does the diagnostic follow-up interrupt the current queue, or get inserted as the next item after feedback?
+Prompted-with-default-accept banner on vault open. `[Later]` dismisses for the session; banner returns next open. After 3 cumulative dismissals, an extra nudge line is added (mastery numbers may not reflect the current algorithm). MAJOR bumps add the nudge after the first dismissal; MINOR follows the standard 3-dismissal rule; PATCH never prompts but surfaces in `learnloop doctor` summary. New `replay_banner_state` singleton table tracks dismissal count. `learnloop replay-model --accept-without-replay` available for cases where the user knows no real change occurred.
 
-*Recommendation:* Insert as the next item, never interrupt. Show in the feedback screen "Surprise: high — added diagnostic follow-up to the next position" with a [Skip diagnostic] button. Interruption breaks the learner's flow and feels punitive when a surprise is from a borderline call.
+### A8. Cold-start surrogate parameters — **Resolved** (§16 `algorithm_priors.yaml`)
 
-### A6. Mode→axis mapping for domain-registered modes — **Blocking** (per-domain)
-
-Where does the default axis mapping for `language:conversation_turn` or `esports_overwatch:vod_review` live? Currently §16 has a hardcoded table for core modes only.
-
-*Recommendation:* The domain module's `practice_modes()` spec carries default `target_mastery_axes` and `evidence_facets` per mode. Practice Items in that domain can still override. The core router falls back to the mode's domain default; only fails if neither core map nor domain map provides one. Document `PracticeModeSpec` schema in §4.
-
-### A7. Replay trigger: automatic or manual — **Soon**
-
-After an algorithm version bump, is replay automatic on next vault open, or a prompted/manual operation?
-
-*Recommendation:* Prompted with default-accept. On vault open, if `code_algorithm_version != vault_algorithm_version`, show a non-blocking banner: "Algorithm updated (v3 → v4). Replay learner state now? (Recommended) [Replay] [Later] [What changed?]". Never silent: replay can shift mastery numbers and the learner needs to see it. "Later" works for one session; nags every open until done.
-
-### A8. Cold-start surrogate parameters — **Soon**
-
-The heuristic surrogate (A1) needs initial parameters. Where do they come from before the learner has data?
-
-*Recommendation:* Ship `algorithm_priors.yaml` with sane defaults derived from the sample vault's seeded attempts. Per-domain priors override the global priors. After 200 attempts on a domain, the surrogate transitions to learner-specific estimates with shrinkage toward priors (Beta posterior, `prior_pseudo_count = 20`).
+`algorithm_priors.yaml` lives at the vault root, versioned with `algorithm_version`. Holds `mastery` defaults (`ema_alpha`, `mastery_default`, `variance_default`, `cold_start_alpha_factor`, `cold_start_alpha_attempts`, `prior_pseudo_count`), `surrogate` parameters (logistic weights, bucket thresholds, calibration slopes, latency widths), `cross_lo_propagation` defaults and error gates, `staleness` per-axis days, and `domain_overrides` block. Editing the file bumps `algorithm_version` and prompts replay.
 
 ---
 
 ## B. Grading
 
-### B1. Tier-3 (embedding-similarity) fallback rules — **Soon**
+### B1. Tier-3 (embedding-similarity) fallback rules — **Resolved** (§15.6 Tier 3 termination rules)
 
-When tier-3 returns below `similarity_threshold`, what happens? Tier-4 LLM grading, manual review, or score-as-incorrect?
+Asymmetric local grader. Below `tier_3_low_threshold = 0.55` → terminal incorrect. Above `tier_3_high_threshold = 0.85` → escalate to tier 4 with `prior_correct` signal *unless* the PI or domain declares `tier_3_terminal_positive: true`. Middle range → escalate to tier 4 (no prior). Terminal-positive is hard-blocked for `proof_reconstruction`, `derivation_reconstruction`, `transfer/near_transfer/far_transfer`, `contrastive_discrimination`, `misconception_repair`, `error_diagnosis`, `disguised_retest`, items with `fatal_errors`, and `high_stakes_canonical_item`. Override possible with `tier_3_terminal_positive_force: true`, surfaced by doctor.
 
-*Recommendation:* Below `0.55` → score as incorrect (no escalation; the answer is clearly off-topic). Between `0.55` and `0.85` → escalate to tier-4 LLM. Above `0.85` → accept as correct. Make the two thresholds configurable in `[grading]`. Reasoning: cheap items shouldn't burn an LLM call on a clear miss, but ambiguous-middle cases deserve the better grader.
+### B2. Local grader confidence and mastery — **Resolved** (§15.6 "Grader confidence")
 
-### B2. Local grader confidence and mastery — **Blocking**
+Critical reframing: **`grader_confidence` measures reliability of the judgment, not how much credit the answer earned.** Partial credit doesn't imply a low-confidence grader; a confident 1/4 is a clear "mostly wrong." Smoothed functions per tier: tier 1 always 1.00; tier 2 0.95 (clean match) / 0.85 (fuzzy match) / 0.70 (ambiguous, usually escalates); tier 3 grows from 0.70 toward 0.90 as similarity moves further below low_threshold (incorrect direction) and from 0.65 toward 0.80 as similarity moves further above high_threshold (correct direction); tier 4 uses model-reported confidence. Stored separately from score on `practice_attempts` and `grading_evidence`.
 
-When a grade comes from tier 1–3 (deterministic), what `grader_confidence` does it carry? Tier 4 gets a model-reported number, but local graders are deterministic.
+### B3. Manual review pile-up UX — **Resolved** (§10 Review grades, §11 CLI `learnloop review-grades`)
 
-*Recommendation:* Tier 1 (exact-match): 1.0. Tier 2 (rubric-template): 0.95 if all required terms matched, 0.80 if partial. Tier 3 (embedding-similarity above the accept threshold): 0.75 (lower because semantic similarity ≠ correctness). Below `grader_confidence_floor` still triggers manual review per existing policy, so tier 3 mid-range will sometimes prompt the learner — which is appropriate.
+Counter on main screen (`Pending Reviews: N`) plus key `R` opens the dedicated triage screen. One item at a time, four keys: `✓` accept, `✗` override (opens numeric prompt; sets grader_confidence to 1.0 — human is the grader), `↺` regrade (re-run the LLM, mark previous evidence superseded), `→` defer. Session-scoped `T` flag auto-accepts subsequent tier-4 grades from the same `(prompt_template, prompt_version)`. End-of-session sweep surfaces pending reviews alongside ephemeral promotions. Daily loop never blocked on pending reviews.
 
-### B3. Manual review pile-up UX — **Soon**
+### B1\*. Hint-author guardrails — **Resolved** (§9 "Hint-author validation and retry")
 
-A bad day with a weak grader leaves 20+ items pending review. How is the queue presented?
+Validation: answer-leakage guard (lexical overlap ≤ 40%, key-term verbatim ≤ 1), rubric-trap guard (no fatal-error description verbatim), ladder shape (2–4 hints, ≤200 chars each, monotonic specificity), final-hint relaxed cap 55%. One retry with constraint-patch prompt. Second failure → static template + doctor warning + agent_runs records both attempts. Configurable in `[grading.hint_author_guardrails]`.
 
-*Recommendation:* TUI shows pending reviews count on the main screen. `learnloop review-grades` opens a fast triage view: keyboard-driven, one item per screen, three keys (✓ accept grade as-is, ✗ override grade, → defer). Batch action: "trust this rubric for the rest of the session" sets a session-scoped flag that auto-accepts tier-4 grades from that rubric template for the next hour.
+### B4. Per-mode default hint ladders — **Resolved** (§9 "Generation policy (hybrid with cache)", §12 `hint-author` role)
 
-### B4. Per-mode default hint ladders — **Soon**
-
-Items without explicit `hints` fall back to "per-mode default ladder shipped in `prompts/hint_ladder_<mode>.md`." Are these hand-authored prompts that Codex fills in at runtime, or static text?
-
-*Recommendation:* Static templates with substitutions (`{concept_title}`, `{expected_first_step}`). For modes where no useful generic hint exists (e.g. `recognition`, `multiple_choice`), ship the file with `hints: []` semantics — meaning [Hint] disabled. For free-text modes where a generic ladder is useful (`explain_from_memory`, `derivation_reconstruction`), ship 2-3 generic steps and let Codex generate item-specific hints lazily on first reveal (cached on the Practice Item).
+Hybrid: authored hints used as-is; missing hints + Codex available trigger the `hint-author` role on first reveal and cache the generated ladder back into the PI YAML through `change_batches` (rollbackable, provenance-tagged); offline fallback to per-mode static templates in `prompts/hint_ladder_<mode>.md` with substitutions (not cached). Disabled-by-default modes (`recognition`, `multiple_choice`) ship `hints: []`.
 
 ---
 
 ## C. Content model & concepts
 
-### C1. What is a "subject" exactly — **Blocking**
+### C1. What is a "subject" exactly — **Resolved** (§4 "Subjects as views", §8, §9, §7)
 
-Currently subjects are top-level folders. But concepts are global. Can a single note live in two subjects? A research-paper LO might want to surface in both `research-papers` and `survival-analysis`.
-
-*Recommendation:* Subjects are **scopes for views, not for content ownership**. A subject is a saved filter: "show me LOs and notes whose concepts are in my `linear-algebra` view." Notes physically live in one folder but can be tagged with multiple subjects in YAML frontmatter; LOs declare `subjects: [linear-algebra, ml]`. The TUI's subject picker filters by membership, not folder location. Backwards-compat: a note under `subjects/linear-algebra/notes/` is implicitly tagged with that subject.
+Subjects are views, not content-ownership. LO/PI YAML carries `subjects: [list]` (≥1 element); first entry is primary subject. PI inherits from its LO by default. Notes get Markdown frontmatter `subjects: [list]`. Folder is advisory: doctor warns if `subjects[0]` doesn't match folder, but moving a file doesn't change membership. Per-subject `concept-graph.yaml` view is derived (union of tagged-LO concepts) with `additional_concepts_in_scope`, `exclude_concepts`, `subject_ordering_hints` for curation. `concept_mastery` table is now concept-keyed (not subject-keyed); per-subject aggregates computed on read.
 
 ### C2. Vocabulary scale (language domain) — **Defer**
 
@@ -100,33 +78,25 @@ For language, do we want one Learning Object per vocab word? 5000 LOs adds index
 
 *Recommendation:* Compact bulk format: `vocab.yaml` with one entry per word, each entry has a synthetic stable LO id (`lo_korean_vocab_<hash>`) that the scheduler treats as a real LO. No full LO YAML file is written for vocab; the bulk file *is* the LO storage. Lazy-promote a vocab entry to a full LO file only when the learner wants to add notes/rubrics specific to that word.
 
-### C3. Worked examples as content vs LO — **Soon**
+### C3. Worked examples as content vs LO — **Resolved** (§15.8)
 
-A worked example file is content; the pattern it teaches is a `worked_example_pattern` LO. Two-way links needed.
+Worked-example Markdown carries `teaches_los: [list]` (≥1) in frontmatter and an optional `steps:` array with `fadable: bool` flags enabling deterministic faded variants. LO YAML carries `references_worked_examples: [paths]` for the two-way link. Doctor enforces bidirectional consistency. Reveal tracking via new `worked_example_views(lo_id, example_id, example_path, session_id, shown_at, context, attempt_id)` table; scheduler picks oldest-shown.
 
-*Recommendation:* Worked example Markdown has frontmatter `teaches_lo: <lo_id>`. The LO YAML has `references_worked_examples: [path1, path2]`. `learnloop doctor` verifies bidirectional consistency. When a `worked_example` mode is selected, the scheduler resolves `references_worked_examples` and picks the least-recently-seen example.
+### C4. Media references survive file moves — **Resolved** (§15.9)
 
-### C4. Media references survive file moves — **Soon**
+Hybrid hashing by size: files ≤ `[media].full_hash_threshold_mb` (default 50) get full SHA-256; larger files get a fingerprint `size:first_1mb_sha256:last_1mb_sha256`. On missing path, scanner walks vault root + configurable `[media].search_roots` looking for full-hash matches first, fingerprint matches second. Ambiguous fingerprints reported by doctor. Missing media suspends dependent items rather than deleting them. `[media].fail_on_missing = true` by default so missing media surfaces loudly.
 
-`media-index.yaml` stores paths. User moves files, references break.
+### C5. Observation-to-attempt mapping — **Resolved** (§15.10)
 
-*Recommendation:* Each entry has `path` *and* `content_hash` (computed once on import). On read, if the path is missing, scan `[media].search_roots` for files with matching hash. Found → update path, log a fix. Not found → mark as missing in `learnloop doctor`. No silent breakage, no manual re-linking required for renames.
-
-### C5. Observation-to-attempt mapping — **Soon**
-
-Which observation templates auto-emit a formal attempt, and which only update narrative logs until reviewed?
-
-*Recommendation:* Each `ObservationTemplate` declares `emits_attempt: bool`. When true, the template's `emits.evidence_facets` directly produce a `practice_attempts` row with `practice_mode = <domain>:<observation_id>` and grading evidence drawn from the structured response. When false (e.g. a free reflection log), only an `observation_events` row is written, and a separate "review observations" sweep at session end offers to promote it to an attempt with rubric prompting.
+`ObservationTemplate` carries `emits_attempt: bool`, `lo_binding.mode` (`learner_picks` | `template_fixed`), optional `applies_to` predicate with `applies_to_mode` (`suggest_only` default | `restrict` for narrow workflows), and `suggest_from` priority list (applies_to matches, active goals, recent attempts, recent errors, embedding similarity). Filled observations can be left unbound (`binding_mode = pending`) and resolved later. Unified end-of-session review surface combines ephemeral promotions, pending grade reviews, observation promotion/binding, and generated-content cleanup, with `[Run All]` fast-path and section-level skip.
 
 ---
 
 ## D. Replayability & versioning
 
-### D1. Algorithm semantic versioning rules — **Soon**
+### D1. Algorithm semantic versioning rules — **Resolved** (§16 "Behavior by bump type")
 
-Version numbers need rules. MAJOR.MINOR.PATCH applied to what? "Algorithm" includes mastery, surprise, scheduler scoring, surrogate, grader tiers, and faded sequence logic.
-
-*Recommendation:* One number for the whole derived-state pipeline (`algorithm_version` is one semver string). MAJOR = output of replay would change non-trivially (mastery numbers move). MINOR = new fields/tables added, old fields preserved. PATCH = bugfix that produces identical outputs except for previously-buggy cases. Replay is required on MAJOR, prompted on MINOR, silent on PATCH.
+Single pipeline-wide `algorithm_version`. MAJOR = mastery numbers would change on identical raw events (formula, surrogate retuning, propagation rule). MINOR = additive (new fields/tables/facets); old outputs preserved. PATCH = bugfix-only; outputs match old on previously-working cases. Banner: MAJOR with 1-strike nudge; MINOR standard 3-strike; PATCH silent + doctor surface. `CHANGELOG.algorithm.md` shipped with releases; "What changed?" link renders entries between vault and code versions. Per-component versioning explicitly rejected because cross-component invariants make independent numbers misleading.
 
 ### D2. Replay determinism across machines — **Defer**
 
@@ -134,21 +104,17 @@ If a vault is moved to another machine, replay must produce identical mastery nu
 
 *Recommendation:* Replay does **not** re-embed. Embeddings are an index, not derived learner state. If the embedding model changes, run `learnloop reindex-embeddings` separately. Scheduler outputs that depend on embeddings (concept-merge suggestions, near-duplicate detection) are not part of replay's invariants.
 
-### D3. Domain migration policy when a plugin is removed — **Soon**
+### D3. Domain migration policy when a plugin is removed — **Resolved** (§4 "Domain enable / disable / purge")
 
-A domain module may have added namespaced SQLite tables. If the user removes the plugin, what happens?
-
-*Recommendation:* Domain tables are preserved (data is not deleted on plugin removal), but the domain's scheduler hooks, TUI panels, and grading rubrics become dormant. The core falls back to generic handling. `learnloop doctor` warns about orphaned domain tables but does not delete. Re-adding the plugin reactivates everything.
+Soft-disable is default: removing from `[domains].enabled` preserves all data, dormants scheduler hooks/TUI panels, marks namespaced PIs unsurfaceable, doctor warns about orphans. `learnloop domain purge <id>` is the destructive escape valve: dry-run preview → type-domain-id-to-confirm → atomic delete with `change_batches` row → rollbackable for 7 days. Refuses if domain is currently enabled (forces explicit soft-disable first). CLI: `learnloop domain list / enable / disable / purge`.
 
 ---
 
 ## E. UX
 
-### E1. Answer input widget — **Soon**
+### E1. Answer input widget — **Resolved** (§10 "Answer input widget")
 
-The TUI needs short inline answers, $EDITOR long answers, LaTeX-friendly math, code blocks. What's MVP?
-
-*Recommendation:* MVP: inline single-line for short answers (≤120 chars), Ctrl-E to open $EDITOR for multi-line. Markdown with LaTeX-style `$...$` and `$$...$$` rendered in feedback view (Rich math display where possible, raw fallback otherwise). Code answers are just fenced Markdown code blocks — no in-TUI syntax highlighting in MVP. Defer: dedicated math input widget, sandboxed code execution.
+Inline up to `[tui].inline_max_chars = 200`; Ctrl-E opens `$EDITOR` for longer. Feedback view renders Markdown via Rich, syntax-highlights fenced code, and shows LaTeX-style `$...$` / `$$...$$` literal with subtle highlight (no live typesetting in MVP). Autosave hooks into existing `session_checkpoints` even during editor sessions. Configurable. Deferred: KaTeX-style math typeset, file-attachment answers, drag-drop, sandboxed code execution.
 
 ### E2. Uncertainty dashboard — **Defer**
 
@@ -172,29 +138,21 @@ Vaults are git-friendly. `[storage].autocommit = false` is the default. Anything
 
 ## F. Codex integration
 
-### F1. Codex availability detection — **Blocking**
+### F1. Codex availability detection — **Resolved** (§12 state machine, §15.6 mid-attempt fallback)
 
-When is "Codex is unavailable" detected — vault open, first AI feature, or per-call?
+In-process state machine: `unknown / available / auth_required / rate_limited / network_unavailable / server_error / streaming_dropped`. Lazy first check on first AI feature (eager probe optional via `probe_on_vault_open`). Cached for `availability_cache_seconds=300`. Per-error retry policy (auth = no auto-retry; rate-limit respects retry-after with 5min floor; network/server use 30s exponential backoff). Auto-regrade-on-recovery scans deferred attempts (`manual_review_reason = 'codex_unavailable'`) when state returns to available, regrades via tier 4, applies held mastery update on success. Mid-attempt failure during tier-4 grading shows 5s inline prompt defaulting to self-grade; alternatives `silent_self_grade` and `block_and_queue` configurable. TUI corner indicator (green/yellow/red/gray). CLI: `learnloop ai status / login / recheck`. New `practice_attempts.manual_review_reason` column.
 
-*Recommendation:* Lazy with caching. First AI feature call probes the SDK; result cached for `[ai].availability_cache_seconds` (default 300). On rate-limit or auth error during a call, mark unavailable for `rate_limit_backoff_seconds` and surface a TUI toast. The session continues in degraded mode automatically.
+### F2. Rate-limit handling during a session — **Resolved** (§12 "Per-purpose rate-limit behavior", "Tutor cache-and-resume")
 
-### F2. Rate-limit handling during a session — **Soon**
+Per-purpose behavior table specifies what happens for graders (mid-attempt fallback), tutor (cache-and-resume with `tutor_pending_messages` table; TUI shows ETA + accepts appended inputs while waiting; auto-resume on recovery), generators (defer to queue), ingestor (defer to background), diagnoser (mid-attempt fallback), simulator proposer (skip silently). Cached tutor messages survive process restarts.
 
-Subscription tiers have per-hour rate limits. What happens mid-session when we hit one?
+### F3. Codex-simulator ephemeral proposer output schema — **Resolved** (§16 Layer 4 "Proposer output schema and validation")
 
-*Recommendation:* Per `[ai].rate_limit_strategy`: `queue_then_self_grade` (default) queues retries with exponential backoff for up to 90s; if still failing, the current item routes to self-grade with a clear notification. Tutor turns drop to a static "Codex unavailable — try again in a few minutes" message. Generation paths defer the item back to next session. Never block the session waiting for Codex.
+Ephemeral-minimal output: 1–3 items each with `prompt`, `expected_answer`, `target_lo_id`, `target_axis`, `discriminates_hypotheses: [hypothesis_ids]`, `practice_mode`. No rubric, hint ladder, provenance, or difficulty (defaulted from LO). Validation: schema + active LO + eligible practice_mode + hypothesis-id resolved + embedding-similarity guard against existing PIs on the LO (`sim ≥ 0.85` rejected). One retry with constraint-patch on failure; second failure means session proceeds without simulator ephemerals. Hypotheses themselves are locally generated from heuristic surrogate posterior modes; Codex is question proposer only.
 
-### F3. Codex-simulator ephemeral proposer prompt structure — **Soon**
+### F4. Conversation thread management — **Resolved** (§12 "Thread management")
 
-The Layer-4 simulator path says the proposer prompt receives "the LO and its current belief means/variances, the recent attempt history for that LO, and a short list of plausible learner states to discriminate." What's the *concrete* structure of "plausible learner states to discriminate"?
-
-*Recommendation:* The proposer is given 2–4 named hypotheses of the form `{id, description, predicted_axis_profile}`. For example: `{id: "memorized_no_schema", description: "Can recall the definition but can't apply it", predicted_axis_profile: {memory: 0.85, understanding: 0.35}}`. The hypotheses are generated locally from the heuristic surrogate's top modes of the posterior, *not* by Codex. Codex is only the question proposer, not the hypothesis generator. This keeps the simulator path cheap and deterministic in everything except the final question text.
-
-### F4. Conversation thread management — **Soon**
-
-The adapter says "create or resume a Codex thread for a subject/purpose." How granular? One thread per session? Per LO? Per attempt?
-
-*Recommendation:* One thread per (subject, purpose). Tutor and grader purposes are separate threads. Resume across sessions for tutor purpose only; grader/diagnoser/generator/ingestor are stateless per-call. Cap thread length: when a tutor thread exceeds N turns or M tokens, archive it and start a new one with a summary continuation.
+Threads keyed by `(vault_id, subject, purpose)`. Tutor: long-lived, persisted in `tutor_threads`, resumed across sessions. All other purposes: stateless per-call. Hybrid archival trigger: `turn_count > 80` OR `cumulative_tokens > 50000` OR `inactivity > 30 days`. On archive, `tutor-summarizer` produces ~200-token brief stored in `tutor_thread_archives`; next thread on same key starts with that brief as first system message. If summarizer fails, archive still happens with `brief = null` (regenerated opportunistically). `learnloop tutor reset/history` CLI surfaces. Config in `[tutor]`.
 
 ---
 
@@ -225,15 +183,38 @@ These need a default and a way to revisit, not a blocking decision now:
 
 ---
 
-## Implementation order implied by these answers
+## Resolved so far
 
-If we accept the recommended answers above, the blocking questions cluster around scheduler/grading internals. Implementation order:
+- **Blocking (all):** A1, A2, A3, A6, A8, B1, B2, B3, B4, C1, F1.
+- **Soon (most):** A4, A5, A7, B1\*, C3, C4, C5, D1, D3, E1, F2, F3, F4.
 
-1. C1 (subject as view), C2 (vocabulary lazy promotion) — affects storage layout.
-2. A1 (surrogate functional form), A2 (cross-LO updates), A3 (axis correlation), A6 (domain mode→axis), A8 (cold-start priors) — scheduler core.
-3. B2 (local grader confidence) — grader core.
-4. F1 (Codex availability detection) — adapter core.
-5. Everything else is Soon/Defer; can be answered slice by slice.
+Only **G2** (Codex content filtering / outbound redaction policy) remains in Soon. Defer items remain: C2 (vocab scale), D2 (cross-machine determinism), E2 (uncertainty dashboard polish), E3 (domain TUI panel contract), H (parameter tuning post-MVP), G1 (privacy confirmation).
+
+## Implementation order
+
+Everything blocking and most polish is decided. Recommended slice order:
+
+1. Vault scaffold, storage, migrations, config loading.
+2. Scheduler core (A cluster + cross-LO propagation + `algorithm_priors.yaml`).
+3. Tiered grader pipeline with hint-author + `review-grades` triage.
+4. Subject-view loader and doctor checks (C1).
+5. Worked-example + media-index + observation templates + end-of-session review (C3/C4/C5).
+6. Codex SDK adapter with availability state machine, per-purpose rate-limit, tutor cache-and-resume, thread management.
+7. Simulator-EIG ephemeral proposer.
+8. Misconception lifecycle (disguised retest policy from A4).
+9. Replay with banner + diff view + version-tagged snapshots.
+10. Soon items resolved slice-by-slice (G2 when needed); Defer when relevant.
+
+## Implementation order implied by remaining answers
+
+The Blocking decisions unblock the implementation slices. Recommended slice order:
+
+1. Vault scaffold, storage, migrations, config loading (no questions left here).
+2. Scheduler core (A cluster + cross-LO propagation + algorithm_priors.yaml).
+3. Tiered grader pipeline (B cluster) including hint-author and review-grades triage.
+4. Subject-view loader and doctor checks (C1).
+5. Codex SDK adapter with availability state machine (F1).
+6. Everything else — Soon/Defer questions resolved slice by slice as they become relevant.
 
 ---
 

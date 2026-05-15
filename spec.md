@@ -154,6 +154,9 @@ learning-vault/
     concepts.yaml               # canonical concept definitions; one entry per global concept id
     relations.yaml              # vault-wide prerequisite / confusable / contains edges
 
+  algorithm_priors.yaml         # surrogate parameters, cold-start ramp, cross-LO propagation defaults,
+                                # error-type gates, per-domain overrides. Versioned with algorithm_version.
+
   profile/                      # narrative memory
     student.md
     goals.md                    # narrative goals
@@ -183,8 +186,8 @@ learning-vault/
         svd-worked-example-001.md
       rubrics/                  # optional per-item rubrics (override the defaults)
         pi_pca_transfer_001.rubric.yaml
-      errors.md                 # narrative subject-specific error notebook
-      reflection.md             # learner reflections
+      errors.md                 # derived view: filter of global-error-log.md by this subject's tagged LOs
+      reflection.md             # learner reflections (frontmatter declares subjects)
 
     korean/
       subject.md
@@ -317,6 +320,36 @@ For users who run more than one vault (e.g. one for school, one for personal stu
 
 When a vault loads, `profile/student.md` is merged on top of `~/.learnloop/profile.md`. Vault values win on conflict. The agent reads the merged result; the on-disk files stay separate. Cross-vault concept reuse is **out of scope** — each vault owns its concepts, Learning Objects, and SQLite state independently.
 
+### Subjects as views
+
+A **subject** is a named view over the vault: a saved filter on Learning Objects, Practice Items, notes, observations, errors, and reflections. Subjects are not content-ownership boundaries — an LO can belong to multiple subjects, and the same concept (e.g. `probability`) can show up in `statistics`, `ml`, and `survival-analysis` views.
+
+Membership is declared on the entity:
+
+- **Learning Objects** carry `subjects: [list]` (required, ≥1 element). The first entry is the **primary subject**.
+- **Practice Items** inherit their subjects from their `learning_object_id` by default. A PI can override with its own `subjects:` to declare a strict subset (e.g. a framing only relevant in one subject).
+- **Notes** carry Markdown frontmatter `subjects: [list]` (required, ≥1).
+- **Observations**, **errors**, and **sessions** are vault-level; subject-filtered displays compute membership by walking the related LO / PI / note tags.
+
+Folder location is **advisory**, not authoritative:
+
+- A file at `subjects/<S>/learning-objects/<id>.yaml` is expected to have `subjects[0] == <S>`. `learnloop doctor` warns on mismatch; the loader still indexes the file by id.
+- `learnloop add-lo --subject <S>` scaffolds new files into the matching folder, but moving a file doesn't change its membership.
+- Multi-subject LOs live in their primary subject's folder; their other subjects show them via tag lookup, not via duplicate files or symlinks.
+
+Subjects themselves are still declared entities: a subject exists when its folder under `subjects/<id>/` exists with at least a `subject.md`. The folder name is the subject id. `learnloop add-subject <id>` creates the scaffold (subject.md, empty concept-graph.yaml view, learning-objects/, practice-items/, notes/).
+
+What's vault-level and what's per-subject:
+
+| Path | Authoritative location | Subject view? |
+| --- | --- | --- |
+| Concepts | `concepts/concepts.yaml`, `concepts/relations.yaml` (vault-level) | Per-subject `concept-graph.yaml` view |
+| Learning Objects, Practice Items, notes | Subject folders by primary subject | Filtered by tag |
+| Errors | `errors/global-error-log.md`, `errors/error-taxonomy.yaml` (vault-level) | Per-subject `errors.md` is a derived view |
+| Sessions | `sessions/<date>.md` (vault-level) | Subject filter on attempts table |
+| Reflections | Authored under any subject folder | Filtered by tag |
+| Mastery, beliefs, surprise | `state.sqlite` (LO-keyed, concept-keyed; **not** subject-keyed) | Aggregated for display per subject |
+
 ### Subject and domain extension model
 
 LearnLoop must be extensible across subjects. A subject is the learner-facing unit (`linear-algebra`, `korean`, `research-papers`, `overwatch-review`). A domain is a plugin-like module that chooses templates, rubrics, practice modes, attempt capture, learner-state mappings, scheduler hooks, and import helpers.
@@ -370,7 +403,69 @@ class DomainModule(Protocol):
     def migrations(self) -> list[SqlMigration]: ...
 ```
 
+### `PracticeModeSpec` — namespaced practice modes and their defaults
+
+A `PracticeModeSpec` describes a mode the domain registers (including namespaced ones like `language:conversation_turn`) and carries the defaults used when a Practice Item doesn't override them.
+
+```python
+class PracticeModeSpec(BaseModel):
+    id: str                                       # "language:conversation_turn"
+    domain_id: str                                # "language"
+    label: str                                    # human-readable name for TUI
+    default_target_mastery_axes: list[MasteryAxis]
+    default_evidence_facets: list[EvidenceFacet]
+    default_mastery_weights: dict[MasteryAxis, float]   # must sum to 1.0
+    default_grader_tier: int                      # 1 | 2 | 3 | 4 (see §15.6)
+    fsrs_eligible: bool = True                    # if False, mode does not feed FSRS state
+    plausible_error_types: list[str]              # which error taxonomy ids the surrogate may sample
+    short_session_eligible: bool = True           # if False, excluded from short-session mode queue
+```
+
+**Default resolution order** when an attempt is scored:
+
+1. Practice Item explicit values (`target_mastery_axes`, `evidence_facets`, `mastery_weights`) — always win.
+2. `PracticeModeSpec` defaults for the mode — used when the Practice Item omits a field.
+3. Core mode → axis table in §16 (the table shipped with LearnLoop) — used only for core modes when neither (1) nor (2) provides defaults.
+4. Hard failure → `learnloop doctor` flags the Practice Item; the scheduler will not surface it.
+
+Domain modules that register namespaced modes are required to provide a `PracticeModeSpec` for each. The vault startup loader validates that `sum(default_mastery_weights.values()) == 1` and that every facet listed maps to at least one core mastery axis.
+
 Domain modules do not own the global storage contract. They can add namespaced tables and files, but attempts, surprise, mastery axes, content provenance, and scheduler explanations still flow through the LearnLoop core tables.
+
+### Domain enable / disable / purge
+
+Domains are listed in `[domains].enabled`. Adding or removing an id is a config change; LearnLoop reacts on next vault open.
+
+**Soft-disable (default behavior on plugin removal).** Removing a domain from `[domains].enabled`:
+
+- All data is preserved. Domain-owned tables, namespaced Practice Items, namespaced observation events, and the domain's filesystem content (subject folders, prompts, rubrics) stay on disk.
+- Scheduler hooks from the domain stop running. TUI panels stop rendering. Practice modes namespaced under the domain become **unsurfaceable** — `learnloop today` will not include them in the queue, even if their `practice_item_state.due_at` has passed.
+- `learnloop doctor` warns: `Domain 'esports_overwatch' is referenced by 47 LOs / 132 PIs / 8 observations but not enabled in [domains].enabled.`
+- Re-adding the id to `[domains].enabled` reactivates everything. No data migration required.
+
+**Hard-purge (explicit destructive command).** When the user is sure they don't want the data:
+
+```bash
+learnloop domain purge esports_overwatch
+```
+
+The command:
+
+1. **Dry-run first** — prints what will be deleted: count of LOs, PIs, observations, attempts, grading evidence, propagation events, generated items, worked examples, scheduler explanations, surprise rows, beliefs, item state, domain-owned tables, plus the filesystem paths (subject folders, prompts, rubrics).
+2. **Requires typing the domain id to confirm** — typing `esports_overwatch` exactly. Anything else aborts.
+3. **Writes a `change_batches` row with `reason = domain_purge` and `origin = domain:esports_overwatch`** linking every deleted artifact via `file_change_preimages` and inverse SQLite metadata. The purge is itself rollbackable from the batch for `[storage].purge_undo_window_days` (default 7 days) after which it becomes permanent.
+4. **Refuses if domain is currently enabled** — the user must remove it from `[domains].enabled` first. This forces an explicit soft-disable step before a hard purge; can't fat-finger a destructive op while the domain is in active use.
+
+CLI surface:
+
+```bash
+learnloop domain list                         # show enabled / disabled / purgeable
+learnloop domain disable <id>                 # convenience for editing [domains].enabled
+learnloop domain enable <id>                  # convenience; runs migrations if needed
+learnloop domain purge <id>                   # destructive; requires double-confirm
+```
+
+The dry-run output and confirmation flow protect against the case where a user accidentally tries to purge a domain whose data they actually want.
 
 Capabilities tell the core which workflows a domain supports:
 
@@ -584,8 +679,18 @@ server_shutdown_timeout_seconds = 5
 restart_on_crash = true
 required_for_daily_loop = true          # daily loop requires Codex; offline runs degraded mode
 degraded_offline_mode = true            # allow review + self-grade + manual error tagging when Codex is unavailable
-rate_limit_backoff_seconds = 30         # subscription tiers throttle; back off rather than fail hard
-rate_limit_strategy = "queue_then_self_grade"  # queue retries; fall back to self-grade after N failures
+# Availability detection (see §12)
+probe_on_vault_open = false             # lazy first check by default; true = eager probe at vault open
+availability_cache_seconds = 300        # how long an `available` state is trusted before re-probing
+mid_attempt_fallback = "prompt_with_default"  # prompt_with_default | silent_self_grade | block_and_queue
+mid_attempt_prompt_timeout_seconds = 5  # how long the inline prompt waits before defaulting to self-grade
+# Per-error retry policy (see §12)
+rate_limit_backoff_seconds = 30         # initial backoff; subscription tiers throttle, back off rather than fail hard
+rate_limit_min_backoff_seconds = 300    # used when retry-after header is missing
+network_backoff_seconds = 30
+network_backoff_max_seconds = 300       # exponential cap
+server_error_backoff_seconds = 30
+auto_regrade_on_recovery = true         # re-fire tier-4 grading on attempts deferred while Codex was unavailable
 
 [scheduler]
 algorithm = "fsrs_object_mastery_greedy_eig"  # py-fsrs + object mastery + uncertainty-aware queue
@@ -808,6 +913,25 @@ Concept anchors are expanded through the global concept graph: a goal anchored o
 
 A status of `active`, `dormant`, or `completed` controls inclusion in the daily queue without deleting the goal record.
 
+## Note frontmatter convention
+
+Notes are Markdown files under any subject's `notes/` folder. Frontmatter is optional but recommended; when present it declares subject membership and related LOs:
+
+```markdown
+---
+subjects: [linear-algebra, ml]      # primary subject inferred from folder if omitted
+related_los: [lo_svd_decomposition, lo_pca_via_svd]
+related_concepts: [svd, principal_components]
+created_at: 2026-05-12
+---
+
+# SVD note
+
+...
+```
+
+A note without frontmatter is implicitly tagged with its folder's subject only. Frontmatter `subjects:` extends membership the same way LO YAML does. `learnloop doctor` checks that referenced LO ids and concept ids exist.
+
 ## `subjects/linear-algebra/subject.md`
 
 ```markdown
@@ -877,29 +1001,36 @@ confusables:
 
 Relations are stored separately from definitions so that adding a new prerequisite edge doesn't churn the definition file.
 
-## Per-subject `subjects/<subject>/concept-graph.yaml` (view)
+## Per-subject `subjects/<subject>/concept-graph.yaml` (view, mostly derived)
+
+A subject is a **view**, not a content-ownership boundary. Learning Objects and Practice Items declare their membership via `subjects: [list]` in their YAML. The per-subject `concept-graph.yaml` is mostly derived from those tags at load time; the hand-curated portion shapes the view without enumerating every concept.
 
 ```yaml
 subject: linear-algebra
-in_scope:                                       # global concept ids relevant to this subject
-  - matrix_multiplication
-  - linear_maps
+# derived at load time (do not hand-edit):
+#   in_scope: union of `concept` fields across all LOs whose subjects tag includes this subject,
+#             plus additional_concepts_in_scope below, minus exclude_concepts.
+#   learning_objects: tagged LOs, grouped by concept.
+
+additional_concepts_in_scope:                  # planned, no LO yet
+  - probability
+
+exclude_concepts:                              # concept bled in via a multi-subject LO; hide here
+  - quantum_mechanics
+
+subject_ordering_hints:                        # subject-specific learning order
   - eigenvectors
   - svd
-  - orthogonality
-subject_ordering_hints:                         # optional, subject-specific learning order
-  - eigenvectors
-  - svd
-learning_objects:                               # subject-owned LOs grouped by concept
-  eigenvectors:
-    - lo_eigenvectors_def
-    - lo_eigenvectors_procedure
-  svd:
-    - lo_svd_decomposition
-    - lo_svd_geometric_interpretation
+  - pca
 ```
 
-A subject view never redefines a concept. If a concept is missing, the view fails validation and `learnloop doctor` reports it. Learning Objects reference concepts by their global id (`concept: eigenvectors`).
+`learnloop subject <id> --show-scope` prints the resolved derived view. `learnloop doctor` checks:
+
+- every concept in `additional_concepts_in_scope` and `exclude_concepts` exists in the global registry;
+- `exclude_concepts` doesn't list a concept that no tagged LO references (dead exclusion);
+- every LO whose `subjects[0]` matches this subject sits in this subject's folder, or warns.
+
+Learning Objects reference concepts by their global id (`concept: eigenvectors`). They reference subjects by id (`subjects: [linear-algebra]`).
 
 ## Concept merge
 
@@ -936,8 +1067,9 @@ A Learning Object can have many Practice Items across many practice modes. The P
 ```yaml
 id: lo_fine_gray_subhazard
 title: Fine-Gray subdistribution hazard
-subject: survival-analysis
-concept: fine_gray_competing_risks
+subjects: [survival-analysis]              # primary subject first; required, >=1 element.
+                                            # primary should match folder location; doctor warns otherwise.
+concept: fine_gray_competing_risks          # vault-global concept id
 knowledge_type: definition          # see KnowledgeType enum
 status: active                      # active | dormant | resolved (resolved is for misconception LOs)
 contradicts: null                   # only set on misconception LOs; points to the LO this misconception attacks
@@ -945,6 +1077,8 @@ prerequisites:
   - lo_cause_specific_hazard
   - lo_competing_risks_setup
 difficulty_prior: 0.7
+references_worked_examples:          # two-way link with worked-examples/*.md (see §15.8)
+  - worked-examples/we_fg_subhazard_definition_001.md
 provenance:
   origin: human                     # human | canonical_extract | ai_generated | ai_variant
   source_id: null
@@ -958,6 +1092,9 @@ Mastery axes and evidence facets are **not** stored as mutable estimates in this
 ```yaml
 id: pi_fg_subhazard_define_001
 learning_object_id: lo_fine_gray_subhazard
+# subjects inherited from learning_object_id by default; override here only if the
+# specific framing is relevant in a strict subset of the LO's subjects.
+# subjects: [survival-analysis]
 practice_mode: short_answer         # see PracticeMode enum
 attempt_types_allowed:              # see AttemptType enum
   - independent_attempt
@@ -1033,9 +1170,77 @@ grading_rubric:                     # optional inline rubric; falls back to defa
 - mastery EMA dampening (`hint_policy.mastery_alpha_dampening_by_hint` multiplies `effective_alpha`),
 - the `hints_bucket` field used in surprise prediction.
 
-Items without an explicit `hints` array fall back to the per-mode default ladder shipped in `prompts/hint_ladder_<mode>.md`. Items with `hints: []` advertise that no hints are available and the [Hint] button is disabled.
+Items with `hints: []` advertise that no hints are available and the [Hint] button is disabled. By default, `recognition`, `multiple_choice`, and other modes where a hint would give away the answer ship with `hints: []`.
 
-Hinted attempts log as `attempt_type: hinted_attempt`. The grading pipeline runs normally; only the FSRS rating cap and mastery dampening change.
+### Generation policy (hybrid with cache)
+
+Items without an explicit `hints` array follow a hybrid generation policy:
+
+1. **Authored hints** (`hints: [...]` in the PI YAML) → use as-is.
+2. **Codex available + no authored hints** → on the first `[Hint]` reveal in a session, call the `hint-author` role to generate the full ladder for this PI, write the result back into the PI YAML, and use it. Subsequent reveals (this session or future sessions) hit the cached ladder.
+3. **Codex unavailable + no authored hints** → fall back to the per-mode static template in `prompts/hint_ladder_<mode>.md`, with substitutions like `{concept_title}`, `{knowledge_type}`, `{expected_first_step}`. The static fallback is not cached to the PI YAML.
+
+The cache step in (2) is a normal LearnLoop content write — it goes through `change_batches` with `reason: hint_generation`, can be rolled back, and is provenance-tagged (`generator_run_id`, `model`, `prompt_template = hint_author`, `prompt_version`). The learner can edit cached hints later; edits set `provenance.review_status = approved` and bump `content_hash`.
+
+### Hint-author validation and retry
+
+Generated hint ladders are validated before being cached. A failure on the first attempt triggers one retry with explicit constraint patches in the prompt. A second failure falls back to the static template and flags the Practice Item in doctor for manual authoring.
+
+Validation rules (defaults; configurable in `[grading].hint_author_guardrails`):
+
+- **Answer-leakage guard:** no individual hint may have lexical overlap with `expected_answer` above `lexical_overlap_max = 0.40` (token-set Jaccard after normalization). For structured `expected_answer.key_terms`, no hint may name more than `key_terms_leakage_max = 1` term verbatim.
+- **Rubric-trap guard:** if the PI's `grading_rubric.fatal_errors` is non-empty, no hint may contain the description text of any fatal-error entry (would tip off the trap).
+- **Ladder shape:** length between `min_hints = 2` and `max_hints = 4`. Each hint ≤ `hint_max_chars = 200`. Ordered: each hint must be at least as specific as the previous (a local heuristic — token count and `expected_answer` overlap should be monotonically non-decreasing).
+- **Final-step guard:** the last hint may overlap with `expected_answer` up to `final_hint_overlap_max = 0.55` (slightly more permissive — final hints can edge toward the answer), but still must not be the answer.
+
+On a validation failure, the retry prompt receives a structured "violations" patch:
+
+```text
+Your previous attempt was rejected. Address these issues and try again:
+- Hint 3 had 67% lexical overlap with the expected answer (limit 40%).
+- Hint 2 named the fatal error trap "treats hazard as a probability" verbatim.
+Keep the ladder shape (2–4 hints, each ≤ 200 chars).
+```
+
+The second attempt is validated the same way; a second failure causes:
+
+1. The static per-mode template ladder is cached on the PI YAML instead (provenance-tagged as `origin: ai_generated_failed_validation_static_fallback`).
+2. A doctor warning is raised on the PI suggesting manual hint authoring.
+3. `agent_runs` records both attempts and their validation outcomes, so the user can later inspect what went wrong via `learnloop lineage <pi_id>` or `learnloop ai history`.
+
+Config:
+
+```toml
+[grading.hint_author_guardrails]
+lexical_overlap_max = 0.40
+key_terms_leakage_max = 1
+final_hint_overlap_max = 0.55
+min_hints = 2
+max_hints = 4
+hint_max_chars = 200
+retry_on_failure = true
+```
+
+Static templates (path (3)) are deliberately generic. They serve to keep `[Hint]` from being a dead button offline, not to be high-quality nudges.
+
+Hinted attempts log as `attempt_type: hinted_attempt` regardless of how the ladder was sourced. The grading pipeline runs normally; only the FSRS rating cap and mastery dampening change.
+
+### Per-mode static template structure
+
+`prompts/hint_ladder_<mode>.md` is a small Markdown file with one substituted line per hint level:
+
+```markdown
+---
+name: hint_ladder_short_answer
+version: 1
+applies_to: short_answer
+---
+1. Think about what {concept_title} is fundamentally for — its purpose, not its formula.
+2. The expected answer involves {knowledge_type}. What does that imply about structure?
+3. Try starting with: "{expected_first_step}"
+```
+
+Substitutions are resolved from the LO and PI at hint-reveal time. If a substitution is missing, the bracket placeholder is shown as-is — better than a crash, and easier for `learnloop doctor` to spot.
 
 ## Item-memory state (SQLite, not YAML)
 
@@ -1086,6 +1291,7 @@ Codex SDK adapter
 │ Weak Concepts: 7                           │
 │ Transfer Gaps: 4                           │
 │ Active-Goal Uncertainty: 3 high            │
+│ Pending Reviews: 7   (R to triage)         │
 │ Suggested Session: 75 min                  │
 ├────────────────────────────────────────────┤
 │ 1. Start Today's Loop                      │
@@ -1095,8 +1301,49 @@ Codex SDK adapter
 │ 5. Error Notebook                          │
 │ 6. Concept Graph                           │
 │ 7. Open Codex Tutor                        │
+│ R. Review Grades  (7 pending)              │
 └────────────────────────────────────────────┘
 ```
+
+## Review grades (manual review triage)
+
+Reachable from the main screen (key `R`), the `learnloop review-grades` CLI, or the end-of-session sweep (which surfaces pending reviews alongside ephemeral promotions). One item at a time, fully keyboard-driven:
+
+```text
+┌────────────────────────────────────────────────────────────┐
+│ Review Grades  —  3 of 7                                   │
+├────────────────────────────────────────────────────────────┤
+│ Item: pi_fg_subhazard_define_001                           │
+│ Concept: fine_gray_competing_risks                          │
+│ Mode: short_answer        Grader: tier 4 (LLM)              │
+│ Grader confidence: 0.58   (below floor 0.60)                │
+├────────────────────────────────────────────────────────────┤
+│ Prompt:                                                     │
+│ Define the Fine-Gray subdistribution hazard.                │
+│                                                             │
+│ Learner answer:                                             │
+│ It models the subdistribution hazard for the event of       │
+│ interest in the presence of competing risks.                │
+│                                                             │
+│ Proposed grade: 2/4                                         │
+│ Rationale: Mentions target event and competing risks,        │
+│   but does not mention the modified risk set or             │
+│   cumulative incidence function.                            │
+├────────────────────────────────────────────────────────────┤
+│ [✓] accept    [✗] override    [↺] regrade    [→] defer      │
+│ [T] trust this rubric for the rest of the session            │
+└────────────────────────────────────────────────────────────┘
+```
+
+Actions:
+
+- `✓` — accept the proposed grade; mastery update fires now.
+- `✗` — open a numeric prompt to set a different score; mastery update fires with `grader_confidence = 1.0` (the human is the grader for this item).
+- `↺` — re-run the LLM grader. The previous evidence is preserved with `superseded_at`; the new evidence replaces it as authoritative.
+- `→` — defer; stays in the queue.
+- `T` — set a session-scoped flag that auto-accepts subsequent tier-4 grades from the same rubric template (matched by `prompt_template + prompt_version`). Clears at session end.
+
+Pending-review counter on the main screen is read-only summary state; opening the triage screen recomputes it. If the user starts `Today's Loop` while reviews are pending, the loop runs as normal — pending reviews don't block daily practice. They are surfaced again at session end.
 
 ## Session start (readiness gate)
 
@@ -1204,6 +1451,43 @@ Why this item?
 └────────────────────────────────────────────┘
 ```
 
+## Answer input widget
+
+The practice screen's answer input handles four classes of answer with one consistent UX:
+
+- **Short inline** — single line, soft cap at `[tui].inline_max_chars = 200`. Above the cap, a hint appears: "Ctrl-E to open editor." Pressing Enter without Ctrl-E still submits, but past the cap LearnLoop logs a `widget_truncation_risk` warning to the session log.
+- **Long answer** — `Ctrl-E` opens `$EDITOR` (or `[tui].editor_command` if set). The TUI yields the terminal; on editor exit, the file content becomes the answer. Autosaves to `session_checkpoints` every `[sessions].autosave_seconds` even mid-edit (the temp file is watched).
+- **Math** — learners write LaTeX-style `$inline$` and `$$display$$`. The widget doesn't typeset live; the source is preserved as-is. Feedback view renders the surrounding Markdown via Rich; math segments are shown literal (e.g. `$\sigma = U^T A V$` displays as that exact string with a subtle highlight). Pretty-printing (KaTeX-style) is **deferred** — it adds a real dependency and isn't blocking for math/stats/ML usefulness.
+- **Code** — fenced Markdown blocks (```` ```python ... ``` ````). Feedback view applies Rich syntax highlighting using the language tag. No execution, no sandboxing in MVP.
+
+The feedback screen renders:
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│ Your answer:                                                      │
+│   The eigenvectors of $A^T A$ give the right singular vectors;    │
+│   their eigenvalues are $\sigma_i^2$.                             │
+│                                                                   │
+│   ```python                                                       │
+│   U, S, Vt = np.linalg.svd(A)                                     │
+│   ```                                                             │
+│ (markdown rendered; math shown literal; code highlighted)          │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Config in `learnloop.toml`:
+
+```toml
+[tui]
+inline_max_chars = 200
+editor_command = ""              # empty = $EDITOR env var, then "vi"
+feedback_markdown = true
+feedback_code_highlight = true
+feedback_math_pretty_print = false   # MVP: false; later flag for KaTeX-style rendering
+```
+
+Deferred to later: file-attachment answers (e.g. a screenshot for VOD review), drag-and-drop, sandboxed code execution, live math rendering.
+
 ## Forgetting curve
 
 Per-LO retention visualization. The y-axis is retrievability (FSRS-derived); marker points are actual attempt scores. The curve is reconstructed from `practice_item_state` history and `practice_attempts` rather than recomputed from scratch.
@@ -1299,7 +1583,20 @@ learnloop uncertainty                              # inspect active-goal uncerta
 learnloop surprise <attempt_id>                    # inspect the prediction and surprise from one attempt
 learnloop observe <template_id>                     # fill a structured observation/reflection template
 learnloop replay-model                              # recompute mastery, beliefs, surprise from raw attempts
+learnloop replay-model --diff                       # replay then show top-N largest mastery/variance movers
+learnloop replay-model --restore <snapshot_id>      # restore a pre-replay snapshot
+learnloop replay-model --accept-without-replay      # mark the new algorithm version accepted without recomputing
 learnloop errors
+learnloop review-grades                            # triage pending manual-review grades
+learnloop ai status                                # codex availability state + last error + ETA
+learnloop ai login                                 # walk codex SDK auth flow
+learnloop ai recheck                               # force an immediate availability probe
+learnloop domain list                              # enabled / disabled / purgeable domains
+learnloop domain enable <id>                       # add to [domains].enabled (runs migrations if needed)
+learnloop domain disable <id>                      # remove from [domains].enabled (soft; data preserved)
+learnloop domain purge <id>                        # destructive removal; requires double-confirm
+learnloop tutor reset <subject>                    # archive the current tutor thread; next invocation starts fresh
+learnloop tutor history <subject>                  # list archived tutor threads with briefs
 learnloop misconceptions                           # list active misconception LOs
 learnloop lineage <pi_id>                          # provenance tree for a Practice Item
 learnloop graph linear-algebra
@@ -1361,6 +1658,12 @@ Restore must require an explicit backup id and should refuse to overwrite an ope
 - duplicate ids,
 - broken Learning Object / Practice Item links,
 - broken concept references,
+- LO / PI `subjects: [list]` invariant: ≥1 element, every subject id exists, `subjects[0]` matches the file's folder (warn-only),
+- note frontmatter `subjects:` references valid subject ids; `related_los` / `related_concepts` references resolve,
+- per-subject `concept-graph.yaml` view: `additional_concepts_in_scope` and `exclude_concepts` reference valid global concepts; no dead exclusions,
+- worked-example two-way links: every `teaches_los` entry resolves to a real LO whose `references_worked_examples` lists this file, and vice versa,
+- `media-index.yaml` entries: paths resolve or fingerprint-match a file in `[media].search_roots`; ambiguous fingerprints reported; missing media listed with dependent items,
+- observation templates: `lo_binding.mode == template_fixed` implies `template_fixed_lo` set; `applies_to_mode == restrict` predicates compile; suggest_from sources are valid,
 - missing source ids for canonical content,
 - stale content hashes,
 - stale learner-state beliefs or missing surprise records for recent attempts,
@@ -1451,6 +1754,162 @@ These are prompt templates and structured-output schemas used by the SDK adapter
 - **`error-diagnostician`** — receives a solution + context, returns error classification and a repair plan.
 - **`canonical-ingestor`** — reads trusted source material, returns a structured patch of Learning Objects, Practice Items, concept-graph edges, and definitions.
 - **`variant-generator`** — produces variants of an approved Practice Item, capped by `[inbox].max_auto_variants_per_item`; also produces `disguised_retest` items for resolved misconceptions.
+- **`hint-author`** — given a Practice Item missing a `hints` ladder, generates a progressive 2–4 step ladder informed by the LO, expected_answer, common errors, and (where relevant) the hint policy. Output is cached back into the PI YAML.
+- **`tutor-summarizer`** — given an archived tutor thread, produces a ~200-token brief covering: topics covered, recurring questions, error patterns surfaced, unresolved threads. Used as the first system message of the next tutor thread on the same `(subject, purpose)` to preserve continuity.
+- **`worked-example-author`** — given an LO and the learner's profile, generates a worked example Markdown file (with optional structured `steps:` when the LO benefits from later faded variants). Used when the scheduler picks a `walkthrough` for an LO with no existing worked example.
+
+## Codex availability state machine
+
+The adapter holds an in-process availability state surfaced to the TUI (corner status indicator) and to the CLI (`learnloop ai status`). States:
+
+| State | Meaning | Auto-retry? | User action required? |
+| --- | --- | --- | --- |
+| `unknown` | No probe yet this process | First AI feature triggers probe | No |
+| `available` | Last call succeeded; cache fresh | n/a | No |
+| `auth_required` | SDK reported auth error (missing, expired, revoked) | **No** — auth changes need user action | `learnloop ai login` |
+| `rate_limited` | Subscription tier throttled | Yes, after `retry-after` (min `rate_limit_min_backoff_seconds`) | No (unless persistent) |
+| `network_unavailable` | Transport error | Yes, 30s exponential backoff capped at `network_backoff_max_seconds` | No |
+| `server_error` | 5xx from Codex | Yes, 30s exponential backoff | No |
+| `streaming_dropped` | Mid-turn disconnect | Specific turn marked failed; next AI feature retries immediately | No |
+
+**First check.** Lazy by default — the first AI feature triggers a probe. When `[ai].probe_on_vault_open = true`, a quick background probe runs at vault open so the indicator is correct before the learner asks for anything.
+
+**Cache.** An `available` state is trusted for `[ai].availability_cache_seconds` (default 300). Any successful call refreshes the cache. Any failure transitions out of `available` immediately and writes the new state with the timestamp.
+
+**Recovery and auto-regrade.** When the state transitions from any non-`available` state to `available`, the adapter emits a `codex_recovered` event. If `[ai].auto_regrade_on_recovery = true`, a background task scans `practice_attempts` rows where `manual_review = 1 AND manual_review_reason = 'codex_unavailable'`, requeues them for tier-4 grading, and on success clears the manual-review flag and applies the previously-held mastery update. The learner sees a toast: "Codex recovered. 3 deferred attempts regraded." Failed regrades stay in the manual-review queue.
+
+**TUI surface.** Corner status indicator:
+
+- `●` green = `available`
+- `●` yellow = transient (`rate_limited`, `network_unavailable`, `server_error`, `streaming_dropped`)
+- `●` red = persistent (`auth_required`)
+- `○` gray = `unknown`
+
+Hovering or pressing `?` on the indicator shows the last error and ETA to next retry.
+
+**CLI:**
+
+```bash
+learnloop ai status        # current state + last probe + last error + ETA
+learnloop ai login         # walk the Codex SDK auth flow
+learnloop ai recheck       # force a probe now (resets cache)
+```
+
+## Per-purpose rate-limit behavior
+
+The state machine handles availability. Each purpose has its own response when Codex becomes unavailable mid-call:
+
+| Purpose | Behavior on rate-limit / network failure |
+| --- | --- |
+| `rubric-grader` (tier 4) | Mid-attempt fallback (§15.6): inline 5s self-grade prompt; deferred attempts auto-regrade on recovery. |
+| `tutor` | Cache the user's pending message; show transparent waiting state with retry ETA; auto-resume the thread on recovery. **See below.** |
+| `variant-generator`, `hint-author`, `worked-example-author`, `tutor-summarizer` | Defer: the generation is queued and retried on recovery; the user is not blocked. |
+| `canonical-ingestor` | Defer: ingestion jobs run in background; pause and resume on availability. |
+| `error-diagnostician` | Mid-attempt fallback (same as grader): self-grade prompt; deferred diagnosis re-runs on recovery. |
+| Simulator-EIG ephemeral proposer | Skip silently — heuristic-bucket EIG is the workhorse; missing ephemerals just means no diagnostic proposals this session. |
+
+### Tutor cache-and-resume
+
+When a tutor call fails mid-conversation (rate limit, network drop, server error), LearnLoop persists the pending user input rather than losing it:
+
+```sql
+CREATE TABLE tutor_pending_messages (
+  thread_key TEXT PRIMARY KEY,           -- (vault_id, subject, purpose) tuple serialized
+  pending_input TEXT,                    -- the user's last input that hadn't been answered
+  appended_inputs TEXT,                  -- JSON list; if the user types more while waiting
+  attempted_at TEXT,
+  retry_after TEXT,                      -- ETA parsed from retry-after header (if any)
+  status TEXT                            -- waiting | resumed | abandoned
+);
+```
+
+TUI surface during the wait:
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│ Codex Tutor — survival-analysis                                  │
+├──────────────────────────────────────────────────────────────────┤
+│ You: Why does Fine-Gray treat censored subjects differently than │
+│       Kaplan-Meier?                                              │
+│                                                                   │
+│ ⏳ Codex is rate-limited. Your message is queued.                │
+│    Estimated retry: 2m 14s                                       │
+│                                                                   │
+│ You can keep typing — additional messages will be appended.      │
+├──────────────────────────────────────────────────────────────────┤
+│ > _                                                               │
+│ [Cancel queued message]  [Switch to offline review]              │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+On recovery (state transitions to `available`), the adapter resumes the thread by feeding the cached input plus any appended inputs as one combined message, then streams the response in normally. The `tutor_pending_messages` row clears on success or on user cancellation. If the user explicitly closes the tutor screen with a pending message, status flips to `abandoned`.
+
+Cached messages survive process restarts — opening `learnloop today` after a crash recovers any pending tutor inputs.
+
+## Thread management
+
+Codex threads are keyed by `(vault_id, subject, purpose)`. The adapter maintains them per-purpose:
+
+| Purpose | Thread lifetime | Persistence |
+| --- | --- | --- |
+| `tutor` | Long-lived (weeks to months); archived periodically | Persisted in `tutor_threads` table; resumed across sessions |
+| `rubric-grader`, `error-diagnostician`, `variant-generator`, `hint-author`, `worked-example-author`, `canonical-ingestor`, `tutor-summarizer`, simulator proposer | Stateless per-call | Not persisted; each call is its own thread |
+
+The stateless purposes don't need continuity — every grading or generation call carries its full context in the prompt. Only `tutor` benefits from thread state.
+
+### Tutor thread storage
+
+```sql
+CREATE TABLE tutor_threads (
+  thread_key TEXT PRIMARY KEY,           -- (vault_id, subject, purpose)
+  sdk_thread_id TEXT,                    -- handle returned by the Codex SDK
+  started_at TEXT,
+  last_used_at TEXT,
+  turn_count INTEGER,
+  cumulative_tokens INTEGER,
+  status TEXT                            -- active | archived | abandoned
+);
+
+CREATE TABLE tutor_thread_archives (
+  id TEXT PRIMARY KEY,
+  thread_key TEXT,                       -- references tutor_threads
+  archived_at TEXT,
+  reason TEXT,                           -- turn_cap | token_cap | inactivity_cap | manual_reset
+  turn_count_at_archive INTEGER,
+  cumulative_tokens_at_archive INTEGER,
+  brief TEXT,                            -- ~200-token summary from tutor-summarizer
+  brief_agent_run_id TEXT
+);
+```
+
+### Archival policy
+
+A tutor thread is archived when **any** of:
+
+- `turn_count > [tutor].thread_turn_cap` (default 80)
+- `cumulative_tokens > [tutor].thread_token_cap` (default 50000)
+- `(now - last_used_at).days > [tutor].thread_inactivity_cap_days` (default 30)
+
+On archival:
+
+1. `tutor-summarizer` is invoked (one Codex call) to produce a ~200-token brief covering topics, recurring questions, error patterns, and unresolved threads.
+2. A `tutor_thread_archives` row is written with the brief.
+3. The `tutor_threads` row flips `status = archived`.
+4. Next time the user invokes the tutor for the same `(subject, purpose)`, a fresh thread is started with the most-recent archive's `brief` as the first system message (after the standard tutor system prompt).
+
+If `tutor-summarizer` fails (rate limit, etc.), the archive row is still written but with `brief = null`; the next thread starts without continuity and a doctor warning is raised. The brief is generated again opportunistically on next Codex availability if the archive's brief is still null.
+
+Manual reset: `learnloop tutor reset <subject>` archives the current thread immediately (reason `manual_reset`) — useful when the learner wants a fresh tutor context (e.g. switching focus within a subject).
+
+Config:
+
+```toml
+[tutor]
+thread_turn_cap = 80
+thread_token_cap = 50000
+thread_inactivity_cap_days = 30
+preserve_brief_on_archive = true       # if false, archive without summarizing (no Codex call needed)
+```
 
 ## Lifecycle
 
@@ -1459,6 +1918,8 @@ TUI start
    ↓
 open vault + run migrations + refresh exports
    ↓
+(optional) eager Codex probe if probe_on_vault_open is set
+   ↓
 start Codex SDK client lazily when first AI feature is used
    ↓
 create/resume subject-specific thread
@@ -1466,6 +1927,9 @@ create/resume subject-specific thread
 stream turns or receive structured proposals
    ↓
 validate and apply LearnLoop-owned operations
+   ↓
+on availability change → emit codex_recovered or codex_unavailable
+                       → auto-regrade deferred attempts if recovered
    ↓
 TUI exit → close SDK client gracefully
 ```
@@ -1807,6 +2271,105 @@ Not every attempt needs an LLM call. LearnLoop routes attempts through a tiered 
 
 Tiers 1–3 are local-only, deterministic, sub-100ms, and **work in degraded offline mode**. Tier 4 requires Codex; offline it routes to self-grade.
 
+### Tier 3 termination rules (asymmetric)
+
+Tier 3 is an **asymmetric local grader**. It can terminate as incorrect more easily than it can terminate as correct, because embedding similarity is a stronger signal for "this isn't the right answer" than for "this is the right answer."
+
+```text
+sim = cosine_similarity(normalize(learner_answer), normalize(expected_answer))
+
+if sim < tier_3_low_threshold:                   # default 0.55
+    return incorrect (terminal)
+elif sim > tier_3_high_threshold:                # default 0.85
+    if PI.tier_3_terminal_positive or domain.tier_3_terminal_positive_default:
+        if not item_blocks_terminal_positive(PI):
+            return correct (terminal)
+    escalate to tier 4 with prior_correct signal
+else:
+    escalate to tier 4 (no prior)
+```
+
+**Items where terminal-positive Tier 3 is blocked by default** (the LLM grader must see them):
+
+- `practice_mode in {proof_reconstruction, derivation_reconstruction, transfer, near_transfer, far_transfer, contrastive_discrimination, misconception_repair, error_diagnosis, disguised_retest}`
+- `PI.grading_rubric.fatal_errors` is non-empty (the rubric encodes traps that embedding similarity can't detect)
+- `PI.provenance.high_stakes_canonical_item == true`
+
+`item_blocks_terminal_positive(PI)` enforces this list. The PI YAML can override with `tier_3_terminal_positive: true` *and* `tier_3_terminal_positive_force: true` (both required for explicit override), which `learnloop doctor` warns about so the override is visible.
+
+The tier-4 prompt receives `prior_correct = true` when escalation came from the high-similarity branch. The LLM grader is instructed: "Tier 3 found high similarity (sim={sim}). Confirm correctness or identify a specific issue the embedding similarity missed." This biases the LLM toward affirming when no specific issue is found, while keeping it free to flag subtle errors.
+
+Config in `[grading]`:
+
+```toml
+tier_3_low_threshold = 0.55
+tier_3_high_threshold = 0.85
+tier_3_terminal_positive_default = false
+tier_3_terminal_positive_blocked_modes = [
+  "proof_reconstruction", "derivation_reconstruction",
+  "transfer", "near_transfer", "far_transfer",
+  "contrastive_discrimination", "misconception_repair",
+  "error_diagnosis", "disguised_retest",
+]
+```
+
+### Grader confidence — reliability of the judgment, not the learner's correctness
+
+A core distinction: **`grader_confidence` measures how reliably the grader decided, not how much credit the answer earned.** A confident 1/4 is a clear, reliable "mostly wrong"; a low-confidence 4/4 is a "looks right but I'm not sure I caught everything." These two cases want very different downstream behavior — the first updates mastery, the second triggers manual review.
+
+Confidence is smoothed but capped, per tier:
+
+```python
+def grader_confidence(tier, signal):
+    if tier == 1:                       # exact-match
+        return 1.00
+
+    if tier == 2:                       # rubric-template
+        # the rubric IS the source of truth; partial credit doesn't lower reliability.
+        # Only ambiguous matches (synonyms outside normalized terms, fall-through cases)
+        # lower confidence.
+        if signal.match_kind == "clean":
+            return 0.95
+        if signal.match_kind == "fuzzy_terms":   # had to do lemma/synonym fallback
+            return 0.85
+        return 0.70                              # rubric couldn't decide cleanly; usually escalates
+
+    if tier == 3:
+        # Embedding similarity is a noisier signal than rubric matching.
+        # Confidence grows as similarity moves further from the gray zone.
+        sim = signal.similarity
+        if signal.outcome == "incorrect_terminal":           # sim < low_threshold
+            # 0.70 at threshold, 0.90 at sim = 0
+            return 0.70 + 0.20 * (1 - sim / tier_3_low_threshold)
+        if signal.outcome == "correct_terminal":             # sim > high_threshold
+            # 0.65 at threshold, 0.80 at sim = 1.0
+            return 0.65 + 0.15 * (sim - tier_3_high_threshold) / (1 - tier_3_high_threshold)
+        return None                                          # escalated; tier 4 reports its own
+
+    if tier == 4:                       # LLM rubric-grader
+        return signal.model_reported_confidence              # 0.0 to 1.0
+```
+
+`grader_confidence_floor` (default 0.60) still triggers manual review per existing policy. Under this regime, tier-2 partial matches usually clear the floor (confidence stays high), while ambiguous tier-2 fall-throughs and middle-range tier-3 escalations either route to tier 4 or land in manual review depending on whether Codex is available. Score and confidence are stored separately on `practice_attempts` and on `grading_evidence` so analyses can ask "how reliable were our grades?" independent of "how did the learner do?"
+
+### Mid-attempt fallback when Codex fails (tier 4)
+
+When a tier-4 grading call fails (Codex unavailable, rate-limited, network down, etc.) **after the learner submitted their answer**, the attempt cannot just be discarded. The adapter routes per `[ai].mid_attempt_fallback`:
+
+- **`prompt_with_default`** (default, see §12): an inline prompt appears for `mid_attempt_prompt_timeout_seconds` (default 5):
+  ```text
+  Codex unavailable (rate limited)
+  Self-grade this attempt?  [Y]es   [N]o, defer
+  ⏱ 4s … → default Y
+  ```
+  - **Y** → opens a 0–4 rubric prompt; the resulting score is stored with `grader_tier = 0` (self-grade), `grader_confidence = 1.0` (the human is the grader), and `manual_review = 0`. Mastery update fires.
+  - **N** → attempt is deferred. The row is written with `correctness = null`, `manual_review = 1`, and `manual_review_reason = 'codex_unavailable'`. Mastery is **not** updated yet. On Codex recovery, the auto-regrade task picks it up (see §12).
+  - **Timeout** → default `Y` self-grade prompt opens.
+- **`silent_self_grade`** — skip the prompt, go straight to the self-grade rubric. Used by learners who don't want interruptions. The corner status indicator turns yellow so they can see the grader changed.
+- **`block_and_queue`** — write the attempt deferred immediately (same as `N` above), surface a brief notice, move on to the next queue item.
+
+Deferred attempts surface in the pending-reviews counter and triage screen (§10), and are re-graded automatically when Codex recovers. If the learner has already started another session by then, the regrade still applies; if the deferred attempt's content has been edited (PI prompt or expected_answer changed), the regrade is held for explicit user review instead of auto-applying.
+
 Tier-2 rubric templates are domain-shipped (e.g. `rubrics/short_answer.yaml`) and operate on normalized text:
 
 ```yaml
@@ -2000,7 +2563,29 @@ While a misconception LO is `status: active`, the scheduler:
 
 **Resolution rule:** three consecutive correct attempts across at least two practice modes, none flagged `high_confidence_wrong`. On resolution the misconception LO flips to `status: resolved`, an entry is appended to `errors/global-error-log.md` marking it closed, and the contradicted LO clears its implicit repair flag.
 
-If `[learning].disguised_retest_after_resolution = true`, resolved misconceptions still surface occasionally as disguised re-tests — calibration evidence that the repair held. Failed disguised re-tests reopen the misconception (`status: active`) and restart the repair loop.
+If `[learning].disguised_retest_after_resolution = true`, resolved misconceptions surface occasionally as disguised retests — calibration evidence that the repair held.
+
+### Disguised retest policy
+
+A mature vault accumulates resolved misconceptions; without a cap and growing interval the daily queue eventually fills with long-tail retests. The policy:
+
+- **Per-session cap: 1.** At most one disguised retest can appear in any session. If multiple are eligible, the oldest-since-last-retest comes first.
+- **Eligibility: active-goal scope required.** A misconception is eligible only when its contradicted LO is in scope for at least one active goal (resolved via `concept_anchors` + concept-graph closure, see §7). Misconceptions whose contradicted LO has dropped out of active goals stop surfacing — they remain resolved on disk but quiet in the queue.
+- **Interval schedule:** successful disguised retests push the next one out geometrically — 14d → 30d → 60d → 120d → 365d, capped at 365d.
+- **Reopening on one failure.** A failed disguised retest immediately flips the misconception back to `status: active`, resets the interval clock, and restarts the repair loop (§15.7 above). The spec deliberately does **not** require two consecutive failures: misconceptions are insidious; a single high-confidence-wrong slip on a disguised retest is itself strong evidence the repair was shallow.
+- **Disguised retests sit on top of, not inside, the queue budget.** They replace one slot in the daily review block, not the deep-work or transfer block.
+
+The schedule, cap, and reopening rule are tunable in `algorithm_priors.yaml`:
+
+```yaml
+misconception:
+  disguised_retest:
+    per_session_max: 1
+    intervals_days: [14, 30, 60, 120, 365]
+    reopen_on_failures: 1
+    selection: oldest_eligible_first
+    active_goal_scope_required: true
+```
 
 ## Why misconceptions get their own LO
 
@@ -2008,6 +2593,206 @@ If `[learning].disguised_retest_after_resolution = true`, resolved misconception
 - They survive across subjects — "hazard is a probability" can attack `lo_fine_gray_subhazard`, `lo_cox_hazard`, and `lo_kaplan_meier`. One misconception LO, many contradicted LOs (n-to-1).
 - They can carry many Practice Items dedicated to them (contrastive, repair, disguised retest).
 - They're queryable and trackable from the dashboard: `learnloop misconceptions` lists active ones.
+
+---
+
+# 15.8. Worked examples
+
+Worked examples are Markdown files at `subjects/<S>/worked-examples/<name>.md`. They are content (read or observed), not Practice Items. The fading sequence (§16) consumes them when generating `walkthrough` / `faded_worked_example` / `completion_problem` items.
+
+## Frontmatter
+
+Frontmatter declares which Learning Objects the example teaches and, optionally, the structured steps that enable deterministic fading:
+
+```markdown
+---
+id: we_svd_2x2_example_001
+teaches_los: [lo_svd_decomposition, lo_svd_geometric_interpretation]   # required, ≥1
+subjects: [linear-algebra, ml]                                          # optional; inferred from folder
+steps:                                                                  # optional; enables faded variants
+  - id: setup
+    content: "Let A = UΣVᵀ where A is m×n."
+    fadable: false                                                      # always shown; structural setup
+  - id: dimensions
+    content: "U is m×r, Σ is r×r diagonal with σ₁ ≥ ... ≥ σ_r > 0, Vᵀ is r×n."
+    fadable: true
+  - id: geometric
+    content: "Vᵀ rotates input space, Σ scales along principal axes, U rotates output space."
+    fadable: true
+  - id: example_2x2
+    content: "For A = [[3, 0], [4, 5]]: σ₁ = ..., σ₂ = ..."
+    fadable: true
+provenance:
+  origin: human                                                         # human | canonical_extract | ai_generated
+  source_id: null
+---
+
+# SVD: a 2×2 worked example
+
+Free-form prose, equations, commentary follow here. The steps above are an
+optional structured overlay; this prose is what the learner sees in
+`worked_example` mode.
+```
+
+`teaches_los: [list]` is required (≥1). The matching LO YAML must list this file in `references_worked_examples: [...]` for the two-way link. `learnloop doctor` enforces bidirectional consistency.
+
+Files **without** `steps:` are still valid — they render as plain prose. The fading sequence can still consume them: it asks Codex to generate elided variants from the prose at fading time. With `steps:` declared, fading is deterministic: stages elide `fadable: true` steps progressively.
+
+## Tracking views
+
+Every reveal of a worked example writes a row in `worked_example_views`:
+
+```sql
+CREATE TABLE worked_example_views (
+  id TEXT PRIMARY KEY,
+  learning_object_id TEXT,
+  example_id TEXT,                   -- frontmatter id
+  example_path TEXT,                 -- relative to vault root
+  session_id TEXT,
+  shown_at TEXT,
+  context TEXT,                      -- walkthrough | faded_stage | standalone_observe | review
+  attempt_id TEXT                    -- non-null when the reveal is part of a walkthrough/faded attempt
+);
+
+CREATE INDEX idx_we_views_lo_shown ON worked_example_views(learning_object_id, shown_at);
+```
+
+The scheduler picks the **oldest-shown** matching example for an LO when `worked_example` mode is selected. If no example exists for the target LO and Codex is available, the `canonical-ingestor` (or a dedicated `worked-example-author` role for ad-hoc cases) generates one and writes it to disk under standard provenance.
+
+---
+
+# 15.9. Media references
+
+Domains that consume external media (VOD review, motor-skill practice, language audio/video) store references in a per-subject `media-index.yaml`. LearnLoop never copies binary media into the vault unless the user explicitly imports it; the index points at user-owned file paths.
+
+## Format
+
+```yaml
+# subjects/overwatch-review/media-index.yaml
+media:
+  - id: ow_2026_05_12_kings_row
+    kind: video
+    path: ~/videos/ow/2026-05-12_kings_row.mp4
+    size_bytes: 824100000
+    fingerprint: "824100000:a1b2c3d4...:f9e8d7c6..."   # size:first_1mb_sha256:last_1mb_sha256
+    full_hash: null                                    # null when over full_hash_threshold_mb
+    duration_seconds: 1820
+    imported_at: 2026-05-12
+    tags: [kings-row, dive-comp]
+```
+
+Hashing strategy is **hybrid by size**, configurable in `learnloop.toml`:
+
+```toml
+[media]
+full_hash_threshold_mb = 50      # files <= this get full SHA-256; above get fingerprint only
+search_roots = []                # extra roots to scan when relocating moved files; vault_root always implicit
+hashing_parallelism = 2          # background workers for initial fingerprinting on import
+```
+
+Fingerprint format: `<size_bytes>:<first_1mb_sha256>:<last_1mb_sha256>`. Cheap to compute even on multi-GB files (one seek to end, two short reads). Files at or below `full_hash_threshold_mb` also get a full SHA-256 stored in `full_hash`, used for stronger collision resistance when available.
+
+## Relocation on missing path
+
+When LearnLoop reads a `media` entry and the `path` doesn't resolve, the loader scans `[media].search_roots` plus the vault root (recursively, files only) for a file matching the entry's fingerprint:
+
+1. **Full-hash match** (when both sides have one) → relocate; update `path`; log the move.
+2. **Fingerprint match** with `size_bytes` agreement → relocate; doctor warns when full-hash is missing on both sides.
+3. **Multiple candidates** with the same fingerprint → doctor reports an ambiguous match and asks the user to confirm.
+4. **No match** → doctor reports the entry as missing; the dependent practice items / observations are suspended (not deleted) until the file is restored or the entry is edited.
+
+Relocation never updates the file on disk; only the YAML reference. Users can ignore missing media by setting `[media].fail_on_missing = false` for read-only workflows; default is true so missing media surfaces loudly.
+
+---
+
+# 15.10. Observation-to-attempt mapping and end-of-session review
+
+§15.5 introduced structured observation templates. Each template now declares whether filling it produces a formal `practice_attempts` row and how the bound LO is chosen.
+
+## `ObservationTemplate` emission and binding
+
+Template YAML gains:
+
+```yaml
+id: obs_overwatch_hidden_state_review
+domain: esports_overwatch
+title: Overwatch hidden-state VOD review
+version: 2
+
+emits_attempt: true                # if false, only observation_events is written
+lo_binding:
+  mode: learner_picks              # learner_picks | template_fixed
+  template_fixed_lo: null          # required when mode == template_fixed
+  applies_to:                      # optional predicate filtering eligible LOs
+    knowledge_type: [tactical_pattern, schema, heuristic]
+    subjects: [overwatch-review]
+  applies_to_mode: suggest_only    # suggest_only (default) | restrict
+  suggest_from:                    # sources for autocomplete suggestions (in priority order)
+    - applies_to_matches
+    - active_goals
+    - recent_attempts
+    - recent_errors
+    - embedding_similarity
+
+fields:                            # ... structured response fields as before ...
+
+emits:                             # evidence emitted on fill
+  evidence_facets: [hidden_state_inference, action_selection_ev, calibration]
+  practice_mode: "esports_overwatch:belief_reconstruction"
+```
+
+### Binding modes
+
+- **`learner_picks`** — at fill time, the TUI prompts the learner to bind the observation to a specific Learning Object. Autocomplete suggestions come from `suggest_from` (priority order). The learner can accept a suggestion, type a different LO id, or **defer binding** (the observation is saved as a `pending_binding` event and surfaces in the end-of-session review).
+- **`template_fixed`** — the template names exactly one LO (`template_fixed_lo`). The fill flow doesn't ask; the attempt is bound automatically. Used for narrow domain workflows where the observation is always about the same skill.
+
+### `applies_to` modes
+
+- **`suggest_only`** (default) — `applies_to` filters which LOs surface as suggestions, but the learner can override with any LO id. Useful when the template is broadly applicable but has a typical scope.
+- **`restrict`** — only LOs matching `applies_to` are accepted. Override is blocked at fill time; the learner has to extend the predicate or use a different template. Used for narrow domain workflows where mis-binding would corrupt evidence.
+
+Observations without `emits_attempt` write to `observation_events` only and never bind to an LO. They surface in the end-of-session review for optional promotion to an attempt (with prompted rubric and LO binding).
+
+## Schema additions
+
+```sql
+ALTER TABLE observation_events ADD COLUMN bound_to_lo_id TEXT;
+ALTER TABLE observation_events ADD COLUMN bound_at TEXT;
+ALTER TABLE observation_events ADD COLUMN binding_mode TEXT;    -- learner_picks | template_fixed | pending | promoted_later
+```
+
+A `pending` binding means the observation was filled but the learner deferred LO selection; it appears in end-of-session review.
+
+## Unified end-of-session review
+
+The TUI has one **end-of-session review** surface that combines what were previously separate flows. Sections are grouped and skippable:
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│ End-of-Session Review                                            │
+├──────────────────────────────────────────────────────────────────┤
+│ Ephemeral promotions             (4 items)         [Open] [Skip] │
+│   Suggested: promote 2, skip 1, revise 1                          │
+│                                                                   │
+│ Pending grade reviews            (2 items)         [Open] [Skip] │
+│   Low grader confidence + 1 deferred (codex unavailable)          │
+│                                                                   │
+│ Observation promotions/binding   (3 items)         [Open] [Skip] │
+│   2 awaiting LO binding, 1 candidate for attempt promotion        │
+│                                                                   │
+│ Generated-content cleanup        (5 items)         [Open] [Skip] │
+│   Recently auto-accepted variants in this session; review/        │
+│   deactivate/rollback                                             │
+├──────────────────────────────────────────────────────────────────┤
+│ [Run All] [Done]                                                 │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Each `[Open]` enters the section-specific triage screen (ephemeral promotion sweep §15.5, review-grades triage §10, observation binding triage, recently-added review §10). Items remain pending if skipped; the review surface re-appears at next session end if anything is still pending.
+
+`[Run All]` is a fast-path for low-friction sessions: applies the auto-suggested actions for each section in order (promote/skip based on each section's recommendation), then exits.
+
+The review surface is also reachable mid-session via `learnloop review` (no arguments), useful when a session is paused or the learner wants to clear backlog before starting fresh.
 
 ---
 
@@ -2082,6 +2867,22 @@ def update_mastery(prev, score, item_difficulty, dim_weight, grader_confidence, 
 
 `dim_weight` is the practice item's `mastery_weights[axis]`. `grader_confidence` can soften updates for accepted automatic grades, but grades below `grader_confidence_floor` are held for manual review and do not update mastery until confirmed.
 
+### Axis correlation: how one attempt updates multiple axes without double-counting
+
+A Practice Item declares `target_mastery_axes` and `mastery_weights`. Invariant: **`sum(mastery_weights.values()) == 1`** — `mastery_weights` is a *partition of evidence*, not a vector of independent gains. The storage layer rejects a Practice Item YAML that violates this.
+
+For one attempt, every targeted axis is updated from the **same observed score** with its own `effective_alpha`:
+
+```python
+effective_alpha[axis] = base_alpha
+                      * mastery_weights[axis]
+                      * grader_confidence
+                      * hint_dampening[hints_used]      # from PI.hint_policy
+                      * cold_start_factor(lo, axis)     # see Cold-start priors
+```
+
+Each axis gets its own EMA update with the shared `gain`. The single score is split across axes by `mastery_weights`; the underlying mastery estimates can still drift apart over time as different items target different mixes. `error_impacts` (below) stacks on top of this as **additive deltas**, not EMA-style — they affect axes the item didn't even target. This two-step structure (EMA on targeted axes, additive corrections from error type) is what lets correlated axes coexist without inflating evidence.
+
 ### Axes and evidence facets
 
 | Core axis | Default evidence facets | Meaning |
@@ -2145,6 +2946,130 @@ error_impacts:
 
 `flag_high_confidence_wrong` triggers when `confidence >= 4` and `score < 0.30`: the item is treated as a misconception, not a recall miss. A repair-loop is scheduled (contrastive examples, then retest) and the error is logged.
 
+### Cross-LO propagation along the prerequisite DAG
+
+An attempt is logged against one Practice Item → one Learning Object, but evidence about that LO is also evidence about its prerequisites. LearnLoop propagates updates along the global concept-graph prerequisite DAG with a **bounded transitive policy**: bounded depth, geometric decay per hop, **error-type-gated** behavior, and a total-weight cap.
+
+**Asymmetric success vs failure.**
+
+- **Success** (`correctness ≥ 0.65`): variance-only update on prereqs (uncertainty shrinks, means do not move). A correct PCA attempt is weak positive evidence about SVD understanding — enough to tighten the belief, not enough to raise its mean.
+- **Failure** (`correctness < 0.50`): mean *and* variance update on prereqs, with magnitude scaled by depth decay, score severity (`1 − correctness`), `grader_confidence`, the propagating axis's `mastery_weights`, hint dampening, and the error-type gate (below).
+- **Borderline** (`0.50 ≤ correctness < 0.65`): variance-only update; no mean propagation.
+
+**Error-type gate.** Different error types tell us different things about upstream LOs. Failures route through a per-error gate that selects scope and magnitude. Defaults (overridable in `algorithm_priors.yaml` and per-domain):
+
+```yaml
+cross_lo_propagation:
+  default:
+    max_depth: 3
+    hop_decay: 0.5
+    total_propagated_weight_cap: 0.7   # sum |Δmean| across propagation set; scaled down if exceeded
+  error_gates:
+    recall_failure:
+      mean_factor: 0.0                 # forgetting a definition is not evidence prereqs are weak
+      variance_factor: 0.25
+      scope: all
+    conceptual_error:
+      mean_factor: 0.5
+      variance_factor: 0.7
+      scope: all
+    theorem_selection_error:
+      mean_factor: 0.4
+      variance_factor: 0.6
+      scope: conceptual_only
+    assumption_error:
+      mean_factor: 0.4
+      variance_factor: 0.6
+      scope: conceptual_only
+    procedure_error:
+      mean_factor: 0.5
+      variance_factor: 0.7
+      scope: procedural_only
+    notation_error:
+      mean_factor: 0.1
+      variance_factor: 0.3
+      scope: all
+    fluency_issue:
+      mean_factor: 0.2
+      variance_factor: 0.3
+      scope: procedural_only
+    transfer_failure:
+      mean_factor: 0.3
+      variance_factor: 0.5
+      scope: conceptual_only
+    high_confidence_wrong:
+      mean_factor: 0.7
+      variance_factor: 0.8
+      scope: all
+      trigger_misconception_repair: true
+```
+
+`scope` filters prereqs by the upstream LO's `knowledge_type`:
+
+- `conceptual_only` → `concept`, `definition`, `theorem`, `lemma`, `model`, `schema`, `assumption`, `distinction`
+- `procedural_only` → `procedure`, `algorithm`, `derivation`, `worked_example_pattern`, `proof_technique`
+- `all` → no filter
+
+**Propagation formula.** For each prereq `lo_p` at hop distance `d ∈ {1, …, max_depth}` whose `knowledge_type` is in scope:
+
+```python
+depth_weight = hop_decay ** d
+severity     = 1.0 - correctness                  # 0 if perfect, 1 if zero
+gate         = error_gates[error_type]            # or default on null
+
+raw_mean_delta = (
+    -1.0
+    * gate.mean_factor
+    * depth_weight
+    * severity
+    * mastery_weights[axis]
+    * grader_confidence
+    * hint_dampening[hints_used]
+)
+
+raw_variance_delta = (
+    gate.variance_factor
+    * depth_weight
+    * mastery_weights[axis]
+    * 0.02                                        # absolute units; variance grows
+)
+```
+
+Compute these raw deltas for every (prereq, axis) in scope. Sum `|raw_mean_delta|` across the whole propagation set; if the total exceeds `total_propagated_weight_cap`, scale all mean deltas (and proportionally the variance deltas) down by `cap / total`. Then apply.
+
+**Successful attempts** skip the mean-delta computation and only apply `raw_variance_delta` with the *negative* sign (variance shrinks). The total-weight cap applies the same way.
+
+**Overrides.**
+
+- Domains can override the entire `cross_lo_propagation` block in their module's config.
+- Individual LOs can declare:
+  ```yaml
+  cross_lo_propagation_override:
+    receives_propagation_from: [lo_id, ...]   # explicit allowlist, optional
+    block_propagation_from: [lo_id, ...]      # explicit denylist
+    max_depth_in: 2                            # tighter than the global default
+  ```
+  Useful when a prereq edge exists for ordering but failures downstream shouldn't update upstream beliefs (e.g. a foundational LO the learner has demonstrably mastered through many other paths).
+
+Propagation is computed *after* the direct LO's EMA update, *before* the surprise calculation (so surprise's posterior reflects the full update). Every propagated update writes a row in `attempt_propagation_events` so the path is auditable and replayable.
+
+```sql
+CREATE TABLE attempt_propagation_events (
+  id TEXT PRIMARY KEY,
+  attempt_id TEXT,
+  source_lo_id TEXT,
+  target_lo_id TEXT,
+  hop_distance INTEGER,
+  axis TEXT,
+  error_type TEXT,
+  mean_delta REAL,
+  variance_delta REAL,
+  applied REAL,                       -- 1.0, or <1.0 if scaled by total-weight cap
+  algorithm_version TEXT,
+  created_at TEXT
+);
+```
+
 ### Fluency signal
 
 Not just from `timed_drill`. Compute fluency from: `latency_vs_expected`, `hints_used`, `pause_count` (if available from the input widget), and consistency across recent attempts on the same item.
@@ -2175,14 +3100,21 @@ A full predictive-LM elicitation pass — sample plausible learner answers to ca
 
 MCTS/lookahead remains a later policy after enough local attempts exist (`mcts_min_attempts`).
 
-For each candidate Practice Item `q`, LearnLoop estimates a predictive distribution over the joint observation:
+### Dual score representation
+
+Two representations of the same observation coexist:
+
+- **Continuous raw score** `correctness ∈ [0, 1]` derived from the 0–4 rubric grade (or local-grader output) via `GRADE_TO_SCORE`. This is persisted on `practice_attempts.correctness` and is the input to all **mastery EMA updates**, analytics, replay, and future algorithm iterations. Raw scores are never lossy.
+- **5-way score bucket** `score_bucket ∈ {again, hard, good, easy}` derived from `correctness`. This is the canonical event alphabet for **EIG scoring, predictive surprise, scheduler explanations, and elicitation goldens**. Buckets make the predictive distribution discrete, the EIG integral a finite sum, and golden tests deterministic.
+
+For each candidate Practice Item `q`, LearnLoop estimates a predictive distribution over the joint *bucketed* observation:
 
 ```text
 o = (
-  score_bucket,      # e.g. again / hard / good / easy or 0-4 rubric bucket
+  score_bucket,      # again / hard / good / easy
   error_type,        # taxonomy id or null
-  confidence_bucket, # learner confidence
-  latency_bucket,    # relative to expected time
+  confidence_bucket, # low / medium / high
+  latency_bucket,    # fast / normal / slow / unknown
   hints_bucket       # none / low / high
 )
 ```
@@ -2196,7 +3128,58 @@ Default deterministic buckets:
 | `latency_bucket` | `fast` <= 0.5x expected, `normal` <= 1.5x, `slow` > 1.5x, `unknown` if no expected time |
 | `hints_bucket` | `none` = 0, `low` = 1, `high` >= 2 |
 
-The local single-user belief state `z` includes Learning Object mastery means, per-axis and selected per-facet variance, error-type propensities, misconception states, and calibration. MVP uses a transparent local surrogate model from current mastery, item difficulty, recent attempts, error impacts, confidence, latency, and hints. No cross-user model or hosted profile is assumed.
+`latency_bucket = unknown` when neither the Practice Item declares `expected_seconds` nor the LO has a `calibrated_mean_seconds`. In that case latency contributes nothing to EIG or predictive surprise for that attempt; it is still logged on `practice_attempts.latency_seconds` for analytics and for future calibration.
+
+The local single-user belief state `z` includes Learning Object mastery means, per-axis and selected per-facet variance, **per-learner error-type propensities** (a Dirichlet-like distribution over the error taxonomy, shrunk to a global prior), misconception states, and calibration.
+
+### Surrogate functional form
+
+The heuristic surrogate factorizes the joint predictive as:
+
+```text
+P(o | z, q) =  P(score_bucket   | z, q)
+            ·  P(error_type     | score_bucket, z, q)
+            ·  P(confidence     | score_bucket, z, q)
+            ·  P(latency_bucket | score_bucket, z, q)
+            ·  P(hints_bucket   | score_bucket, z, q)
+```
+
+**Score head.** A cumulative logistic over a learner-item logit:
+
+```python
+def score_logit(z, q):
+    axis_term = sum(q.mastery_weights[a] * z.mastery[q.lo, a] for a in q.target_mastery_axes)
+    return (
+        BETA_AXIS * (axis_term - 0.5)
+        - BETA_DIFFICULTY * (q.difficulty - 0.5)
+        - BETA_MISCONCEPTION * z.active_misconception_load(q.lo)
+    )
+
+# bucket probabilities from cumulative logistic with thresholds tuned to match
+# the 0.30 / 0.65 / 0.90 score-bucket cutpoints
+```
+
+**Error-type head.** Conditional on `score_bucket ∈ {again, hard}`, the surrogate samples an error type from the **per-learner propensity** `z.error_propensity[e]` masked to the error types that are physically plausible for the Practice Item's `practice_mode` and `knowledge_type` (e.g. `notation_error` only on items with notation). The per-learner propensity uses Dirichlet–multinomial shrinkage toward a global prior:
+
+```python
+def posterior_propensity(observed_counts, global_prior, prior_pseudo_count):
+    total = sum(observed_counts.values())
+    return {
+        e: (prior_pseudo_count * global_prior[e] + observed_counts[e])
+           / (prior_pseudo_count + total)
+        for e in error_taxonomy
+    }
+```
+
+**Confidence head.** Confidence tracks score weighted by `z.mastery[q.lo, "calibration"]`: a well-calibrated learner has `confidence_bucket` strongly correlated with `score_bucket`; a poorly-calibrated learner regresses to their baseline confidence distribution.
+
+**Latency head.** Shifted log-normal centered on `expected_seconds` (or `lo.calibrated_mean_seconds`), with width modulated by `z.mastery[q.lo, "execution"]` (more execution = tighter distribution). Returns `unknown` if no calibrated mean exists.
+
+**Hints head.** Probability of asking for hint N depends on `z.mastery[q.lo, "execution"]`, `z.mastery[q.lo, "calibration"]`, and `q.difficulty`. Learners who feel uncertain ask for hints more.
+
+Parameters (`BETA_*`, bucket thresholds, latency widths, calibration slopes) are shipped in `algorithm_priors.yaml` and refined from this learner's own attempts after `prior_pseudo_count` real observations on the relevant scope.
+
+### EIG scoring
 
 Heuristic expected information gain (the MVP scoring function):
 
@@ -2205,9 +3188,50 @@ EIG(q) = E_o [ KL( P(z | o, q) || P(z) ) ]
        = H(z) - E_o[H(z | o, q)]
 ```
 
-Both `P(o | z, q)` and the posterior update `P(z | o, q)` are computed from the surrogate, not from a language model. The expectation `E_o` ranges over the discrete joint buckets defined above. MVP scores each candidate question independently and picks high-value items inside the normal queue (greedy). The scorer must be deterministic, reproducible, and runnable without Codex.
+Both `P(o | z, q)` and the posterior update `P(z | o, q)` are computed from the surrogate, not from a language model. The expectation `E_o` ranges over the discrete joint buckets defined above (≤ 4 × |error_taxonomy_for_mode| × 3 × 4 × 3 — small enough to enumerate). `H(z)` is computed only over the belief slots scoped to active goals (variance-weighted entropy summed across axes/facets), not over the full belief tensor.
 
-Codex-simulator EIG (ephemeral diagnostic generation) does not score the existing PI pool; it proposes new items targeted at the highest-variance axis on a high-priority active-goal LO. The proposer prompt receives: the LO and its current belief means/variances, the recent attempt history for that LO, and a short list of plausible learner states to discriminate. The result is 1–3 ephemeral PIs added to the session, never to the permanent pool unless the learner promotes them.
+MVP scores each candidate question independently and picks high-value items inside the normal queue (greedy). The scorer must be deterministic, reproducible, and runnable without Codex.
+
+Codex-simulator EIG (ephemeral diagnostic generation) does not score the existing PI pool; it proposes new items targeted at the highest-variance belief on a high-priority active-goal LO. The proposer prompt receives: the LO and its current belief means/variances, the recent attempt history for that LO, and a short list of named hypotheses to discriminate. The hypotheses are generated **locally** from the heuristic surrogate's top modes of the posterior (e.g. `{id: "memorized_no_schema", description: "Recalls but can't apply", predicted_axis_profile: {memory: 0.85, understanding: 0.35}}`); Codex is only the question proposer, not the hypothesis generator.
+
+### Proposer output schema and validation
+
+The simulator-EIG proposer returns an **ephemeral-minimal** structure — just enough to ask a question and grade it. Rubric, hint ladder, provenance, difficulty estimate are all defaulted or omitted; full PI structure is built only if the learner later promotes the item.
+
+```python
+class SimulatorProposerOutput(BaseModel):
+    items: list[SimulatorProposedItem]   # 1 to 3 items
+
+class SimulatorProposedItem(BaseModel):
+    prompt: str
+    expected_answer: str
+    target_lo_id: str                    # must be a real LO
+    target_axis: MasteryAxis             # one of the 5 core axes
+    discriminates_hypotheses: list[str]  # ≥1; ids from the local-generated hypothesis list
+    practice_mode: str                   # one of the LO's eligible PracticeMode values
+```
+
+**Validation:**
+
+1. Schema validates (Pydantic).
+2. `target_lo_id` resolves to an active LO whose `subjects` overlap the current session's subject scope.
+3. `practice_mode` is in the eligible set for that LO (from `PracticeModeSpec` + LO's `subjects`).
+4. `discriminates_hypotheses` references at least one hypothesis from the local-generated list provided in the prompt.
+5. **Near-duplicate guard:** for each proposed item, embed `prompt` and check cosine similarity against existing PIs on `target_lo_id`. Reject items with `sim ≥ 0.85` (caller can have just been suggesting a copy of an existing item).
+6. Count is in `[1, simulator_ephemerals_per_session_max]` (default 3).
+
+**Retry policy.** If validation fails, retry once with a constraint-patch in the prompt (same pattern as hint-author):
+
+```text
+Your previous attempt was rejected. Issues:
+- Item 2 had similarity 0.91 to an existing Practice Item on this LO.
+- Item 3's practice_mode "transfer" is not in the eligible set; allowed: [short_answer, contrastive_discrimination, explain_from_memory].
+Please regenerate with these constraints.
+```
+
+A second failure means the scheduler proceeds **without** simulator-EIG ephemerals for this session — the heuristic-bucket EIG still drives the queue. The failure is logged on `agent_runs` so the learner can inspect via `learnloop ai history`.
+
+Validated items become ephemeral PIs (§15.5) bound to the session. They follow the existing ephemeral lifecycle: usable immediately, surface in the end-of-session promotion sweep with rationale derived from `discriminates_hypotheses`, not persisted to the permanent pool unless the learner promotes.
 
 After an attempt, LearnLoop records surprise:
 
@@ -2220,11 +3244,33 @@ Predictive surprise means "the observed answer was unlikely." Bayesian surprise 
 
 Bayesian surprise affects both scheduling and diagnosis:
 
-- **Negative surprise**: the learner performs much worse than expected, shows an unexpected error type, uses many hints, or has high confidence while wrong. FSRS intervals are shortened or rating is capped, the related LO/error belief uncertainty increases, and a diagnostic or repair follow-up can be inserted.
-- **Positive surprise**: the learner performs much better than expected with low hints and calibrated confidence. Mastery uncertainty shrinks and the FSRS interval may be modestly lengthened, but not beyond conservative bounds until repeated evidence confirms it.
+- **Negative surprise**: the learner performs much worse than expected, shows an unexpected error type, uses many hints, or has high confidence while wrong. FSRS intervals are shortened or rating is capped, the related LO/error belief uncertainty increases, and a diagnostic or repair follow-up can be inserted (see "Surprise follow-up insertion" below).
+- **Positive surprise**: the learner performs much better than expected with low hints and calibrated confidence. Mastery uncertainty shrinks and the FSRS interval may be modestly lengthened, but not beyond conservative bounds until repeated evidence confirms it. **No follow-up item is inserted on positive surprise** — the existing modest FSRS stretch is the only response. Lengthening intervals slowly on positive evidence is the conservative default; a future "stretch challenge" feature can be opt-in.
 - **High surprise with low grader confidence**: store the evidence, skip automatic mastery/FSRS modulation, and ask for manual review.
 
 The FSRS update remains grounded in the observed score. Surprise only modulates the resulting interval within configured bounds so one unusual answer cannot wildly distort long-term scheduling.
+
+### Surprise follow-up insertion (negative surprise only)
+
+When `bayesian_surprise > surprise_diagnostic_threshold` with `surprise_direction = negative`, the next queue position is overridden — **not** by interrupting the current item or feedback flow, but by inserting a follow-up at position 1 of the remaining queue. The current attempt's feedback screen surfaces this transparently:
+
+```text
+┌────────────────────────────────────────────┐
+│ Feedback (truncated)                       │
+│ ...                                        │
+│ ⚠ Surprise: high (negative)                │
+│ Added follow-up to the next position:      │
+│   Mode: error_diagnosis                    │
+│   Reason: theorem_selection_error in a     │
+│           context where memory was strong  │
+│                                            │
+│ [Continue]                  [Skip follow-up]│
+└────────────────────────────────────────────┘
+```
+
+The follow-up's mode is chosen by the existing `choose_next_action` logic (§16 mode selection) using the surprise signal as input, typically yielding `error_diagnosis`, `misconception_repair`, or `contrastive_discrimination`. `[Skip follow-up]` removes this one follow-up only and is not interpreted as "I disagree with the surprise signal"; it doesn't lower future follow-up sensitivity.
+
+Skipping is logged on `attempt_surprise.triggered_actions_json` as `{"follow_up_skipped": true}` so analyses can see how often inserted follow-ups are dismissed. If skip rate climbs above a threshold over a window of attempts, `learnloop doctor` flags it: the surprise threshold may be miscalibrated for this learner.
 
 ### Belief staleness
 
@@ -2261,6 +3307,40 @@ The "carry old derived state forward and switch forward only" alternative is **n
 
 Algorithm versions follow semantic versioning. `algorithm_version` is recorded on every `learner_state_beliefs` row, `learning_object_mastery` row, `attempt_surprise` row, and `scheduler_explanations` row written, so derived rows always know which formula version produced them.
 
+### Replay trigger and nag cadence
+
+Replay is prompted, not silent, and not auto-run. When the code's `algorithm_version` differs from the vault's last-recorded version, the vault-open banner shows:
+
+```text
+┌────────────────────────────────────────────────────────┐
+│ Algorithm updated: 1.2.0 → 1.3.0                       │
+│ Replay learner state so mastery numbers match the      │
+│ current model? (Recommended)                           │
+│                                                         │
+│ [Replay] [Later] [What changed?]                       │
+└────────────────────────────────────────────────────────┘
+```
+
+- **`[Replay]`** runs `learnloop replay-model` with the diff view at the end.
+- **`[Later]`** dismisses for this session; the banner returns on the next vault open.
+- **`[What changed?]`** opens a structured changelog: the parameter or formula deltas between the two versions, sourced from `CHANGELOG.algorithm.md` shipped with each release.
+
+After **3 cumulative dismissals**, the banner gains an additional nudge line: "You've dismissed this 3 times — your mastery numbers may not reflect the current algorithm. Replay is non-destructive (a snapshot is taken first)." Dismissal count persists in `state.sqlite` so it survives restarts.
+
+**Behavior by bump type** (algorithm semver):
+
+- **MAJOR** — replay would change mastery numbers on the same raw events. Triggered by: formula changes (mastery EMA shape, surprise definition), surrogate retuning that shifts predicted-distribution outputs, new cross-LO propagation rules, threshold changes that move bucket assignments. Banner shows with "Recommended" emphasis. `[Later]` works, but the nudge appears after the **first** dismissal, not the third.
+
+- **MINOR** — new fields, tables, axes, facets, or features that don't alter outputs on pre-MINOR data. Triggered by: adding `pronunciation_accuracy` evidence facet (old attempts didn't have it; new ones can use it without rewriting old ones), adding a new SQLite table, adding optional fields to existing schemas. Banner shows with default-accept framing. Standard 3-dismissal nudge.
+
+- **PATCH** — bugfix-only. The new version produces identical outputs to the old on previously-working cases and corrected outputs on previously-buggy cases. Triggered by: fixing an off-by-one in propagation depth counting, fixing a bucket-edge tie-break. **No banner.** `learnloop doctor` surfaces the version drift in its summary: `Algorithm version: 1.3.1 (vault: 1.3.0) — patch drift; replay optional, no expected mastery change`. The user can run replay manually if they want.
+
+**Authoring discipline.** LearnLoop ships `CHANGELOG.algorithm.md` alongside the code. Every algorithm change adds a dated entry naming the version bump, the affected components, and a one-line description. The "What changed?" link in the replay banner renders entries between the vault's last-recorded version and the current code version.
+
+**Single version, not per-component.** All derived-state pipeline components (mastery EMA, FSRS modulation, surrogate, surprise, cross-LO propagation, scheduler scoring, grader tier routing for confidence) share one `algorithm_version`. A change to any one triggers a bump per the rules above. Per-component versioning was considered and rejected: cross-component invariants (e.g. a new surrogate invalidates stored surprise even with stable mastery formula) make independent versions misleading. The single number is the truth about whether replay is needed.
+
+The dismissal counter resets to 0 when replay runs or when the user explicitly accepts the new version without replay (`learnloop replay-model --accept-without-replay`, intended for cases where the user *knows* a PATCH-equivalent change is the only delta).
+
 ## SQLite tables (canonical)
 
 ```sql
@@ -2268,8 +3348,10 @@ CREATE TABLE practice_attempts (
   id TEXT PRIMARY KEY,
   practice_item_id TEXT,
   learning_object_id TEXT,
-  subject TEXT,
-  concept TEXT,
+  subject TEXT,                      -- the subject view the learner was in when this attempt was logged.
+                                     -- For multi-subject LOs, this is the active session's subject, not
+                                     -- the full LO subjects list. Cross-subject queries walk LO membership.
+  concept TEXT,                      -- vault-global concept id (LO.concept)
   practice_mode TEXT,
   attempt_type TEXT,                 -- independent_attempt | hinted_attempt | dont_know | ...
   target_mastery_axes TEXT,          -- JSON array
@@ -2282,6 +3364,8 @@ CREATE TABLE practice_attempts (
   error_type TEXT,                   -- nullable; from taxonomy
   grader_confidence REAL,
   manual_review INTEGER,             -- 0/1
+  manual_review_reason TEXT,         -- low_grader_confidence | codex_unavailable | rubric_missing |
+                                     -- user_disputed | proof_subtlety | high_stakes_canonical | null
   created_at TEXT
 );
 
@@ -2293,6 +3377,8 @@ CREATE TABLE grading_evidence (
   agent_run_id TEXT,                 -- set when grader_tier = 4 (LLM); null for local tiers
   local_grader_id TEXT,              -- set when grader_tier in (1,2,3); null for LLM
   grader_tier INTEGER,               -- 1 = exact-match, 2 = rubric-template, 3 = embedding-similarity, 4 = LLM
+  superseded_at TEXT,                -- set when a regrade or human override replaces this row as authoritative
+  superseded_by_evidence_id TEXT,    -- pointer to the replacing row
   PRIMARY KEY (attempt_id, criterion_id)
 );
 
@@ -2318,13 +3404,13 @@ CREATE TABLE learning_object_mastery (
 );
 
 CREATE TABLE concept_mastery (
-  subject TEXT,
-  concept TEXT,
+  concept TEXT PRIMARY KEY,           -- concepts are vault-global; not subject-keyed
   aggregate REAL,
   weakest_axis TEXT,
-  updated_at TEXT,
-  PRIMARY KEY (subject, concept)
+  updated_at TEXT
 );
+-- Per-subject aggregates are computed on read by filtering this table through
+-- the subject's resolved in_scope set. Not denormalized in SQLite.
 
 CREATE TABLE learner_state_beliefs (
   id TEXT PRIMARY KEY,
@@ -2493,6 +3579,15 @@ CREATE TABLE model_replay_runs (
   changed_rows_json TEXT,            -- top-N diff: largest mastery/variance deltas
   warnings_json TEXT,
   snapshot_id TEXT                   -- references replay_snapshots(id)
+);
+
+CREATE TABLE replay_banner_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),    -- singleton row
+  current_code_version TEXT,
+  last_seen_vault_version TEXT,
+  dismissal_count INTEGER DEFAULT 0,
+  last_dismissed_at TEXT,
+  last_resolved_at TEXT                     -- when user ran replay or accepted-without-replay
 );
 
 CREATE TABLE replay_snapshots (
@@ -2707,7 +3802,77 @@ For a subject with zero attempts, the scheduler falls back to:
 2. **Diagnostic mode** if requested (`learnloop today --diagnostic`): a 5-10 minute probe of likely prerequisite LOs (short_answer + recognition) seeds initial mastery values that subsequent sessions refine.
 3. **Greedy elicitation over active goals** once the first few items exist: prefer questions that distinguish between plausible learner states, such as recall failure vs schema confusion, while staying within the session's readiness budget.
 
-Cold-start mastery defaults to `0.5` across axes and is dampened heavily (`ema_alpha * 0.5`) for the first 5 attempts on each LO.
+Cold-start mastery defaults are not hardcoded — they come from `algorithm_priors.yaml` (see below). The shipped default is `mastery_default = 0.5` across axes, `variance_default = 0.25`, `cold_start_alpha_factor = 0.5`, and `cold_start_alpha_attempts = 5`. Domain overrides can lower the initial mean (languages start harder, motor skills start much lower).
+
+### `algorithm_priors.yaml` — surrogate parameters, cold-start ramp, propagation defaults
+
+Every parameter the scheduler / mastery / surrogate / propagation logic reads from disk lives here. The file is checked into the vault, versioned alongside `algorithm_version`, and edited rarely — mostly when a new algorithm version ships or when a domain wants to tune itself.
+
+```yaml
+algorithm_version: "1.0.0"
+
+mastery:
+  ema_alpha: 0.2
+  mastery_default: 0.5
+  variance_default: 0.25
+  cold_start_alpha_factor: 0.5           # multiplier on alpha for first N attempts on a new LO
+  cold_start_alpha_attempts: 5
+  prior_pseudo_count: 20                 # weight given to global prior in Dirichlet shrinkage
+
+surrogate:
+  beta_axis: 4.0                         # logistic weight on axis-weighted mastery term
+  beta_difficulty: 3.0
+  beta_misconception: 2.0
+  score_bucket_thresholds: [0.30, 0.65, 0.90]
+  confidence_calibration_slope: 0.7      # how strongly confidence tracks score for well-calibrated learners
+  latency_log_sigma_base: 0.5
+  latency_log_sigma_execution_factor: -0.3   # tighter distribution with higher execution mastery
+  hint_request_base: 0.15
+  hint_request_difficulty_factor: 0.4
+
+cross_lo_propagation:
+  default:
+    max_depth: 3
+    hop_decay: 0.5
+    total_propagated_weight_cap: 0.7
+  error_gates:                           # see §16 Layer 2 "Cross-LO propagation" for full table
+    recall_failure: { mean_factor: 0.0, variance_factor: 0.25, scope: all }
+    conceptual_error: { mean_factor: 0.5, variance_factor: 0.7, scope: all }
+    procedure_error: { mean_factor: 0.5, variance_factor: 0.7, scope: procedural_only }
+    transfer_failure: { mean_factor: 0.3, variance_factor: 0.5, scope: conceptual_only }
+    high_confidence_wrong: { mean_factor: 0.7, variance_factor: 0.8, scope: all, trigger_misconception_repair: true }
+    # ... rest of the table
+
+staleness:
+  default_stale_after_days: 30
+  per_axis:
+    memory: 14
+    understanding: 60
+    execution: 21
+    generalization: 45
+    calibration: 90
+
+domain_overrides:
+  language:
+    mastery:
+      mastery_default: 0.3               # language starts harder
+    staleness:
+      per_axis: { memory: 7 }            # vocabulary fades fast
+  esports_overwatch:
+    mastery:
+      mastery_default: 0.4
+    cross_lo_propagation:
+      default: { max_depth: 2 }          # mechanical/tactical prereq chains are shorter
+    staleness:
+      default_stale_after_days: 14       # patches and meta shifts age beliefs fast
+  motor_vod:
+    mastery:
+      mastery_default: 0.35
+```
+
+Resolution: for any parameter and a given LO/attempt, the merged config is `core_defaults ← domain_overrides[lo.domain] ← lo.cross_lo_propagation_override` (the LO override applies only to propagation fields it declares).
+
+Changes to `algorithm_priors.yaml` bump the `algorithm_version` (semver per D1) and require `learnloop replay-model` — which the vault open banner will prompt for.
 
 ### Mode selection (after item is chosen)
 
@@ -3505,7 +4670,23 @@ These were proposed earlier as "new ideas worth considering" and are now first-c
 | Idea | Spec home |
 | --- | --- |
 | Codex required for daily loop; degraded offline = review + self-grade + manual error tagging | §1, §3, §6 `[ai]`, §12 |
+| Codex availability state machine, mid-attempt fallback, auto-regrade on recovery | §12 (state machine), §15.6 (mid-attempt fallback), §6 `[ai]`, §11 (`learnloop ai status/login/recheck`), `practice_attempts.manual_review_reason` |
 | Vault-global concept IDs | §4 (`concepts/`), §8 (concept graph format with subject views) |
+| Subjects as views (multi-subject LO/PI/note membership via `subjects: [list]`) | §4 (Subjects as views), §8 (per-subject derived view), §9 (LO/PI YAML), §7 (note frontmatter), §16 (`concept_mastery` concept-keyed) |
+| Worked-example structure with two-way LO links and optional fadable steps | §15.8, §9 (`references_worked_examples`), `worked_example_views` table |
+| Media-index hybrid hashing with fingerprint-based relocation | §15.9, `[media]` config |
+| Observation templates with `emits_attempt` + `applies_to` predicate + deferred LO binding | §15.10 |
+| Unified end-of-session review (ephemeral / pending grades / observation binding / generated cleanup) | §15.10 |
+| Disguised-retest policy (cap 1, geometric intervals, reopen on 1 failure) | §15.7, `algorithm_priors.yaml` |
+| Surprise follow-up insertion (next-position; positive surprise no-op) | §16 Layer 4 "Surprise follow-up insertion" |
+| Replay banner cadence (once per session; 3-strike nudge; PATCH doctor-only) + `replay_banner_state` | §16, §11 |
+| Algorithm semver bump definitions and `CHANGELOG.algorithm.md` | §16 "Behavior by bump type" |
+| Hint-author validation+retry guardrails | §9 "Hint-author validation and retry" |
+| Domain enable/disable/purge with dry-run + double-confirm | §4 "Domain enable / disable / purge", §11 |
+| Answer widget (inline + $EDITOR, Markdown render, literal math) | §10 "Answer input widget" |
+| Per-purpose Codex rate-limit behavior + tutor cache-and-resume | §12 (per-purpose table, tutor `pending_messages`) |
+| Simulator-EIG proposer ephemeral-minimal output schema + validation | §16 Layer 4 "Proposer output schema and validation" |
+| Tutor thread management (per-purpose lifetime, hybrid archival, `tutor-summarizer`) | §12 "Thread management" |
 | Replay (a): drop-and-recompute with version-tagged snapshots + diff view | §16 (Replayable learner model), `replay_snapshots` table, `learnloop replay-model --diff` |
 | Heuristic-bucket EIG MVP + Codex-simulator ephemeral diagnostic generation | §16 (Layer 4, "Two policy variants"), `[scheduler]` config, `elicitation_events.policy` |
 | Hint ladder as first-class on Practice Items | §9 (PI YAML `hints` + `hint_policy`), §9 (Hint ladders subsection) |
