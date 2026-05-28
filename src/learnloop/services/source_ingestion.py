@@ -504,9 +504,13 @@ def analyze_source_change(
     if not previous:
         return SourceChangeAnalysis(events=[])
     new_locator_hashes = _locator_hashes(new_chunks)
-    previous_maps = {
-        note.id: _locator_hashes(_chunks_for_note_body(source.kind, note.body))
+    previous_chunks = {
+        note.id: _chunks_for_note_body(source.kind, note.body)
         for note in previous
+    }
+    previous_maps = {
+        note_id: _locator_hashes(chunks)
+        for note_id, chunks in previous_chunks.items()
     }
     latest = max(previous, key=lambda note: note.updated_at or note.created_at or note.id)
     latest_hashes = previous_maps.get(latest.id, {})
@@ -535,11 +539,13 @@ def analyze_source_change(
             note = previous_by_id.get(ref.ref_id) or previous_by_path.get(ref.path)
             if note is None:
                 continue
-            old_hashes = previous_maps.get(note.id, {})
+            old_chunks = previous_chunks.get(note.id, [])
             event_type: str | None = None
-            if ref.locator not in new_locator_hashes:
+            new_ref_hash = _locator_hash_for_ref(new_chunks, ref.locator)
+            old_ref_hash = _locator_hash_for_ref(old_chunks, ref.locator)
+            if new_ref_hash is None:
                 event_type = "source_span_removed"
-            elif old_hashes.get(ref.locator) and old_hashes[ref.locator] != new_locator_hashes[ref.locator]:
+            elif old_ref_hash is not None and old_ref_hash != new_ref_hash:
                 event_type = "source_span_changed"
             if event_type is None:
                 continue
@@ -1274,18 +1280,21 @@ def _proposal_with_locator_validation(
     registered: RegisteredSource,
     window: IngestWindow,
 ) -> AuthoringProposal:
-    valid_locators = {chunk.locator for chunk in window.chunks}
+    known_ref_ids = {ref.ref_id for ref in proposal.source_refs}
     rewritten_refs: list[dict[str, Any]] = []
     for ref in proposal.source_refs:
         if ref.ref_type != "canonical_source":
             rewritten_refs.append(ref.model_dump(mode="json", exclude_none=True))
             continue
         path = ref.path or registered.path
-        if ref.locator is not None and ref.locator not in valid_locators:
+        if ref.locator is not None and not _locator_resolves(window.chunks, ref.locator):
             path = f"{registered.path}#unresolved-locator:{ref.locator}"
         rewritten_refs.append(
             ref.model_copy(update={"path": path}).model_dump(mode="json", exclude_none=True)
         )
+    for ref_id in _missing_source_ref_ids(proposal, known_ref_ids):
+        ref = _canonical_source_ref_from_id(ref_id, registered, window)
+        rewritten_refs.append(ref)
     return AuthoringProposal.model_validate(
         {
             "summary": proposal.summary,
@@ -1293,6 +1302,48 @@ def _proposal_with_locator_validation(
             "items": [item.model_dump(mode="json", exclude_none=True) for item in proposal.items],
         }
     )
+
+
+def _missing_source_ref_ids(proposal: AuthoringProposal, known_ref_ids: set[str]) -> list[str]:
+    missing: list[str] = []
+    seen: set[str] = set()
+    for item in proposal.items:
+        for ref_id in item.source_ref_ids:
+            if ref_id in known_ref_ids or ref_id in seen:
+                continue
+            seen.add(ref_id)
+            missing.append(ref_id)
+    return missing
+
+
+def _canonical_source_ref_from_id(
+    ref_id: str,
+    registered: RegisteredSource,
+    window: IngestWindow,
+) -> dict[str, Any]:
+    locator = _time_locator_from_ref_id(ref_id)
+    path = registered.path
+    if locator is None:
+        path = f"{registered.path}#unresolved-source-ref:{ref_id}"
+    elif not _locator_resolves(window.chunks, locator):
+        path = f"{registered.path}#unresolved-locator:{locator}"
+    return {
+        "ref_type": "canonical_source",
+        "ref_id": ref_id,
+        "path": path,
+        "locator": locator,
+    }
+
+
+def _time_locator_from_ref_id(ref_id: str) -> str | None:
+    match = re.search(r"_(\d+(?:p\d+)?)_(\d+(?:p\d+)?)$", ref_id)
+    if not match:
+        return None
+    start = float(match.group(1).replace("p", "."))
+    end = float(match.group(2).replace("p", "."))
+    if end <= start:
+        return None
+    return f"t={start:.1f}-{end:.1f}"
 
 
 def _existing_registered_source(vault, kind: SourceKind, canonical_uri: str, content_hash: str) -> RegisteredSource | None:
@@ -1362,6 +1413,66 @@ def _locator_hashes(chunks: list[SourceChunk]) -> dict[str, str]:
         chunk.locator: hashlib.sha256(chunk.text.strip().encode("utf-8")).hexdigest()
         for chunk in chunks
     }
+
+
+def _locator_resolves(chunks: list[SourceChunk], locator: str) -> bool:
+    if locator in {chunk.locator for chunk in chunks}:
+        return True
+    return bool(_caption_chunks_for_time_range(chunks, locator))
+
+
+def _locator_hash_for_ref(chunks: list[SourceChunk], locator: str | None) -> str | None:
+    if locator is None:
+        return None
+    for chunk in chunks:
+        if chunk.locator == locator:
+            return hashlib.sha256(chunk.text.strip().encode("utf-8")).hexdigest()
+    caption_chunks = _caption_chunks_for_time_range(chunks, locator)
+    if not caption_chunks:
+        return None
+    text = "\n".join(chunk.text.strip() for chunk in caption_chunks)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _caption_chunks_for_time_range(chunks: list[SourceChunk], locator: str) -> list[SourceChunk]:
+    target = _parse_time_locator(locator)
+    if target is None:
+        return []
+    start, end = target
+    timed_chunks: list[tuple[float, float, SourceChunk]] = []
+    for chunk in chunks:
+        if chunk.chunk_kind != "caption":
+            continue
+        chunk_range = _parse_time_locator(chunk.locator)
+        if chunk_range is None:
+            continue
+        timed_chunks.append((chunk_range[0], chunk_range[1], chunk))
+    if not timed_chunks:
+        return []
+
+    epsilon = 0.05
+    min_start = min(item[0] for item in timed_chunks)
+    max_end = max(item[1] for item in timed_chunks)
+    if start < min_start - epsilon or end > max_end + epsilon:
+        return []
+    selected = [
+        chunk
+        for chunk_start, chunk_end, chunk in timed_chunks
+        if chunk_end > start + epsilon and chunk_start < end - epsilon
+    ]
+    selected.sort(key=lambda chunk: chunk.ordinal)
+    return selected
+
+
+def _parse_time_locator(locator: str) -> tuple[float, float] | None:
+    match = re.match(r"^t=([0-9]+(?:\.[0-9]+)?)-([0-9]+(?:\.[0-9]+)?)$", locator.strip())
+    if not match:
+        return None
+    start = float(match.group(1))
+    end = float(match.group(2))
+    if end <= start:
+        return None
+    return start, end
 
 
 def _grounded_entity_refs(vault) -> list[tuple[str, str, str | None, list[Any]]]:

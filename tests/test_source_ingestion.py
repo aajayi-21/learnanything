@@ -5,7 +5,17 @@ from learnloop.codex.client import CanonicalIngestContext
 from learnloop.codex.schemas import AuthoringProposal
 from learnloop.db.repositories import Repository
 from learnloop.services.proposals import accept_items, persist_authoring_proposal, reject_items
-from learnloop.services.source_ingestion import ingest_canonical_source
+from learnloop.services.source_ingestion import (
+    CaptionCue,
+    IngestWindow,
+    NormalizedSource,
+    _locator_hash_for_ref,
+    _proposal_with_locator_validation,
+    chunk_normalized_source,
+    ingest_canonical_source,
+    register_canonical_source,
+    source_content_hash,
+)
 from learnloop.vault.loader import load_vault
 
 from tests.helpers import NOW, create_basic_vault
@@ -103,6 +113,198 @@ def test_ingest_invalid_returned_locator_blocks_auto_apply(tmp_path):
     items = repository.proposal_items(result.patch_id)
     assert {item["validation_status"] for item in items} == {"invalid"}
     assert all(item["validation_errors"][0].startswith("unresolved_source_ref:") for item in items)
+
+
+def test_youtube_time_range_source_refs_can_span_caption_cues(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    normalized = _youtube_source()
+    chunks = chunk_normalized_source(normalized)
+    content_hash = source_content_hash(normalized.markdown)
+    registered = register_canonical_source(
+        vault_root,
+        "linear-algebra",
+        normalized,
+        b"raw transcript",
+        content_hash,
+        clock=FrozenClock(NOW),
+    )
+    proposal = AuthoringProposal.model_validate(
+        {
+            "summary": "Extract broad YouTube source range.",
+            "source_refs": [
+                {
+                    "ref_type": "canonical_source",
+                    "ref_id": "src_attention_intro",
+                    "path": registered.path,
+                    "locator": "t=11.0-21.7",
+                }
+            ],
+            "items": [
+                {
+                    "client_item_id": "lo_youtube_attention_intro",
+                    "item_type": "learning_object",
+                    "operation": "create",
+                    "proposed_entity_id": "lo_youtube_attention_intro",
+                    "source_ref_ids": ["src_attention_intro"],
+                    "rationale": "Extract the attention introduction.",
+                    "review_route": "auto_apply",
+                    "payload": {
+                        "title": "YouTube attention introduction",
+                        "subjects": ["linear-algebra"],
+                        "concept_id": "singular_value_decomposition",
+                        "knowledge_type": "definition",
+                        "summary": "Attention is introduced as a key transformer mechanism.",
+                    },
+                }
+            ],
+        }
+    )
+
+    validated = _proposal_with_locator_validation(
+        proposal,
+        registered,
+        IngestWindow(chunks=chunks, ordinal=1),
+    )
+    assert "#unresolved-locator" not in (validated.source_refs[0].path or "")
+
+    patch_id = persist_authoring_proposal(
+        vault_root,
+        validated,
+        provider="codex",
+        clock=FrozenClock(NOW),
+    )
+    item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
+    assert item["validation_status"] == "valid"
+    assert item["validation_errors"] == []
+    loaded = load_vault(vault_root)
+    assert (
+        loaded.learning_objects["lo_youtube_attention_intro"].provenance.origin
+        == "canonical_extract"
+    )
+
+
+def test_youtube_missing_source_ref_is_reconstructed_from_timecoded_id(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    normalized = _youtube_source()
+    chunks = chunk_normalized_source(normalized)
+    registered = register_canonical_source(
+        vault_root,
+        "linear-algebra",
+        normalized,
+        b"raw transcript",
+        source_content_hash(normalized.markdown),
+        clock=FrozenClock(NOW),
+    )
+    proposal = AuthoringProposal.model_validate(
+        {
+            "summary": "Extract with omitted top-level source ref.",
+            "source_refs": [],
+            "items": [
+                {
+                    "client_item_id": "lo_youtube_missing_ref",
+                    "item_type": "learning_object",
+                    "operation": "create",
+                    "proposed_entity_id": "lo_youtube_missing_ref",
+                    "source_ref_ids": ["src_abc123_11_21"],
+                    "rationale": "Extract the attention introduction.",
+                    "review_route": "review_required",
+                    "payload": {
+                        "title": "YouTube missing ref reconstruction",
+                        "subjects": ["linear-algebra"],
+                        "concept_id": "singular_value_decomposition",
+                        "knowledge_type": "definition",
+                        "summary": "Attention is introduced as a key transformer mechanism.",
+                    },
+                }
+            ],
+        }
+    )
+
+    validated = _proposal_with_locator_validation(
+        proposal,
+        registered,
+        IngestWindow(chunks=chunks, ordinal=1),
+    )
+
+    assert validated.source_refs[0].ref_id == "src_abc123_11_21"
+    assert validated.source_refs[0].locator == "t=11.0-21.0"
+    assert "#unresolved" not in (validated.source_refs[0].path or "")
+    patch_id = persist_authoring_proposal(
+        vault_root,
+        validated,
+        provider="codex",
+        clock=FrozenClock(NOW),
+    )
+    item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
+    assert item["validation_status"] == "valid"
+
+
+def test_youtube_missing_source_ref_without_timecoded_id_stays_invalid(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    normalized = _youtube_source()
+    chunks = chunk_normalized_source(normalized)
+    registered = register_canonical_source(
+        vault_root,
+        "linear-algebra",
+        normalized,
+        b"raw transcript",
+        source_content_hash(normalized.markdown),
+        clock=FrozenClock(NOW),
+    )
+    proposal = AuthoringProposal.model_validate(
+        {
+            "summary": "Extract with bad omitted top-level source ref.",
+            "source_refs": [],
+            "items": [
+                {
+                    "client_item_id": "lo_youtube_bad_missing_ref",
+                    "item_type": "learning_object",
+                    "operation": "create",
+                    "proposed_entity_id": "lo_youtube_bad_missing_ref",
+                    "source_ref_ids": ["src_unknown_span"],
+                    "rationale": "Extract the attention introduction.",
+                    "review_route": "review_required",
+                    "payload": {
+                        "title": "YouTube bad missing ref",
+                        "subjects": ["linear-algebra"],
+                        "concept_id": "singular_value_decomposition",
+                        "knowledge_type": "definition",
+                        "summary": "Attention is introduced as a key transformer mechanism.",
+                    },
+                }
+            ],
+        }
+    )
+
+    validated = _proposal_with_locator_validation(
+        proposal,
+        registered,
+        IngestWindow(chunks=chunks, ordinal=1),
+    )
+    patch_id = persist_authoring_proposal(
+        vault_root,
+        validated,
+        provider="codex",
+        clock=FrozenClock(NOW),
+    )
+    item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
+
+    assert item["validation_status"] == "invalid"
+    assert item["validation_errors"] == ["unresolved_source_ref:src_unknown_span"]
+
+
+def test_youtube_time_range_hash_covers_spanned_caption_text() -> None:
+    first = _youtube_source()
+    changed = _youtube_source(second_caption="and this chapter explains attention.")
+    first_hash = _locator_hash_for_ref(chunk_normalized_source(first), "t=11.0-21.7")
+    changed_hash = _locator_hash_for_ref(chunk_normalized_source(changed), "t=11.0-21.7")
+
+    assert first_hash is not None
+    assert changed_hash is not None
+    assert changed_hash != first_hash
 
 
 def test_ingest_retries_with_stronger_ai_provider_on_validation_failure(tmp_path):
@@ -327,6 +529,29 @@ def _source_file(tmp_path):
         encoding="utf-8",
     )
     return html
+
+
+def _youtube_source(second_caption: str = "and in this chapter we dig into attention.") -> NormalizedSource:
+    cues = [
+        CaptionCue(0.0, 2.0, "Earlier context."),
+        CaptionCue(11.0, 15.5, "Attention is All You Need introduced transformers."),
+        CaptionCue(15.5, 19.8, second_caption),
+        CaptionCue(19.8, 21.7, "visualizing how it processes data."),
+        CaptionCue(22.0, 24.0, "Later context."),
+    ]
+    lines = ["# YouTube video abc123", ""]
+    for cue in cues:
+        lines.extend([f"[t={cue.start:.1f}-{cue.end:.1f}] {cue.text}", ""])
+    return NormalizedSource(
+        kind="youtube_video",
+        title="YouTube video abc123",
+        authors=[],
+        canonical_uri="https://www.youtube.com/watch?v=abc123",
+        original_uri="https://www.youtube.com/watch?v=abc123",
+        markdown="\n".join(lines).strip() + "\n",
+        retrieved_at=NOW,
+        captions=cues,
+    )
 
 
 def _proposal_payload(context: CanonicalIngestContext, locator: str) -> dict:

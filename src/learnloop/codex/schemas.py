@@ -186,15 +186,6 @@ class AuthoringProposal(BaseModel):
     source_refs: list[SourceRef] = Field(default_factory=list)
     items: list[AuthoringProposalItem] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def validate_source_refs(self) -> "AuthoringProposal":
-        known = {source.ref_id for source in self.source_refs}
-        for item in self.items:
-            unknown = set(item.source_ref_ids) - known
-            if unknown:
-                raise ValueError(f"unknown source_ref_ids for {item.client_item_id}: {sorted(unknown)}")
-        return self
-
 
 class CriterionEvidence(BaseModel):
     criterion_id: str
