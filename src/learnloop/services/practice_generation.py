@@ -265,12 +265,15 @@ def generate_diagnostic_practice_proposal(
     )
     if not plan.targets:
         raise PracticeExpansionError("No pending intervention needs require diagnostic Practice Items.")
+    source_refs = _diagnostic_source_refs(plan)
     patch_id = generate_authoring_proposal(
         root,
         codex_client,
         subjects=sorted({subject for target in plan.targets for subject in target.subjects}),
+        source_refs=source_refs,
         instructions=_diagnostic_practice_instructions(plan, extra_instructions=extra_instructions),
         codex_revision=codex_revision,
+        merge_context_source_refs=True,
     )
     fulfilled: list[str] = []
     for target in plan.targets:
@@ -370,12 +373,33 @@ def _diagnostic_practice_instructions(
         "Use evidence_facets exactly equal to target_facets, evidence_weights normalized across target_facets, and repair_targets equal to target_facets.",
         "The grading_rubric must include at least one criterion per target facet and criterion_facet_weights must map each criterion to its facet.",
         "Set retrieval_demand high (0.75-0.95), transfer_distance low-to-moderate (0.05-0.35), scaffold_level no higher than 0.35, and difficulty_source='llm_estimate'.",
+        "Use only the supplied context.source_refs for source refs. Each item.source_ref_ids should include its target need_id and, when relevant, the target learning_object_id or source_practice_item_id. Do not invent source refs.",
         "Use review_route='review_required'; generated diagnostic probes must be reviewed before writing vault content.",
         f"Targets: {[target.as_dict() for target in plan.targets]}",
     ]
     if extra_instructions:
         lines.append(f"Additional instructions: {extra_instructions}")
     return "\n".join(lines)
+
+
+def _diagnostic_source_refs(plan: DiagnosticPracticePlan) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(ref_type: str, ref_id: str | None) -> None:
+        if not ref_id:
+            return
+        key = (ref_type, ref_id)
+        if key in seen:
+            return
+        seen.add(key)
+        refs.append({"ref_type": ref_type, "ref_id": ref_id})
+
+    for target in plan.targets:
+        add("manual_context", target.need_id)
+        add("existing_entity", target.learning_object_id)
+        add("existing_entity", target.source_practice_item_id)
+    return refs
 
 
 def _difficulty_band(facet_means: dict[str, float], mastery_mean: float | None) -> tuple[float, float]:

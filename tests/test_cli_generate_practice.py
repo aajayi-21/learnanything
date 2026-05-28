@@ -182,6 +182,49 @@ def test_generate_diagnostics_runs_codex_http_and_marks_need_fulfilled(tmp_path)
     assert status["blocked_reason"].startswith("diagnostic_proposal_queued:")
 
 
+def test_generate_diagnostics_resolves_diagnostic_need_source_refs(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    need_id = _seed_diagnostic_need(repository)
+    proposal = _diagnostic_proposal_payload()
+    proposal["source_refs"] = [{"ref_type": "existing_entity", "ref_id": need_id}]
+    proposal["items"][0]["source_ref_ids"] = [need_id]
+    checkout = tmp_path / "codex"
+    checkout.mkdir()
+    (checkout / "HEAD").write_text("abc123", encoding="utf-8")
+    server = _ProposalServer(proposal)
+    server.start()
+    try:
+        _configure_codex(vault_root, checkout, server.base_url)
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "generate-diagnostics",
+                "--vault",
+                str(vault_root),
+                "--json",
+            ],
+        )
+    finally:
+        server.stop()
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    item = repository.proposal_items(payload["proposal_id"])[0]
+    assert item["validation_status"] == "valid"
+    assert not any(error.startswith("unresolved_source_ref:") for error in item["validation_errors"])
+    batch = repository.proposal_batch(payload["proposal_id"])
+    assert _has_source_ref(batch["source_refs"], "manual_context", need_id)
+    assert _has_source_ref(batch["source_refs"], "existing_entity", "lo_svd_definition")
+    assert {"ref_type": "manual_context", "ref_id": need_id} in server.requests[0]["body"]["context"]["source_refs"]
+
+
+def _has_source_ref(refs: list[dict], ref_type: str, ref_id: str) -> bool:
+    return any(ref.get("ref_type") == ref_type and ref.get("ref_id") == ref_id for ref in refs)
+
+
 def _complete_probe(sqlite_path) -> None:
     repository = Repository(sqlite_path)
     repository.upsert_mastery_state(

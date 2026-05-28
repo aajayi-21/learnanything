@@ -225,9 +225,11 @@ def generate_authoring_proposal(
     *,
     subjects: list[str] | None = None,
     note_ids: list[str] | None = None,
+    source_refs: list[dict[str, Any]] | None = None,
     instructions: str | None = None,
     model: str | None = None,
     codex_revision: str | None = None,
+    merge_context_source_refs: bool = False,
     clock: Clock | None = None,
 ) -> str:
     """Run authoring generation through a CodexClient and persist the result.
@@ -239,7 +241,11 @@ def generate_authoring_proposal(
     vault = load_vault(root)
     repository = Repository(VaultPaths(vault.root, vault.config).sqlite_path)
     context = build_authoring_context(
-        vault, subjects=subjects, note_ids=note_ids, instructions=instructions
+        vault,
+        subjects=subjects,
+        note_ids=note_ids,
+        source_refs=source_refs,
+        instructions=instructions,
     )
     now = utc_now_iso(clock)
     provider_fields = _agent_provider_fields(codex_client, model=model, provider_revision=codex_revision)
@@ -261,6 +267,8 @@ def generate_authoring_proposal(
     except (CodexUnavailable, TimeoutError, ValueError) as exc:
         repository.complete_agent_run(agent_run_id, status="failed", error_message=str(exc), clock=clock)
         raise
+    if merge_context_source_refs:
+        proposal = _proposal_with_context_source_refs(proposal, context.source_refs)
     repository.complete_agent_run(agent_run_id, status="completed", clock=clock)
     proposal_payload = proposal.model_dump(mode="json", exclude_none=False)
     rows = [
@@ -281,6 +289,28 @@ def generate_authoring_proposal(
     )
     _auto_apply_rows(root, patch_id, rows)
     return patch_id
+
+
+def _proposal_with_context_source_refs(
+    proposal: AuthoringProposal,
+    context_source_refs: list[dict[str, Any]],
+) -> AuthoringProposal:
+    if not context_source_refs:
+        return proposal
+    merged_by_id = {
+        ref.ref_id: ref.model_dump(mode="json", exclude_none=True)
+        for ref in proposal.source_refs
+    }
+    for raw_ref in context_source_refs:
+        ref = SourceRef.model_validate(raw_ref)
+        merged_by_id[ref.ref_id] = ref.model_dump(mode="json", exclude_none=True)
+    return AuthoringProposal.model_validate(
+        {
+            "summary": proposal.summary,
+            "source_refs": list(merged_by_id.values()),
+            "items": [item.model_dump(mode="json", exclude_none=True) for item in proposal.items],
+        }
+    )
 
 
 def persist_authoring_proposal(
