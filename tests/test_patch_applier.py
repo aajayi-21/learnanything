@@ -10,6 +10,7 @@ from learnloop.db.repositories import Repository
 from learnloop.services.patches import PatchApplicationError, apply_accepted_items
 from learnloop.services.proposals import reject_items
 from learnloop.vault.loader import load_vault
+from learnloop.vault.writer import upsert_learning_object
 
 from tests.helpers import NOW_ISO, create_basic_vault
 
@@ -101,6 +102,64 @@ def test_reject_proposal_item_does_not_mutate_yaml(tmp_path):
     assert "lo_svd_applications" not in load_vault(vault_root).learning_objects
 
 
+def test_reject_accepted_concept_create_removes_concept(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    _seed_concept_proposal(repository)
+
+    apply_accepted_items(vault_root, "patch_concept_1", ["proposal_item_concept"])
+    assert "new_concept" in load_vault(vault_root).concepts
+
+    count = reject_items(vault_root, "patch_concept_1", ["proposal_item_concept"])
+
+    loaded = load_vault(vault_root)
+    item = repository.proposal_item("proposal_item_concept")
+    events = repository.content_events_for_entity("concept", "new_concept")
+    assert count == 1
+    assert "new_concept" not in loaded.concepts
+    assert item is not None
+    assert item["decision"] == "rejected"
+    assert any(event["event_type"] == "deactivated" and event["review_status"] == "rejected" for event in events)
+
+
+def test_reject_accepted_concept_create_blocks_when_referenced(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    _seed_concept_proposal(repository)
+    apply_accepted_items(vault_root, "patch_concept_1", ["proposal_item_concept"])
+    upsert_learning_object(
+        vault_root,
+        {
+            "schema_version": 1,
+            "id": "lo_new_concept",
+            "title": "New concept LO",
+            "subjects": ["linear-algebra"],
+            "concept": "new_concept",
+            "knowledge_type": "conceptual",
+            "status": "active",
+            "contradicts": None,
+            "summary": "A dependent learning object.",
+            "prerequisites": [],
+            "confusables": [],
+            "difficulty_prior": 0.4,
+            "tags": [],
+            "provenance": {"origin": "human", "source_refs": []},
+            "created_at": NOW_ISO,
+            "updated_at": NOW_ISO,
+        },
+    )
+
+    with pytest.raises(PatchApplicationError, match="still referenced"):
+        reject_items(vault_root, "patch_concept_1", ["proposal_item_concept"])
+
+    assert "new_concept" in load_vault(vault_root).concepts
+    item = repository.proposal_item("proposal_item_concept")
+    assert item is not None
+    assert item["decision"] == "accepted"
+
+
 def test_invalid_proposal_item_cannot_be_accepted(tmp_path):
     vault_root = tmp_path / "vault"
     paths = create_basic_vault(vault_root)
@@ -111,6 +170,51 @@ def test_invalid_proposal_item_cannot_be_accepted(tmp_path):
         apply_accepted_items(vault_root, "patch_authoring_1", ["proposal_item_lo"])
 
     assert "lo_svd_applications" not in load_vault(vault_root).learning_objects
+
+
+def _seed_concept_proposal(repository: Repository) -> None:
+    repository.insert_agent_run(
+        {
+            "id": "agent_run_concept_1",
+            "purpose": "authoring",
+            "provider": "fake",
+            "output_schema": "AuthoringProposal",
+            "started_at": NOW_ISO,
+            "status": "completed",
+            "completed_at": NOW_ISO,
+        }
+    )
+    repository.persist_proposal_batch(
+        {
+            "id": "patch_concept_1",
+            "agent_run_id": "agent_run_concept_1",
+            "purpose": "authoring",
+            "source_refs": [],
+            "summary": "Create a standalone concept",
+            "created_at": NOW_ISO,
+        },
+        [
+            {
+                "id": "proposal_item_concept",
+                "client_item_id": "client_concept",
+                "item_type": "concept",
+                "operation": "create",
+                "payload": {
+                    "id": "new_concept",
+                    "title": "New concept",
+                    "type": "concept",
+                    "aliases": [],
+                    "description": "A standalone concept.",
+                    "tags": [],
+                    "created_at": NOW_ISO,
+                    "updated_at": NOW_ISO,
+                },
+                "validation_status": "valid",
+                "validation_errors": [],
+                "created_at": NOW_ISO,
+            }
+        ],
+    )
 
 
 def _seed_agent_and_proposal(repository: Repository, *, validation_status: str = "valid") -> None:

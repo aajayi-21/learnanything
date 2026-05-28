@@ -123,6 +123,20 @@ def upsert_concept(
     return paths.concepts_path
 
 
+def delete_concept(root: Path, concept_id: str) -> Path | None:
+    vault = load_vault(root)
+    paths = VaultPaths(vault.root, vault.config)
+    data = _read_yaml_or(paths.concepts_path, {"schema_version": 1, "concepts": {}})
+    concepts = data.setdefault("concepts", {})
+    if not isinstance(concepts, dict):
+        raise VaultWriterError("concepts/concepts.yaml must contain a concepts mapping")
+    if concept_id not in concepts:
+        return None
+    concepts.pop(concept_id)
+    write_yaml(paths.concepts_path, data)
+    return paths.concepts_path
+
+
 def upsert_concept_edge(
     root: Path,
     payload: ConceptEdge | dict[str, Any],
@@ -147,6 +161,21 @@ def upsert_concept_edge(
         edges.append(validated)
     else:
         edges[index] = validated
+    write_yaml(paths.relations_path, data)
+    return paths.relations_path
+
+
+def delete_concept_edge(root: Path, edge_id: str) -> Path | None:
+    vault = load_vault(root)
+    paths = VaultPaths(vault.root, vault.config)
+    data = _read_yaml_or(paths.relations_path, {"schema_version": 1, "edges": []})
+    edges = data.setdefault("edges", [])
+    if not isinstance(edges, list):
+        raise VaultWriterError("concepts/relations.yaml must contain an edges list")
+    index = _list_index_by_id(edges, edge_id)
+    if index is None:
+        return None
+    edges.pop(index)
     write_yaml(paths.relations_path, data)
     return paths.relations_path
 

@@ -13,6 +13,8 @@ from learnloop.vault.models import LoadedVault
 from learnloop.vault.paths import VaultPaths
 from learnloop.vault.writer import (
     VaultWriterError,
+    delete_concept,
+    delete_concept_edge,
     upsert_concept,
     upsert_concept_edge,
     upsert_error_type,
@@ -114,7 +116,9 @@ def reject_applied_items(
     for item in items:
         event = _apply_reject_side_effect(vault, repository, item, origin=origin, clock=clock)
         if event is None:
-            continue
+            raise PatchApplicationError(
+                f"Cannot revert proposal item {item['id']} ({item['item_type']} {item['operation']})"
+            )
         if repository.reject_applied_proposal_item(item["id"], content_event=event, clock=clock):
             rejected += 1
             vault = load_vault(root)
@@ -423,15 +427,30 @@ def _apply_reject_side_effect(
         subject = vault.subjects_for_item(existing)[0] if vault.subjects_for_item(existing) else None
         summary = f"reject auto-applied Practice Item {entity_id}"
         entity_type = "practice_item"
+    elif item["item_type"] == "concept":
+        existing = vault.concepts.get(entity_id)
+        if existing is None:
+            return None
+        blockers = _concept_revert_blockers(vault, entity_id)
+        if blockers:
+            joined = ", ".join(blockers[:8])
+            suffix = "" if len(blockers) <= 8 else f", and {len(blockers) - 8} more"
+            raise PatchApplicationError(
+                f"Cannot revert created concept {entity_id}; it is still referenced by {joined}{suffix}."
+            )
+        delete_concept(vault.root, entity_id)
+        sync_vault_state(load_vault(vault.root), repository, clock=clock)
+        subject = None
+        summary = f"reject created concept {entity_id}"
+        entity_type = "concept"
     elif item["item_type"] == "concept_edge":
         existing = _edge_by_id(vault, entity_id)
         if existing is None:
             return None
-        data = existing.model_dump(mode="json", exclude_none=False)
-        data["active"] = False
-        upsert_concept_edge(vault.root, data, clock=clock)
+        delete_concept_edge(vault.root, entity_id)
+        sync_vault_state(load_vault(vault.root), repository, clock=clock)
         subject = None
-        summary = f"reject auto-applied concept edge {entity_id}"
+        summary = f"reject created concept edge {entity_id}"
         entity_type = "concept_edge"
     else:
         return None
@@ -446,6 +465,38 @@ def _apply_reject_side_effect(
         "summary": summary,
         "created_at": now,
     }
+
+
+def _concept_revert_blockers(vault: LoadedVault, concept_id: str) -> list[str]:
+    blockers: list[str] = []
+    for learning_object in vault.learning_objects.values():
+        if learning_object.concept == concept_id:
+            blockers.append(f"learning_object:{learning_object.id}.concept")
+        if concept_id in learning_object.prerequisites:
+            blockers.append(f"learning_object:{learning_object.id}.prerequisites")
+        if concept_id in learning_object.confusables:
+            blockers.append(f"learning_object:{learning_object.id}.confusables")
+    for edge in vault.edges:
+        if edge.source == concept_id or edge.target == concept_id:
+            blockers.append(f"concept_edge:{edge.id}")
+    for goal in vault.goals:
+        if concept_id in goal.concept_anchors:
+            blockers.append(f"goal:{goal.id}.concept_anchors")
+    for error_type in vault.error_types.values():
+        if concept_id in error_type.related_concepts:
+            blockers.append(f"error_type:{error_type.id}.related_concepts")
+    for note in vault.notes.values():
+        if concept_id in note.related_concepts:
+            blockers.append(f"note:{note.id}.related_concepts")
+    for subject in vault.subjects.values():
+        graph = subject.graph
+        if concept_id in graph.additional_concepts_in_scope:
+            blockers.append(f"subject:{subject.metadata.id}.additional_concepts_in_scope")
+        if concept_id in graph.exclude_concepts:
+            blockers.append(f"subject:{subject.metadata.id}.exclude_concepts")
+        if concept_id in graph.subject_ordering_hints:
+            blockers.append(f"subject:{subject.metadata.id}.subject_ordering_hints")
+    return sorted(blockers)
 
 
 def _normalize_rubric_payload(payload: dict[str, Any]) -> dict[str, Any]:

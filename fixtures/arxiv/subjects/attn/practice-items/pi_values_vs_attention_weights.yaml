@@ -1,0 +1,96 @@
+schema_version: 1
+id: pi_values_vs_attention_weights
+learning_object_id: lo_value_updates
+subjects:
+  - attn
+practice_mode: compare_contrast
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - pattern_as_weights
+  - values_as_content
+  - weighted_sum_column
+  - add_to_embedding
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: In one attention head, what different roles do the attention pattern and
+  the value vectors play when updating the embedding for a token such as 
+  'creature'?
+expected_answer: The attention pattern supplies the weights saying which source 
+  tokens are relevant to updating 'creature' and by how much. The value vectors,
+  produced by applying the value matrix to embeddings such as 'fluffy' and 
+  'blue', contain the actual update directions or information to add. The update
+  is a weighted sum of value vectors for that column, then added to the original
+  embedding.
+difficulty: 0.6
+difficulty_source: llm_estimate
+tags:
+  - attn
+  - values
+  - embedding-update
+hints:
+  - One object says how much to use; the other says what to add.
+  - Use the fluffy/blue/creature example.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.52
+transfer_distance: 0.3
+scaffold_level: 0.25
+surface_family: qkv_role_comparison
+repair_targets:
+  - pattern_as_weights
+  - values_as_content
+  - weighted_sum_column
+  - add_to_embedding
+  - fatal_values_are_scores
+grading_rubric:
+  max_points: 4
+  criteria:
+    - id: pattern_as_weights
+      points: 1.0
+      description: Identifies the attention pattern as weights or relevance 
+        scores.
+    - id: values_as_content
+      points: 1.0
+      description: Identifies value vectors as carrying the information/update 
+        directions.
+    - id: weighted_sum_column
+      points: 1.0
+      description: Describes taking a weighted sum for the target token's 
+        column.
+    - id: add_to_embedding
+      points: 1.0
+      description: States that the resulting change is added to the original 
+        embedding.
+  fatal_errors:
+    - id: fatal_values_are_scores
+      description: Equates value vectors with the query-key attention scores 
+        instead of update content.
+      max_grade: 2
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: src_dot_softmax_pattern
+      path: 
+        subjects/attn/notes/note_source_youtube_video_emlx5ffnoyc_082cbd99.md
+      locator: t=507.2-616.8
+      quote: compute a dot product between each possible key-query pair... We 
+        call this grid an attention pattern.
+      quote_hash: sha256:src_dot_softmax_pattern
+    - ref_type: canonical_source
+      ref_id: src_values_update
+      path: 
+        subjects/attn/notes/note_source_youtube_video_emlx5ffnoyc_082cbd99.md
+      locator: t=790.6-943.5
+      quote: use a third matrix, what we call the value matrix... producing a 
+        sequence of changes.
+      quote_hash: sha256:src_values_update
+created_at: '2026-05-28T21:34:21Z'
+updated_at: '2026-05-28T21:34:21Z'

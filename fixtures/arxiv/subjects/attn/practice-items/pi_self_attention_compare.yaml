@@ -1,0 +1,124 @@
+schema_version: 1
+id: pi_self_attention_compare
+learning_object_id: lo_self_attention_tradeoffs
+subjects:
+  - attn
+practice_mode: compare_contrast
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - three_criteria
+  - self_attention_parallel
+  - self_attention_path
+  - recurrent_sequential
+  - convolution_path
+  - complexity_tradeoff
+  - long_range_dependency_link
+  - balanced_comparison
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: 'Compare self-attention with recurrent and convolutional layers using the
+  paper’s three motivation criteria: computational complexity, parallelization, and
+  path length for long-range dependencies.'
+expected_answer: The paper evaluates layers by per-layer computational 
+  complexity, how much computation can be parallelized, and maximum path length 
+  between positions. Self-attention connects all positions with a constant 
+  number of sequential operations and short paths, which helps long-range 
+  dependency learning. Recurrent layers impose sequential computation across 
+  positions. Convolutional layers can parallelize better than recurrence but 
+  need stacks or dilation to connect distant positions, increasing maximum path 
+  length; they can also be more expensive depending on kernel width and 
+  separability.
+difficulty: 0.68
+difficulty_source: llm_estimate
+tags:
+  - attn
+  - self-attention
+  - comparison
+hints:
+  - The paper’s comparison is not just about speed; include path length.
+  - Separate parallelization from total arithmetic cost.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.7
+transfer_distance: 0.55
+scaffold_level: 0.05
+surface_family: architecture_tradeoff_comparison
+repair_targets:
+  - three_criteria
+  - self_attention_parallel
+  - self_attention_path
+  - recurrent_sequential
+  - convolution_path
+  - complexity_tradeoff
+  - long_range_dependency_link
+  - fatal_single_criterion
+  - fatal_recurrence_parallel
+  - fatal_no_path_length
+grading_rubric:
+  max_points: 8
+  criteria:
+    - id: three_criteria
+      points: 1.5
+      description: 'Names all three comparison criteria: complexity, parallelism,
+        and path length.'
+    - id: self_attention_parallel
+      points: 1.0
+      description: Explains self-attention’s constant sequential operations 
+        across positions.
+    - id: self_attention_path
+      points: 1.0
+      description: Explains the short path length benefit for long-range 
+        dependencies.
+    - id: recurrent_sequential
+      points: 1.0
+      description: Explains recurrence requires sequential computation by 
+        position.
+    - id: convolution_path
+      points: 1.0
+      description: Explains convolution needs multiple layers or dilation to 
+        connect distant positions.
+    - id: complexity_tradeoff
+      points: 1.0
+      description: Mentions computational cost conditions or kernel/separable 
+        convolution tradeoffs.
+    - id: long_range_dependency_link
+      points: 1.0
+      description: Connects shorter paths to easier learning of long-range 
+        dependencies.
+    - id: balanced_comparison
+      points: 0.5
+      description: Avoids claiming self-attention dominates every setting 
+        without tradeoffs.
+  fatal_errors:
+    - id: fatal_single_criterion
+      description: Only discusses one criterion and ignores the multi-criterion 
+        comparison.
+      max_grade: 3
+    - id: fatal_recurrence_parallel
+      description: Claims recurrent layers parallelize across sequence positions
+        in the same way as self-attention.
+      max_grade: 4
+    - id: fatal_no_path_length
+      description: Omits path length and long-range dependency reasoning 
+        entirely.
+      max_grade: 5
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: note_source_attention_is_all_you_need_fc4584d5
+      path: 
+        subjects/attn/notes/note_source_attention_is_all_you_need_fc4584d5.md
+      locator: attention-is-all-you-need/6-results/6-2-model-variations/p3
+      quote: While single-head attention is 0.9 BLEU worse than the best 
+        setting, quality also drops off with too many heads.
+      quote_hash: sha256:head_count_ablation
+created_at: '2026-05-28T21:34:33Z'
+updated_at: '2026-05-28T21:34:33Z'

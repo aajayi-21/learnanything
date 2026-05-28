@@ -131,6 +131,7 @@ def run_doctor(root: Path, *, fix_state: bool = False, ai: bool = False, ai_prov
     _check_bad_item_suspicion(vault, repository, issues)
     _check_criterion_facet_maps(vault, issues)
     _check_registered_facets(vault, issues)
+    _check_concept_merge_candidates(vault, issues)
     _check_facet_merge_candidates(vault, issues)
     _check_learning_object_merge_candidates(vault, issues)
     _check_duplicate_diagnostic_proposals(vault, repository, issues)
@@ -642,6 +643,83 @@ def _check_facet_merge_candidates(vault: LoadedVault, issues: list[HealthIssue])
                         ),
                     )
                 )
+
+
+def _check_concept_merge_candidates(vault: LoadedVault, issues: list[HealthIssue]) -> None:
+    ordered = sorted(vault.concepts.items())
+    for index, (left_id, left) in enumerate(ordered):
+        for right_id, right in ordered[index + 1 :]:
+            strong_alias = bool(_concept_surfaces(left_id, left) & _concept_surfaces(right_id, right))
+            score = _concept_similarity(left_id, left, right_id, right)
+            if not strong_alias and score < 0.72:
+                continue
+            canonical, duplicate = sorted([left_id, right_id], key=lambda value: (len(value), value))
+            code = "concept:merge_candidate:strong_alias" if strong_alias else "concept:merge_candidate:needs_review"
+            issues.append(
+                _issue(
+                    "warning",
+                    code,
+                    f"Concepts {left_id!r} and {right_id!r} look duplicative (similarity={score:.2f})",
+                    entity_id=canonical,
+                    details={
+                        "canonical_concept_id": canonical,
+                        "duplicate_concept_id": duplicate,
+                        "similarity": round(score, 3),
+                        "strong_alias": strong_alias,
+                        "affected": _concept_merge_affected_refs(vault, canonical, duplicate),
+                        "suggested_action": (
+                            f"Review and run `learnloop merge-concepts {canonical} {duplicate}` "
+                            "if these are the same concept."
+                        ),
+                    },
+                )
+            )
+
+
+def _concept_similarity(left_id: str, left: Any, right_id: str, right: Any) -> float:
+    left_text = " ".join([left_id, left.title, *(left.aliases or []), left.description or ""])
+    right_text = " ".join([right_id, right.title, *(right.aliases or []), right.description or ""])
+    return max(
+        _text_similarity(left.title, right.title),
+        _text_similarity(left_id, right_id),
+        _text_similarity(left_text, right_text),
+    )
+
+
+def _concept_surfaces(concept_id: str, concept: Any) -> set[str]:
+    values = [concept_id, concept.title, *(concept.aliases or [])]
+    return {_normalized_surface(value) for value in values if _normalized_surface(value)}
+
+
+def _normalized_surface(value: str) -> str:
+    return " ".join(sorted(_text_tokens(value)))
+
+
+def _concept_merge_affected_refs(vault: LoadedVault, canonical_id: str, duplicate_id: str) -> dict[str, list[str]]:
+    concept_ids = {canonical_id, duplicate_id}
+    return {
+        "learning_objects": sorted(
+            learning_object.id
+            for learning_object in vault.learning_objects.values()
+            if learning_object.concept in concept_ids
+            or bool(set(learning_object.prerequisites) & concept_ids)
+            or bool(set(learning_object.confusables) & concept_ids)
+        ),
+        "concept_edges": sorted(
+            edge.id for edge in vault.edges if edge.source in concept_ids or edge.target in concept_ids
+        ),
+        "goals": sorted(
+            goal.id for goal in vault.goals if bool(set(goal.concept_anchors) & concept_ids)
+        ),
+        "error_types": sorted(
+            error_type.id
+            for error_type in vault.error_types.values()
+            if bool(set(error_type.related_concepts) & concept_ids)
+        ),
+        "notes": sorted(
+            note.id for note in vault.notes.values() if bool(set(note.related_concepts) & concept_ids)
+        ),
+    }
 
 
 def _facet_merge_details(

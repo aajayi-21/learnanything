@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from typer.testing import CliRunner
 
-from learnloop.cli import app
+from learnloop.cli import _AsciiSpinner, app
 from learnloop.vault.loader import load_vault
 
 from tests.helpers import create_basic_vault
@@ -45,6 +47,7 @@ def test_cli_ingest_runs_canonical_endpoint_and_reports_json(tmp_path):
     assert payload["ingest"]["proposal_id"]
     assert payload["ingest"]["source_kind"] == "website_page"
     assert payload["ingest"]["auto_applied_count"] == 2
+    assert "Ingesting canonical source" not in result.output
     assert server.requests[0]["path"] == "/canonical-ingest"
     context = server.requests[0]["body"]["context"]
     assert context["source_kind"] == "website_page"
@@ -89,6 +92,19 @@ def test_cli_ingest_reports_windows_path_escape_hint(tmp_path):
     assert "TOMLDecodeError" not in result.output
 
 
+def test_ascii_spinner_writes_elapsed_status_for_tty():
+    stream = _TtyBuffer()
+
+    with _AsciiSpinner("Ingesting test source", enabled=True, stream=stream, interval=0.001):
+        time.sleep(0.003)
+
+    output = stream.getvalue()
+    assert "Ingesting test source" in output
+    assert "elapsed" in output
+    assert "Done: Ingesting test source" in output
+    assert all(ord(char) < 128 for char in output)
+
+
 def _source_file(tmp_path):
     text = " ".join(
         [
@@ -119,6 +135,11 @@ def _configure_codex(vault_root, checkout, base_url: str) -> None:
     text = text.replace('revision = "<pinned-commit>"', 'revision = "abc123"')
     text = text.replace('base_url = "http://127.0.0.1:8765"', f'base_url = "{base_url}"')
     config_path.write_text(text, encoding="utf-8")
+
+
+class _TtyBuffer(io.StringIO):
+    def isatty(self) -> bool:
+        return True
 
 
 class _CanonicalIngestServer:

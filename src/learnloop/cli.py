@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json as jsonlib
+import sys
+import threading
+import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Annotated, Any, Mapping
+from typing import Annotated, Any, Mapping, TextIO
 
 import typer
 from pydantic import BaseModel
@@ -25,6 +28,7 @@ from learnloop.services.attempts import (
     complete_attempt_with_codex_fallback,
 )
 from learnloop.services.debug_time import DebugAdvanceError, advance_vault_days
+from learnloop.services.concepts import ConceptMergeError, merge_concepts
 from learnloop.services.doctor import run_doctor
 from learnloop.services.followups import evaluate_attempt_intervention_followup
 from learnloop.services.observations import (
@@ -70,6 +74,86 @@ from learnloop.vault.paths import VaultPaths, find_vault_root
 from learnloop.vault.yaml_io import read_yaml, yaml_to_string
 
 app = typer.Typer(no_args_is_help=True, help="LearnLoop local adaptive learning vault.")
+
+_INGEST_SPINNER_FRAMES = ("|", "/", "-", "\\")
+
+
+def _format_elapsed(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+class _AsciiSpinner:
+    def __init__(
+        self,
+        label: str,
+        *,
+        enabled: bool,
+        stream: TextIO | None = None,
+        interval: float = 0.2,
+    ) -> None:
+        self.label = label
+        self.enabled = enabled
+        self.stream = stream or sys.stderr
+        self.interval = interval
+        self._interactive = False
+        self._last_width = 0
+        self._started = 0.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+        self._started = time.monotonic()
+        self._interactive = bool(getattr(self.stream, "isatty", lambda: False)())
+        if not self._interactive:
+            self._write(f"{self.label}... this can take around 200s.\n")
+            return self
+        self._thread = threading.Thread(target=self._spin, name="learnloop-ingest-spinner", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, _exc, _traceback) -> bool:
+        if not self.enabled:
+            return False
+        elapsed = _format_elapsed(time.monotonic() - self._started)
+        status = "Failed" if exc_type else "Done"
+        if self._interactive:
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=self.interval * 2)
+            self._write_status(f"{status}: {self.label} in {elapsed}.")
+            self._write("\n")
+        else:
+            self._write(f"{status}: {self.label} in {elapsed}.\n")
+        return False
+
+    def _spin(self) -> None:
+        frame_index = 0
+        while not self._stop.is_set():
+            elapsed = _format_elapsed(time.monotonic() - self._started)
+            frame = _INGEST_SPINNER_FRAMES[frame_index]
+            self._write_status(f"{frame} {self.label} elapsed {elapsed} (usually around 200s)")
+            frame_index = (frame_index + 1) % len(_INGEST_SPINNER_FRAMES)
+            self._stop.wait(self.interval)
+
+    def _write_status(self, line: str) -> None:
+        padding = " " * max(0, self._last_width - len(line))
+        self._write(f"\r{line}{padding}")
+        self._last_width = len(line)
+
+    def _write(self, text: str) -> None:
+        try:
+            self.stream.write(text)
+            self.stream.flush()
+        except OSError:
+            self.enabled = False
+            self._stop.set()
 
 
 def _root(vault: Path | None) -> Path:
@@ -353,22 +437,26 @@ def ingest(
         if retry_provider and retry_provider != provider_name:
             retry_runtime = _runtime_for_provider(vault_root, loaded.config, retry_provider)
             retry_client = _client_for_provider(vault_root, loaded.config, retry_provider) if retry_runtime.ready else None
-        result = ingest_canonical_source(
-            vault_root,
-            source,
-            client,
-            kind=kind,  # type: ignore[arg-type]
-            subject_id=subject,
-            learning_object_ids=learning_objects,
-            goal_id=goal,
-            allow_auto_captions=allow_auto_captions,
-            instructions=instructions,
-            model=getattr(client, "model", None),
-            codex_revision=getattr(runtime, "actual_revision", None),
-            retry_client=retry_client,
-            retry_model=getattr(retry_client, "model", None) if retry_client is not None else None,
-            retry_provider_revision=getattr(retry_runtime, "actual_revision", None) if retry_runtime is not None else None,
-        )
+        with _AsciiSpinner(
+            f"Ingesting canonical source with {provider_name}",
+            enabled=not json_output,
+        ):
+            result = ingest_canonical_source(
+                vault_root,
+                source,
+                client,
+                kind=kind,  # type: ignore[arg-type]
+                subject_id=subject,
+                learning_object_ids=learning_objects,
+                goal_id=goal,
+                allow_auto_captions=allow_auto_captions,
+                instructions=instructions,
+                model=getattr(client, "model", None),
+                codex_revision=getattr(runtime, "actual_revision", None),
+                retry_client=retry_client,
+                retry_model=getattr(retry_client, "model", None) if retry_client is not None else None,
+                retry_provider_revision=getattr(retry_runtime, "actual_revision", None) if retry_runtime is not None else None,
+            )
     except Exception as exc:
         if json_output:
             typer.echo(_dump({"version": 1, "error": "ingest_failed", "message": str(exc)}))
@@ -408,6 +496,50 @@ def doctor(
         subject = f" {issue.entity_id}" if issue.entity_id else ""
         typer.echo(f"{issue.severity}: {issue.code}{subject}: {issue.message}{location}")
     raise typer.Exit(code=1)
+
+
+@app.command("merge-concepts")
+def merge_concepts_command(
+    canonical_id: Annotated[str, typer.Argument(help="Concept id to keep.")],
+    duplicate_id: Annotated[str, typer.Argument(help="Concept id to merge into the canonical concept.")],
+    add_alias: Annotated[
+        bool,
+        typer.Option("--alias/--no-alias", help="Add duplicate id, title, and aliases to the canonical concept."),
+    ] = True,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show planned file changes without writing.")] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Allow merging concepts with conflicting type/description metadata."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    try:
+        result = merge_concepts(
+            _root(vault),
+            canonical_id,
+            duplicate_id,
+            add_alias=add_alias,
+            dry_run=dry_run,
+            force=force,
+        )
+    except ConceptMergeError as exc:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": "concept_merge_failed", "message": str(exc)}))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(_dump({"version": 1, "merge": result.as_dict()}))
+        return
+    prefix = "Would merge" if dry_run else "Merged"
+    typer.echo(f"{prefix} {duplicate_id} into {canonical_id}.")
+    if result.changed_files:
+        typer.echo("Changed files:")
+        for path in result.changed_files:
+            typer.echo(f"  {path}")
+    if result.change_batch_id:
+        typer.echo(f"Change batch: {result.change_batch_id}")
 
 
 @app.command()
@@ -589,7 +721,11 @@ def reject(
     items: Annotated[str | None, typer.Option("--items", help="Comma-separated proposal item SQL ids.")] = None,
     vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
 ) -> None:
-    count = reject_items(_root(vault), patch_id, _split_items(items))
+    try:
+        count = reject_items(_root(vault), patch_id, _split_items(items))
+    except PatchApplicationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
     typer.echo(f"Rejected {count} proposal item(s).")
 
 

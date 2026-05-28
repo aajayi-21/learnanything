@@ -1,0 +1,87 @@
+schema_version: 1
+id: pi_scaled_attention_steps
+learning_object_id: lo_scaled_dot_product_attention
+subjects:
+  - attn
+practice_mode: ordered_steps
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - dot_products
+  - scaling
+  - softmax
+  - value_weighting
+  - correct_order
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: Put the main operations of scaled dot-product attention in order, 
+  starting from queries, keys, and values.
+expected_answer: Compute query-key dot products; scale the scores by the square 
+  root of the key dimension; apply softmax to obtain attention weights; multiply
+  the weights by the values to produce the output.
+difficulty: 0.46
+difficulty_source: llm_estimate
+tags:
+  - attn
+  - scaled-dot-product
+  - procedure
+hints:
+  - Think of the formula as score, scale, normalize, then mix values.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.55
+transfer_distance: 0.2
+scaffold_level: 0.15
+surface_family: algorithm_steps
+repair_targets:
+  - dot_products
+  - scaling
+  - softmax
+  - value_weighting
+  - correct_order
+  - fatal_missing_softmax
+  - fatal_wrong_score_target
+grading_rubric:
+  max_points: 5
+  criteria:
+    - id: dot_products
+      points: 1.0
+      description: Includes dot products between queries and keys.
+    - id: scaling
+      points: 1.0
+      description: Includes scaling by the key-dimension factor.
+    - id: softmax
+      points: 1.0
+      description: Includes softmax normalization.
+    - id: value_weighting
+      points: 1.0
+      description: Includes weighting values to compute outputs.
+    - id: correct_order
+      points: 1.0
+      description: Orders the steps correctly.
+  fatal_errors:
+    - id: fatal_missing_softmax
+      description: Omits softmax or any normalization step.
+      max_grade: 3
+    - id: fatal_wrong_score_target
+      description: Scores queries against values instead of keys.
+      max_grade: 3
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: note_source_attention_is_all_you_need_fc4584d5
+      path: 
+        subjects/attn/notes/note_source_attention_is_all_you_need_fc4584d5.md
+      locator: attention-is-all-you-need/6-results/6-2-model-variations/p3
+      quote: While single-head attention is 0.9 BLEU worse than the best 
+        setting, quality also drops off with too many heads.
+      quote_hash: sha256:head_count_ablation
+created_at: '2026-05-28T21:34:32Z'
+updated_at: '2026-05-28T21:34:32Z'

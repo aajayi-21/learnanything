@@ -8,10 +8,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from learnloop.db.repositories import Repository
+from learnloop.services.patches import apply_accepted_items
 from learnloop.vault.loader import load_vault
+from learnloop.vault.writer import upsert_learning_object
 from learnloop_sidecar.server import serve
 
-from tests.helpers import ALGORITHM_VERSION, add_followup_item, create_basic_vault, seed_due_item
+from tests.helpers import ALGORITHM_VERSION, NOW_ISO, add_followup_item, create_basic_vault, seed_due_item
 
 FIXTURE_VAULT = Path(__file__).resolve().parents[1] / "fixtures" / "linear_algebra"
 
@@ -772,6 +774,51 @@ def _proposal_payload(suffix: str = "imported") -> dict:
     }
 
 
+def _seed_standalone_concept_proposal(repository: Repository) -> None:
+    repository.insert_agent_run(
+        {
+            "id": "agent_run_concept_1",
+            "purpose": "authoring",
+            "provider": "fake",
+            "output_schema": "AuthoringProposal",
+            "started_at": NOW_ISO,
+            "status": "completed",
+            "completed_at": NOW_ISO,
+        }
+    )
+    repository.persist_proposal_batch(
+        {
+            "id": "patch_concept_1",
+            "agent_run_id": "agent_run_concept_1",
+            "purpose": "authoring",
+            "source_refs": [],
+            "summary": "Create a standalone concept",
+            "created_at": NOW_ISO,
+        },
+        [
+            {
+                "id": "proposal_item_concept",
+                "client_item_id": "client_concept",
+                "item_type": "concept",
+                "operation": "create",
+                "payload": {
+                    "id": "new_concept",
+                    "title": "New concept",
+                    "type": "concept",
+                    "aliases": [],
+                    "description": "A standalone concept.",
+                    "tags": [],
+                    "created_at": NOW_ISO,
+                    "updated_at": NOW_ISO,
+                },
+                "validation_status": "valid",
+                "validation_errors": [],
+                "created_at": NOW_ISO,
+            }
+        ],
+    )
+
+
 def test_sidecar_vault_tree_and_file_read(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)
@@ -932,6 +979,51 @@ def test_sidecar_proposals_get_accept_reject_undo(tmp_path):
         ]
     )[1]["result"]
     assert _find_proposal_item(noop, accept_item)["decision"] == "accepted"
+
+
+def test_sidecar_reject_accepted_concept_reports_reference_blocker(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    _seed_standalone_concept_proposal(repository)
+    apply_accepted_items(vault_root, "patch_concept_1", ["proposal_item_concept"])
+    upsert_learning_object(
+        vault_root,
+        {
+            "schema_version": 1,
+            "id": "lo_new_concept",
+            "title": "New concept LO",
+            "subjects": ["linear-algebra"],
+            "concept": "new_concept",
+            "knowledge_type": "conceptual",
+            "status": "active",
+            "contradicts": None,
+            "summary": "A dependent learning object.",
+            "prerequisites": [],
+            "confusables": [],
+            "difficulty_prior": 0.4,
+            "tags": [],
+            "provenance": {"origin": "human", "source_refs": []},
+            "created_at": NOW_ISO,
+            "updated_at": NOW_ISO,
+        },
+    )
+
+    rejected = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "reject_proposal_items",
+                "params": {"patchId": "patch_concept_1", "itemIds": ["proposal_item_concept"]},
+            },
+        ]
+    )[1]
+
+    assert rejected["error"]["data"]["code"] == "invalid_request"
+    assert "still referenced" in rejected["error"]["message"]
+    assert "learning_object:lo_new_concept.concept" in rejected["error"]["message"]
 
 
 def _pending_valid_item(snapshot: dict, skip: set[str] = frozenset()) -> tuple[str, str]:

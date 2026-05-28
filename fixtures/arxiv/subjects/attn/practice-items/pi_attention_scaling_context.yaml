@@ -1,0 +1,87 @@
+schema_version: 1
+id: pi_attention_scaling_context
+learning_object_id: lo_qk_attention_pattern
+subjects:
+  - attn
+practice_mode: application
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - quadratic_scaling
+  - doubling_quadruples
+  - bottleneck_implication
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: If a self-attention pattern stores one score for every pair of positions
+  in a context, what happens to the number of attention scores when the context 
+  length doubles, and why does this matter?
+expected_answer: The number of scores grows by a factor of four, because the 
+  attention pattern has size proportional to context length squared. This 
+  matters because memory and computation for attention can become a bottleneck 
+  when increasing context windows.
+difficulty: 0.46
+difficulty_source: llm_estimate
+tags:
+  - attn
+  - scaling
+  - context-window
+hints:
+  - A grid with one row and one column per token has length times length 
+    entries.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.34
+transfer_distance: 0.36
+scaffold_level: 0.15
+surface_family: attention_scaling_application
+repair_targets:
+  - quadratic_scaling
+  - doubling_quadruples
+  - bottleneck_implication
+  - fatal_linear_scaling
+grading_rubric:
+  max_points: 3
+  criteria:
+    - id: quadratic_scaling
+      points: 1.0
+      description: States that score count scales with the square of context 
+        length.
+    - id: doubling_quadruples
+      points: 1.0
+      description: Correctly says doubling context length quadruples the number 
+        of scores.
+    - id: bottleneck_implication
+      points: 1.0
+      description: Connects this to memory or compute bottlenecks for long 
+        contexts.
+  fatal_errors:
+    - id: fatal_linear_scaling
+      description: Claims doubling context only doubles attention scores.
+      max_grade: 1
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: src_attention_quadratic
+      path: 
+        subjects/attn/notes/note_source_youtube_video_emlx5ffnoyc_082cbd99.md
+      locator: t=762.5-788.3
+      quote: attention pattern... size is equal to the square of the context 
+        size.
+      quote_hash: sha256:src_attention_quadratic
+    - ref_type: canonical_source
+      ref_id: src_parameter_scaling
+      path: 
+        subjects/attn/notes/note_source_youtube_video_emlx5ffnoyc_082cbd99.md
+      locator: t=1323.7-1508.4
+      quote: 96 distinct layers... total sum to just under 58 billion... 
+        extremely parallelizable.
+      quote_hash: sha256:src_parameter_scaling
+created_at: '2026-05-28T21:34:19Z'
+updated_at: '2026-05-28T21:34:19Z'

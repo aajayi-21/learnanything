@@ -6,14 +6,14 @@ goals:
     priority: 0.5
     concept_anchors:
       - concept_autoregressive_decoder_masking
-      - concept_multi_head_attention
+      - concept_multihead_attention
       - concept_positional_encoding
       - concept_scaled_dot_product_attention
       - concept_self_attention_advantages
       - concept_transformer_architecture
     due_at:
     created_at: '2026-05-28T20:26:58Z'
-    updated_at: '2026-05-28T20:26:58Z'
+    updated_at: '2026-05-28T21:31:16Z'
   - id: goal_attn_2
     title: YouTube video eMlx5fFNoYc
     status: active

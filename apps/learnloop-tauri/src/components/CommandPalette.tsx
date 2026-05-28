@@ -2,7 +2,8 @@
 //
 // Open with Ctrl/Cmd+P or `:` from anywhere. Mirrors the MVP CLI surface:
 //   today · review · why · show · attempt · propose · proposals · accept ·
-//   reject · ingest · add-subject · add-note · doctor · init · goto · help · clear
+//   reject · ingest · add-subject · add-note · merge-concepts · doctor ·
+//   init · goto · help · clear
 //
 // Autocomplete is grammar-aware: each command declares which argument slot
 // expects which entity kind, and the palette filters the ids the app knows
@@ -39,7 +40,7 @@ type OutputRow =
 // ── Command grammar ─────────────────────────────────────────────────────
 // Static description of every command — used by both autocomplete and the
 // parser. Execution lives in runCommand().
-type ArgKind = "practice_item" | "any" | "subject" | "tab" | "url" | "path";
+type ArgKind = "practice_item" | "concept" | "any" | "subject" | "tab" | "url" | "path";
 interface ArgSpec {
   name: string;
   kind?: ArgKind;
@@ -69,6 +70,11 @@ const GRAMMAR: Record<string, GrammarSpec> = {
   "register-observation-template": { help: "Register an observation template", args: [], flags: ["--file", "--domain", "--version", "--title", "--active", "--inactive", "--json"] },
   "record-observation": { help: "Record an observation response", args: [{ name: "template_id" }], flags: ["--response-json", "--response-file", "--subject", "--learning-object-id", "--practice-item-id", "--session-id", "--json"] },
   "misconception-candidates": { help: "Rank misconception/error candidates", args: [{ name: "practice_item_id", kind: "practice_item" }], flags: ["--query", "--limit", "--json"] },
+  "merge-concepts": {
+    help: "Merge a duplicate concept into the canonical concept",
+    args: [{ name: "canonical_id", kind: "concept" }, { name: "duplicate_id", kind: "concept" }],
+    flags: ["--alias", "--no-alias", "--dry-run", "--force", "--json"]
+  },
   doctor: { help: "Validate vault, schemas, and runtime health", args: [], flags: ["--json", "--fix-state"] },
   init: { help: "Create a new vault", args: [], flags: [] },
   goto: { help: "Jump to a tab", args: [{ name: "tab", kind: "tab" }], flags: [] },
@@ -90,6 +96,7 @@ const CLI_DELEGATED_COMMANDS = new Set([
   "register-observation-template",
   "record-observation",
   "misconception-candidates",
+  "merge-concepts",
   "init"
 ]);
 
@@ -317,6 +324,7 @@ function tokenize(line: string, cursor: number) {
 interface Candidates {
   entityIds: string[];
   practiceItemIds: string[];
+  conceptIds: string[];
   subjects: string[];
 }
 
@@ -324,6 +332,8 @@ function candidatesFor(kind: ArgKind | undefined, c: Candidates): string[] {
   switch (kind) {
     case "practice_item":
       return c.practiceItemIds;
+    case "concept":
+      return c.conceptIds;
     case "any":
       return Array.from(new Set([...c.practiceItemIds, ...c.entityIds]));
     case "subject":
@@ -489,6 +499,7 @@ function KindBadge({ kind }: { kind: string }) {
     command: { tone: "amber", label: "cmd" },
     flag: { tone: "slate", label: "flag" },
     subject: { tone: "green", label: "subject" },
+    concept: { tone: "amber", label: "concept" },
     tab: { tone: "cyan", label: "tab" },
     practice_item: { tone: "cyan", label: "pi" },
     any: { tone: "slate", label: "id" }
@@ -618,10 +629,12 @@ export function CommandPalette({
   const [histIdx, setHistIdx] = useState(-1);
   const [acIdx, setAcIdx] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [conceptIds, setConceptIds] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const cands = useMemo<Candidates>(() => ({ entityIds, practiceItemIds, subjects }), [entityIds, practiceItemIds, subjects]);
+  const subjectsKey = useMemo(() => subjects.join("\0"), [subjects]);
+  const cands = useMemo<Candidates>(() => ({ entityIds, practiceItemIds, conceptIds, subjects }), [entityIds, practiceItemIds, conceptIds, subjects]);
   const completions = useMemo(() => computeCompletions(line, cursor, cands), [line, cursor, cands]);
 
   const helpCommands = useMemo(() => Object.entries(GRAMMAR).map(([name, spec]) => ({ name, help: spec.help })), []);
@@ -633,6 +646,22 @@ export function CommandPalette({
   useEffect(() => {
     if (open) window.setTimeout(() => inputRef.current?.focus(), 30);
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    api
+      .getConceptGraph()
+      .then((graph) => {
+        if (!cancelled) setConceptIds(graph.concepts.map((concept) => concept.id));
+      })
+      .catch(() => {
+        if (!cancelled) setConceptIds([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, subjectsKey]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;

@@ -1,2 +1,75 @@
 schema_version: 1
-edges: []
+edges:
+  - id: edge_scaled_to_multi_head
+    relation_type: prerequisite
+    source: concept_scaled_dot_product_attention
+    target: concept_multihead_attention
+    strength: 0.85
+    rationale: Understanding the per-head attention computation is needed before
+      understanding how multiple heads are projected, run in parallel, 
+      concatenated, and projected.
+    created_at: '2026-05-28T21:34:04Z'
+    updated_at: '2026-05-28T21:34:04Z'
+  - id: edge_context_to_qk
+    relation_type: prerequisite
+    source: concept_contextual_embedding
+    target: concept_query_key
+    strength: 0.72
+    rationale: Queries and keys operate on embeddings to decide which contextual
+      information should be incorporated.
+    created_at: '2026-05-28T21:34:22Z'
+    updated_at: '2026-05-28T21:34:22Z'
+  - id: edge_head_to_multihead
+    relation_type: prerequisite
+    source: concept_attention_head
+    target: concept_multihead_attention
+    strength: 0.86
+    rationale: A full multi-head block repeats the single-head procedure with 
+      many distinct Q/K/V maps.
+    created_at: '2026-05-28T21:34:22Z'
+    updated_at: '2026-05-28T21:34:22Z'
+  - id: edge_pattern_to_values
+    relation_type: prerequisite
+    source: concept_attention_pattern
+    target: concept_value_vectors
+    strength: 0.82
+    rationale: The attention pattern supplies the weights used to combine value 
+      vectors.
+    created_at: '2026-05-28T21:34:23Z'
+    updated_at: '2026-05-28T21:34:23Z'
+  - id: edge_qk_to_pattern
+    relation_type: prerequisite
+    source: concept_query_key
+    target: concept_attention_pattern
+    strength: 0.9
+    rationale: Dot products between queries and keys are normalized into the 
+      attention pattern.
+    created_at: '2026-05-28T21:34:23Z'
+    updated_at: '2026-05-28T21:34:23Z'
+  - id: edge_masking_related_transformer_decoder
+    relation_type: part_of
+    source: concept_autoregressive_decoder_masking
+    target: concept_transformer_architecture
+    strength: 0.75
+    rationale: The decoder modifies self-attention to prevent attending to 
+      subsequent positions, preserving autoregressive generation.
+    created_at: '2026-05-28T21:34:34Z'
+    updated_at: '2026-05-28T21:34:34Z'
+  - id: edge_transformer_part_multi_head
+    relation_type: part_of
+    source: concept_multihead_attention
+    target: concept_transformer_architecture
+    strength: 0.9
+    rationale: The encoder and decoder layers use multi-head self-attention, and
+      the decoder also uses multi-head encoder-decoder attention.
+    created_at: '2026-05-28T21:34:35Z'
+    updated_at: '2026-05-28T21:34:35Z'
+  - id: edge_transformer_part_positional_encoding
+    relation_type: part_of
+    source: concept_positional_encoding
+    target: concept_transformer_architecture
+    strength: 0.8
+    rationale: The Transformer injects positional information by adding 
+      positional encodings to input embeddings in encoder and decoder stacks.
+    created_at: '2026-05-28T21:34:36Z'
+    updated_at: '2026-05-28T21:34:36Z'

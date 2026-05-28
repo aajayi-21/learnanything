@@ -1,0 +1,100 @@
+schema_version: 1
+id: pi_decoder_masking_apply
+learning_object_id: lo_decoder_causal_masking
+subjects:
+  - attn
+practice_mode: scenario_short_answer
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - autoregressive_property
+  - future_leakage
+  - masking_mechanism
+  - allowed_positions
+  - offset_embeddings
+  - specific_to_decoder
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: A Transformer decoder is training on a target sentence and its 
+  self-attention layer is allowed to attend to all target positions, including 
+  later words. What property is broken, and how does the paper’s decoder prevent
+  this?
+expected_answer: 'Allowing attention to later target positions breaks the autoregressive
+  property: the prediction for a position can depend on future outputs. The decoder
+  prevents this by masking out illegal future connections in scaled dot-product attention
+  so each position can attend only to positions up to and including itself, with output
+  embeddings offset by one position.'
+difficulty: 0.55
+difficulty_source: llm_estimate
+tags:
+  - attn
+  - decoder
+  - causal-mask
+hints:
+  - Ask what information a next-token predictor is allowed to see.
+  - The mask changes which logits enter the softmax.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.55
+transfer_distance: 0.4
+scaffold_level: 0.15
+surface_family: masking_failure_scenario
+repair_targets:
+  - autoregressive_property
+  - future_leakage
+  - masking_mechanism
+  - allowed_positions
+  - fatal_encoder_masking
+  - fatal_no_autoregression
+grading_rubric:
+  max_points: 6
+  criteria:
+    - id: autoregressive_property
+      points: 1.5
+      description: Identifies the broken property as autoregressive prediction 
+        or no future leakage.
+    - id: future_leakage
+      points: 1.0
+      description: Explains that later target tokens would leak information.
+    - id: masking_mechanism
+      points: 1.5
+      description: States that future positions are masked out in 
+        self-attention.
+    - id: allowed_positions
+      points: 1.0
+      description: States that a position may attend only to earlier positions 
+        and itself.
+    - id: offset_embeddings
+      points: 0.5
+      description: Mentions the offset output embeddings if included.
+    - id: specific_to_decoder
+      points: 0.5
+      description: Keeps the explanation specific to decoder self-attention, not
+        encoder attention.
+  fatal_errors:
+    - id: fatal_encoder_masking
+      description: Claims the encoder must use this same causal mask for the 
+        same reason.
+      max_grade: 3
+    - id: fatal_no_autoregression
+      description: Does not identify autoregression or future-token leakage.
+      max_grade: 3
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: note_source_attention_is_all_you_need_fc4584d5
+      path: 
+        subjects/attn/notes/note_source_attention_is_all_you_need_fc4584d5.md
+      locator: attention-is-all-you-need/6-results/6-2-model-variations/p3
+      quote: While single-head attention is 0.9 BLEU worse than the best 
+        setting, quality also drops off with too many heads.
+      quote_hash: sha256:head_count_ablation
+created_at: '2026-05-28T21:34:29Z'
+updated_at: '2026-05-28T21:34:29Z'

@@ -1,0 +1,97 @@
+schema_version: 1
+id: pi_qk_softmax_sequence
+learning_object_id: lo_qk_attention_pattern
+subjects:
+  - attn
+practice_mode: ordering
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - qk_first
+  - dot_products_second
+  - scale_before_softmax
+  - column_softmax_last
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: 'Put these steps in order for producing an attention pattern from embeddings:
+  apply softmax column-wise; compute query and key vectors; take all key-query dot
+  products; scale scores by the square root of the key-query dimension.'
+expected_answer: 1. Compute query and key vectors from embeddings. 2. Take all 
+  key-query dot products. 3. Scale scores by the square root of the key-query 
+  dimension. 4. Apply softmax column-wise to produce normalized attention 
+  weights.
+difficulty: 0.52
+difficulty_source: llm_estimate
+tags:
+  - attn
+  - qk
+  - softmax
+hints:
+  - The source first creates Q and K, then compares them.
+  - Softmax turns raw scores into normalized weights.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.55
+transfer_distance: 0.22
+scaffold_level: 0.35
+surface_family: attention_computation_ordering
+repair_targets:
+  - qk_first
+  - dot_products_second
+  - scale_before_softmax
+  - column_softmax_last
+  - fatal_softmax_before_scores
+grading_rubric:
+  max_points: 4
+  criteria:
+    - id: qk_first
+      points: 1.0
+      description: Places query/key projection before scoring.
+    - id: dot_products_second
+      points: 1.0
+      description: Places all pairwise dot products after Q/K projection.
+    - id: scale_before_softmax
+      points: 1.0
+      description: Places scaling before softmax.
+    - id: column_softmax_last
+      points: 1.0
+      description: Places column-wise softmax last as normalization.
+  fatal_errors:
+    - id: fatal_softmax_before_scores
+      description: Applies softmax before key-query scores exist.
+      max_grade: 1
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: src_queries_keys
+      path: 
+        subjects/attn/notes/note_source_youtube_video_emlx5ffnoyc_082cbd99.md
+      locator: t=374.1-506.7
+      quote: query vector... key matrix... keys as potentially answering the 
+        queries.
+      quote_hash: sha256:src_queries_keys
+    - ref_type: canonical_source
+      ref_id: src_dot_softmax_pattern
+      path: 
+        subjects/attn/notes/note_source_youtube_video_emlx5ffnoyc_082cbd99.md
+      locator: t=507.2-616.8
+      quote: compute a dot product between each possible key-query pair... We 
+        call this grid an attention pattern.
+      quote_hash: sha256:src_dot_softmax_pattern
+    - ref_type: canonical_source
+      ref_id: src_scaled_attention_formula
+      path: 
+        subjects/attn/notes/note_source_youtube_video_emlx5ffnoyc_082cbd99.md
+      locator: t=618.1-660.8
+      quote: divide all of these values by the square root of the dimension... 
+        softmax... column by column.
+      quote_hash: sha256:src_scaled_attention_formula
+created_at: '2026-05-28T21:34:21Z'
+updated_at: '2026-05-28T21:34:21Z'

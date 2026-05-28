@@ -1,0 +1,108 @@
+schema_version: 1
+id: pi_architecture_components
+learning_object_id: lo_transformer_encoder_decoder_architecture
+subjects:
+  - attn
+practice_mode: diagram_explanation
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - encoder_sublayers
+  - decoder_masked_self_attention
+  - encoder_decoder_attention
+  - decoder_ffn
+  - residual_connections
+  - layer_norm
+  - dimension_consistency
+  - stacked_layers
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: Describe the main sublayers in a Transformer encoder layer and decoder 
+  layer. Include which attention mechanisms appear in each and how residual 
+  connections and layer normalization are used.
+expected_answer: 'An encoder layer has two sublayers: multi-head self-attention and
+  a position-wise feed-forward network. A decoder layer has masked multi-head self-attention,
+  multi-head encoder-decoder attention over encoder outputs, and a position-wise feed-forward
+  network. The model applies residual connections around each sublayer followed by
+  layer normalization, with matching model dimensions to support the residual additions.'
+difficulty: 0.6
+difficulty_source: llm_estimate
+tags:
+  - attn
+  - transformer
+  - encoder-decoder
+hints:
+  - The decoder has one more attention sublayer than the encoder.
+  - Residual and normalization are applied around each sublayer, not only once 
+    per stack.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.65
+transfer_distance: 0.45
+scaffold_level: 0.1
+surface_family: architecture_component_explanation
+repair_targets:
+  - encoder_sublayers
+  - decoder_masked_self_attention
+  - encoder_decoder_attention
+  - decoder_ffn
+  - residual_connections
+  - layer_norm
+  - fatal_no_decoder_cross_attention
+  - fatal_encoder_is_recurrent
+grading_rubric:
+  max_points: 8
+  criteria:
+    - id: encoder_sublayers
+      points: 1.5
+      description: Correctly identifies encoder self-attention and feed-forward 
+        sublayers.
+    - id: decoder_masked_self_attention
+      points: 1.5
+      description: Correctly identifies masked decoder self-attention.
+    - id: encoder_decoder_attention
+      points: 1.0
+      description: Correctly identifies decoder attention over encoder outputs.
+    - id: decoder_ffn
+      points: 1.0
+      description: Includes the decoder position-wise feed-forward network.
+    - id: residual_connections
+      points: 1.0
+      description: Mentions residual connections around sublayers.
+    - id: layer_norm
+      points: 1.0
+      description: Mentions layer normalization after residual addition.
+    - id: dimension_consistency
+      points: 0.5
+      description: Mentions shared model dimension enabling residual 
+        connections.
+    - id: stacked_layers
+      points: 0.5
+      description: Mentions that layers are stacked and repeated.
+  fatal_errors:
+    - id: fatal_no_decoder_cross_attention
+      description: Omits encoder-decoder attention from the decoder.
+      max_grade: 5
+    - id: fatal_encoder_is_recurrent
+      description: Describes the Transformer encoder as an RNN or convolutional 
+        stack rather than attention/feed-forward layers.
+      max_grade: 3
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: note_source_attention_is_all_you_need_fc4584d5
+      path: 
+        subjects/attn/notes/note_source_attention_is_all_you_need_fc4584d5.md
+      locator: attention-is-all-you-need/6-results/6-2-model-variations/p3
+      quote: While single-head attention is 0.9 BLEU worse than the best 
+        setting, quality also drops off with too many heads.
+      quote_hash: sha256:head_count_ablation
+created_at: '2026-05-28T21:34:28Z'
+updated_at: '2026-05-28T21:34:28Z'

@@ -12,6 +12,7 @@ from learnloop.services.proposals import (
     reject_items,
     reset_items,
 )
+from learnloop.services.patches import PatchApplicationError
 from learnloop_sidecar.context import SidecarContext
 from learnloop_sidecar.dto import ParamsModel, versioned
 from learnloop_sidecar.errors import SidecarError
@@ -201,7 +202,10 @@ def accept_proposal_items(ctx: SidecarContext, params: ProposalDecisionInput) ->
     """Accept (and apply) pending proposal items, then return the refreshed inbox."""
 
     vault, _repository = ctx.require_vault()
-    accept_items(vault.root, params.patch_id, params.item_ids)
+    try:
+        accept_items(vault.root, params.patch_id, params.item_ids)
+    except PatchApplicationError as exc:
+        raise SidecarError("invalid_request", str(exc)) from exc
     # Applying writes vault files, so refresh the in-memory vault — but proposal
     # review is fully offline; skip the Codex runtime probe that would block reload.
     ctx.reload(maintenance=False)
@@ -213,7 +217,10 @@ def reject_proposal_items(ctx: SidecarContext, params: ProposalDecisionInput) ->
     """Reject proposal items (reverting any already-applied change), then refresh."""
 
     vault, _repository = ctx.require_vault()
-    reject_items(vault.root, params.patch_id, params.item_ids)
+    try:
+        reject_items(vault.root, params.patch_id, params.item_ids)
+    except PatchApplicationError as exc:
+        raise SidecarError("invalid_request", str(exc)) from exc
     # Reverting an applied item touches vault files; refresh without the Codex probe.
     ctx.reload(maintenance=False)
     return _proposals_payload(ctx)
@@ -290,7 +297,7 @@ def delete_proposal_item(ctx: SidecarContext, params: DeleteProposalItemInput) -
     vault, _repository = ctx.require_vault()
     try:
         service_delete_proposal_item(vault.root, params.patch_id, params.item_id)
-    except ValueError as exc:
+    except (PatchApplicationError, ValueError) as exc:
         raise SidecarError("invalid_request", str(exc)) from exc
     # A delete may revert an applied change (touching vault files), so refresh the
     # in-memory vault — but skip the Codex runtime probe that would block on reload.

@@ -549,6 +549,9 @@ learnloop ingest <source> --goal <goal_id> --instructions "Focus on worked examp
 chapters when `--learning-object` is supplied. PDFs are not part of the MVP
 ingester.
 
+Non-JSON runs show an ASCII spinner with elapsed time while the canonical
+ingester is running. `--json` output stays machine-readable.
+
 ### `learnloop doctor`
 
 Validate vault health and optionally sync derived SQLite state from YAML.
