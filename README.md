@@ -24,6 +24,16 @@ Optional canonical ingestion dependencies are declared in `pyproject.toml`
 (`trafilatura`, `beautifulsoup4`, `lxml`, and `youtube-transcript-api`). They
 are installed with the editable package command above.
 
+You can also install with uv
+
+```powershell
+uv tool install git+https://github.com/6up-b/learnanything.git
+learnloop --help
+```
+To make sure live source edits are reflected immediately use --editable
+
+Remember to edit learnloop.toml of your vault with your codex path
+
 ## Desktop App (Tauri)
 
 The desktop GUI lives in `apps/learnloop-tauri`. It runs a Tauri shell around
@@ -40,14 +50,7 @@ Prerequisites:
 - On Windows, the Tauri window uses Microsoft Edge WebView2, which is usually
   already installed on current Windows systems.
 
-From the repository root, install the Python package first:
-
-```powershell
-python -m pip install -e .[dev]
-learnloop --help
-```
-
-Then install the desktop app dependencies:
+Install the desktop app dependencies:
 
 ```powershell
 cd apps/learnloop-tauri
