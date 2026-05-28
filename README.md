@@ -32,6 +32,8 @@ learnloop --help
 ```
 To make sure live source edits are reflected immediately use --editable
 
+Remember to edit learnloop.toml of your vault with your codex path
+
 ## Desktop App (Tauri)
 
 The desktop GUI lives in `apps/learnloop-tauri`. It runs a Tauri shell around
@@ -46,14 +48,7 @@ Prerequisites:
 - On Windows, the Tauri window uses Microsoft Edge WebView2, which is usually
   already installed on current Windows systems.
 
-From the repository root, install the Python package first:
-
-```powershell
-python -m pip install -e .[dev]
-learnloop --help
-```
-
-Then install the desktop app dependencies:
+Install the desktop app dependencies:
 
 ```powershell
 cd apps/learnloop-tauri
