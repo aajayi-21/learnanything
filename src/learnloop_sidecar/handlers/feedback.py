@@ -52,38 +52,33 @@ def get_attempt(ctx: SidecarContext, params: AttemptInput) -> dict[str, Any]:
 
 @method("trigger_regrade", TriggerRegradeInput)
 def trigger_regrade(ctx: SidecarContext, params: TriggerRegradeInput) -> dict[str, Any]:
-    from learnloop.ai.client import make_ai_provider_client
-    from learnloop.ai.routing import fallback_provider_for, provider_for_task
-    from learnloop.ai.runtime import check_ai_runtime
-    from learnloop.codex.client import make_codex_client
-    from learnloop.codex.runtime import check_codex_runtime
     from learnloop.services.regrade import _regrade_attempt
+    from learnloop_sidecar.handlers.ai_providers import (
+        client_for_provider,
+        grading_source_for_provider,
+        provider_label,
+        ready_grading_provider,
+    )
 
     vault, repository = ctx.require_vault()
     attempt = repository.fetch_practice_attempt(params.attempt_id)
     if attempt is None:
         raise SidecarError("not_found", f"Attempt {params.attempt_id} not found.")
-    selection = provider_for_task(vault.config, "grading")
-    provider_name = selection.provider_name
-    runtime = check_codex_runtime(vault.root, vault.config.codex) if provider_name == "codex" else check_ai_runtime(vault.root, vault.config, provider_name=provider_name)
+    provider_name, runtime, client = ready_grading_provider(vault)
     if not runtime.ready:
-        fallback = fallback_provider_for(vault.config, selection)
-        if fallback == "codex":
-            fallback_runtime = check_codex_runtime(vault.root, vault.config.codex)
-            if fallback_runtime.ready:
-                provider_name = "codex"
-                runtime = fallback_runtime
-    if not runtime.ready:
-        label = "Codex" if provider_name == "codex" else f"AI provider {provider_name}"
+        label = provider_label(provider_name)
         raise SidecarError("ai_unavailable", f"{label} is {runtime.status}; regrade requires an AI provider.")
-    client = make_codex_client(vault.config.codex, vault.root) if provider_name == "codex" else make_ai_provider_client(vault.config, vault.root, provider_name=provider_name)
+    client = client or client_for_provider(vault, provider_name)
+    if client is None:
+        label = provider_label(provider_name)
+        raise SidecarError("ai_unavailable", f"{label} client is unavailable; regrade requires an AI provider.")
     _regrade_attempt(
         vault,
         repository,
         attempt,
         runtime=runtime,
         client=client,
-        grading_source="codex" if provider_name == "codex" else "ai",
+        grading_source=grading_source_for_provider(provider_name),
         clock=None,
     )
     return feedback_bundle(vault, repository, params.attempt_id)

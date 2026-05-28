@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from learnloop.ai.client import make_ai_provider_client
-from learnloop.ai.routing import fallback_provider_for, provider_for_task
-from learnloop.ai.runtime import check_ai_runtime
-from learnloop.codex.client import CodexUnavailable, make_codex_client
-from learnloop.codex.runtime import check_codex_runtime
+from learnloop.codex.client import CodexUnavailable
 from learnloop.services.attempts import (
     AttemptDraft,
     AttemptValidationError,
@@ -24,6 +20,7 @@ from learnloop.services.scheduler import SchedulerSession, build_due_queue
 from learnloop_sidecar.context import SidecarContext
 from learnloop_sidecar.dto import ParamsModel, versioned
 from learnloop_sidecar.errors import SidecarError
+from learnloop_sidecar.handlers.ai_providers import ready_grading_provider
 from learnloop_sidecar.handlers.queue import PracticeItemInput, _sections
 from learnloop_sidecar.handlers.serializers import practice_item_detail, scheduled_item_dto
 from learnloop_sidecar.handlers.sessions import SessionCheckpointInput, patch_checkpoint
@@ -110,7 +107,7 @@ def submit_attempt(ctx: SidecarContext, params: SubmitAttemptInput) -> dict[str,
         session_id=params.session_id,
     )
     self_grade = _self_grade(params.self_grade)
-    provider_name, runtime, client = _ready_grading_provider(vault)
+    provider_name, runtime, client = ready_grading_provider(vault)
     unavailable_label = "AI grading"
     try:
         if self_grade is None:
@@ -241,48 +238,6 @@ def _self_grade(payload: SelfGradeInputDto | None) -> SelfGradeInput | None:
 
 def _attempt_result(result) -> dict[str, Any]:
     return versioned(result.as_dict())
-
-
-def _codex_client(vault):
-    try:
-        return make_codex_client(vault.config.codex, vault.root)
-    except CodexUnavailable:
-        return None
-
-
-def _ai_client(vault, provider_name: str):
-    try:
-        return make_ai_provider_client(vault.config, vault.root, provider_name=provider_name)
-    except CodexUnavailable:
-        return None
-
-
-def _ready_grading_provider(vault):
-    selection = provider_for_task(vault.config, "grading")
-    provider_name = selection.provider_name
-    runtime = _runtime_for_provider(vault, provider_name)
-    if runtime.ready:
-        return provider_name, runtime, _client_for_provider(vault, provider_name)
-    fallback = fallback_provider_for(vault.config, selection)
-    if fallback:
-        fallback_runtime = _runtime_for_provider(vault, fallback)
-        if fallback_runtime.ready:
-            return fallback, fallback_runtime, _client_for_provider(vault, fallback)
-    return provider_name, runtime, None
-
-
-def _runtime_for_provider(vault, provider_name: str):
-    if provider_name == "codex":
-        return check_codex_runtime(vault.root, vault.config.codex)
-    return check_ai_runtime(vault.root, vault.config, provider_name=provider_name)
-
-
-def _client_for_provider(vault, provider_name: str):
-    if provider_name == "codex":
-        return _codex_client(vault)
-    return _ai_client(vault, provider_name)
-
-
 
 
 def _persist_feedback_metadata(repository, result, self_grade: SelfGradeInput | None) -> None:

@@ -78,7 +78,7 @@ def test_sdk_codex_client_logs_full_prompt_and_response(tmp_path, monkeypatch, c
             captured["run"] = {"prompt": prompt, **kwargs}
             return SimpleNamespace(final_response='{"summary": "ok"}')
 
-    class AppServerConfig:
+    class SdkAppConfig:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
@@ -92,14 +92,12 @@ def test_sdk_codex_client_logs_full_prompt_and_response(tmp_path, monkeypatch, c
 
     openai_codex = ModuleType("openai_codex")
     openai_codex.Codex = FakeCodex
-    openai_codex_client = ModuleType("openai_codex.client")
-    openai_codex_client.AppServerConfig = AppServerConfig
+    openai_codex.CodexConfig = SdkAppConfig
     openai_codex_types = ModuleType("openai_codex.types")
     openai_codex_types.Personality = SimpleNamespace(pragmatic="pragmatic")
     openai_codex_types.ReasoningEffort = ReasoningEffort
     openai_codex_types.ReasoningSummary = ReasoningSummary
     monkeypatch.setitem(sys.modules, "openai_codex", openai_codex)
-    monkeypatch.setitem(sys.modules, "openai_codex.client", openai_codex_client)
     monkeypatch.setitem(sys.modules, "openai_codex.types", openai_codex_types)
     caplog.set_level(logging.DEBUG, logger="learnloop.codex.client")
 

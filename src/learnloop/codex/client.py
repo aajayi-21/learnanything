@@ -308,7 +308,7 @@ class SdkCodexClient:
         _ensure_sdk_importable(self.sdk_python_path)
         try:
             from openai_codex import Codex
-            from openai_codex.client import AppServerConfig
+            from openai_codex import CodexConfig as SdkAppConfig
             from openai_codex.types import Personality, ReasoningEffort, ReasoningSummary
         except ImportError as exc:
             raise CodexUnavailable(
@@ -321,7 +321,7 @@ class SdkCodexClient:
             launch_args = _sdk_launch_args(self.config.sdk_launch_command)
             if launch_args is None and not self.config.sdk_codex_bin:
                 launch_args = _default_sdk_launch_args()
-            app_config = AppServerConfig(
+            app_config = SdkAppConfig(
                 codex_bin=self.config.sdk_codex_bin or None,
                 launch_args_override=launch_args,
                 cwd=str(self.vault_root),

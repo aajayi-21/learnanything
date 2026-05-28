@@ -241,7 +241,7 @@ def default_sdk_healthcheck(checkout_path: Path, config: CodexConfig) -> None:
         if value not in sys.path:
             sys.path.insert(0, value)
     try:
-        import openai_codex  # noqa: F401
+        from openai_codex import Codex, CodexConfig  # noqa: F401
     except ImportError as exc:
         raise CodexHealthUnavailable(f"Codex Python SDK is not importable from {sdk_path}.") from exc
 

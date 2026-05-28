@@ -354,6 +354,55 @@ def test_sidecar_submit_attempt_falls_back_to_codex_when_routed_ai_unavailable(t
     assert server.requests[0]["path"] == "/grading-proposal"
 
 
+def test_sidecar_submit_attempt_uses_ai_codex_profile_when_legacy_codex_differs(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    seed_due_item(paths)
+    checkout = tmp_path / "ai-codex"
+    checkout.mkdir()
+    (checkout / "HEAD").write_text("abc123", encoding="utf-8")
+    server = _GradingServer()
+    server.start()
+    try:
+        _configure_ai_codex_only(vault_root, checkout, server.base_url)
+        init = _rpc(
+            [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}}]
+        )[0]["result"]
+        assert init["health"]["ai"]["ready"] is True
+        assert init["health"]["codex"]["ready"] is False
+
+        session_id = _rpc(
+            [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+                {"jsonrpc": "2.0", "id": 2, "method": "start_session", "params": {"energy": "medium"}},
+            ]
+        )[1]["result"]["sessionId"]
+
+        submitted = _rpc(
+            [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "submit_attempt",
+                    "params": {
+                        "sessionId": session_id,
+                        "practiceItemId": "pi_svd_define_001",
+                        "answerMd": "SVD is U Sigma V transpose.",
+                        "attemptType": "independent_attempt",
+                        "hintsUsed": 0,
+                    },
+                },
+            ]
+        )[1]["result"]
+    finally:
+        server.stop()
+
+    assert submitted["gradingSource"] == "codex"
+    assert submitted["rubricScore"] == 4
+    assert server.requests[0]["path"] == "/grading-proposal"
+
+
 def test_sidecar_grading_unavailable_uses_provider_neutral_error(tmp_path):
     vault_root = tmp_path / "vault"
     paths = create_basic_vault(vault_root)
@@ -1088,6 +1137,7 @@ def _find_pending(snapshot: dict) -> tuple[str, str]:
 def _configure_ai_fallback_to_codex(vault_root, checkout, base_url: str) -> None:
     config_path = vault_root / "learnloop.toml"
     text = config_path.read_text(encoding="utf-8")
+    text = text.replace('type = "codex_sdk"', 'type = "http_adapter"', 1)
     text = text.replace('provider = "sdk"', 'provider = "http"')
     text = text.replace('checkout_path = "../codex"', f'checkout_path = "{checkout.as_posix()}"')
     text = text.replace('revision = "<pinned-commit>"', 'revision = "abc123"')
@@ -1095,6 +1145,17 @@ def _configure_ai_fallback_to_codex(vault_root, checkout, base_url: str) -> None
     text = text.replace('fallback_provider = ""', 'fallback_provider = "codex"')
     text = text.replace('grading = "codex"', 'grading = "deepseek_flash"')
     config_path.write_text(text, encoding="utf-8")
+
+
+def _configure_ai_codex_only(vault_root, checkout, base_url: str) -> None:
+    config_path = vault_root / "learnloop.toml"
+    text = config_path.read_text(encoding="utf-8")
+    ai_prefix, legacy_codex = text.split("\n[codex]\n", 1)
+    ai_prefix = ai_prefix.replace('type = "codex_sdk"', 'type = "http_adapter"', 1)
+    ai_prefix = ai_prefix.replace('checkout_path = "../codex"', f'checkout_path = "{checkout.as_posix()}"', 1)
+    ai_prefix = ai_prefix.replace('revision = "<pinned-commit>"', 'revision = "abc123"', 1)
+    ai_prefix = ai_prefix.replace('base_url = "http://127.0.0.1:8765"', f'base_url = "{base_url}"', 1)
+    config_path.write_text(f"{ai_prefix}\n[codex]\n{legacy_codex}", encoding="utf-8")
 
 
 class _GradingServer:
