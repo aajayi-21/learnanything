@@ -35,6 +35,8 @@ Prerequisites:
 - Python 3.12+ with the editable LearnLoop package installed.
 - Node.js/npm for the frontend toolchain.
 - Rust/Cargo and the normal Tauri system prerequisites for your OS.
+- On Linux Mint 21/Ubuntu 22.04, install the native Tauri build libraries:
+  `sudo apt-get install build-essential curl wget file libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev`
 - On Windows, the Tauri window uses Microsoft Edge WebView2, which is usually
   already installed on current Windows systems.
 
