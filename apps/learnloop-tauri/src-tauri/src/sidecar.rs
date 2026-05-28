@@ -1,5 +1,6 @@
 use crate::errors::CommandError;
 use serde_json::{json, Value};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -20,6 +21,13 @@ struct SidecarClient {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    launcher: String,
+}
+
+struct SidecarCommandSpec {
+    program: OsString,
+    args: Vec<OsString>,
+    label: String,
 }
 
 impl SidecarManager {
@@ -91,37 +99,46 @@ impl SidecarManager {
 impl SidecarClient {
     fn spawn() -> Result<Self, CommandError> {
         let repo_root = repo_root();
-        let mut command = Command::new("python");
-        command
-            .arg("-m")
-            .arg("learnloop_sidecar")
-            .current_dir(&repo_root)
-            .env("PYTHONPATH", python_path(&repo_root))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
+        let mut spawn_errors = Vec::new();
+        for spec in sidecar_command_specs(&repo_root) {
+            let mut command = Command::new(&spec.program);
+            command
+                .args(&spec.args)
+                .current_dir(&repo_root)
+                .env("PYTHONPATH", python_path(&repo_root))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x08000000);
+            }
+            match command.spawn() {
+                Ok(mut child) => {
+                    let stdin = child
+                        .stdin
+                        .take()
+                        .ok_or_else(|| CommandError::internal("Sidecar stdin was unavailable."))?;
+                    let stdout = child
+                        .stdout
+                        .take()
+                        .ok_or_else(|| CommandError::internal("Sidecar stdout was unavailable."))?;
+                    return Ok(Self {
+                        child,
+                        stdin,
+                        stdout: BufReader::new(stdout),
+                        next_id: 1,
+                        launcher: spec.label,
+                    });
+                }
+                Err(err) => spawn_errors.push(format!("{}: {err}", spec.label)),
+            }
         }
-        let mut child = command.spawn().map_err(|err| {
-            CommandError::internal(format!("Failed to spawn Python sidecar: {err}"))
-        })?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| CommandError::internal("Sidecar stdin was unavailable."))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| CommandError::internal("Sidecar stdout was unavailable."))?;
-        Ok(Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-            next_id: 1,
-        })
+        Err(CommandError::internal(format!(
+            "Failed to spawn Python sidecar. Tried: {}",
+            spawn_errors.join("; ")
+        )))
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, CommandError> {
@@ -142,7 +159,8 @@ impl SidecarClient {
             if bytes == 0 {
                 let status = self.child.try_wait().ok().flatten();
                 return Err(CommandError::internal(format!(
-                    "Sidecar exited before responding. status={status:?}"
+                    "Sidecar exited before responding. launcher={} status={status:?}",
+                    self.launcher
                 )));
             }
             let response: Value = serde_json::from_str(line.trim())
@@ -156,6 +174,68 @@ impl SidecarClient {
             return Ok(response.get("result").cloned().unwrap_or(Value::Null));
         }
     }
+}
+
+fn sidecar_command_specs(repo_root: &Path) -> Vec<SidecarCommandSpec> {
+    let mut specs = Vec::new();
+    if let Some(python) = std::env::var_os("LEARNLOOP_PYTHON") {
+        specs.push(python_spec(python, "LEARNLOOP_PYTHON"));
+    }
+
+    #[cfg(not(windows))]
+    if repo_root.join("uv.lock").exists() {
+        specs.push(uv_spec());
+    }
+
+    if let Some(venv_python) = venv_python(repo_root) {
+        specs.push(python_spec(venv_python.into_os_string(), ".venv python"));
+    }
+
+    #[cfg(windows)]
+    {
+        specs.push(python_spec(OsString::from("python"), "python"));
+        if repo_root.join("uv.lock").exists() {
+            specs.push(uv_spec());
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        specs.push(python_spec(OsString::from("python3"), "python3"));
+        specs.push(python_spec(OsString::from("python"), "python"));
+    }
+
+    specs
+}
+
+fn python_spec(program: OsString, label: &str) -> SidecarCommandSpec {
+    SidecarCommandSpec {
+        program,
+        args: vec![OsString::from("-m"), OsString::from("learnloop_sidecar")],
+        label: label.to_string(),
+    }
+}
+
+fn uv_spec() -> SidecarCommandSpec {
+    SidecarCommandSpec {
+        program: OsString::from("uv"),
+        args: vec![
+            OsString::from("run"),
+            OsString::from("python"),
+            OsString::from("-m"),
+            OsString::from("learnloop_sidecar"),
+        ],
+        label: "uv run python".to_string(),
+    }
+}
+
+fn venv_python(repo_root: &Path) -> Option<PathBuf> {
+    let candidate = if cfg!(windows) {
+        repo_root.join(".venv").join("Scripts").join("python.exe")
+    } else {
+        repo_root.join(".venv").join("bin").join("python")
+    };
+    candidate.exists().then_some(candidate)
 }
 
 fn repo_root() -> PathBuf {

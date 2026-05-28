@@ -13,9 +13,9 @@ dependencies = [
   "ruamel.yaml>=0.18",
   "textual>=8.2.7",
   "typer>=0.12",
-  "trafilatura>=1.9",
+  "trafilatura>=2,<3",
   "beautifulsoup4>=4.12",
-  "lxml>=5.0",
+  "lxml==5.3.0",
   "youtube-transcript-api>=0.6",
   "openai>=1.0",
 ]

@@ -87,7 +87,7 @@ authoring = "codex"
 [ai.providers.codex]
 type = "codex_sdk"
 model = "gpt-5.5"
-checkout_path = "C:/Users/banan/OneDrive/Documents/thinking/learnloop/codex"
+checkout_path = "/home/chloe/Documents/thinking/learnanything/codex"
 revision = "<pinned-commit>"
 startup_command = ""
 startup_timeout_seconds = 20
@@ -127,7 +127,7 @@ timeout_seconds = 180
 
 [codex]
 provider = "sdk"
-checkout_path = "C:/Users/banan/OneDrive/Documents/thinking/learnloop/codex"
+checkout_path = "/home/chloe/Documents/thinking/learnanything/codex"
 revision = "<pinned-commit>"
 startup_command = ""
 startup_timeout_seconds = 20

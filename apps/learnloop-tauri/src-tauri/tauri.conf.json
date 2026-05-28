@@ -18,6 +18,7 @@
         "height": 880,
         "minWidth": 980,
         "minHeight": 680,
+        "backgroundColor": "#000000",
         "decorations": false
       }
     ],
@@ -27,6 +28,10 @@
   },
   "bundle": {
     "active": false,
-    "targets": "all"
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
   }
 }
