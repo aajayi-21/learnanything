@@ -1,29 +1,28 @@
 schema_version: 1
-id: lo_transformer_encoder_decoder_architecture
-title: Explain The High-Level Data Flow Through A GPT-Style Transformer
+id: lo_autoregressive_next_token_generation
+title: Explain How Next-Token Prediction Generates Text
 subjects:
   - attn
 concept: concept_transformer_architecture
 knowledge_type: conceptual
 status: active
 contradicts:
-summary: Describe the broad flow from input tokens to embeddings, repeated 
-  attention and feed-forward blocks, and final unembedding plus softmax that 
-  yields next-token probabilities.
+summary: Explain how a model trained to predict a distribution over possible 
+  next tokens can generate longer text by sampling from that distribution, 
+  appending the sample, and repeating the prediction process.
 prerequisites:
-  - tokens
-  - vectors
-  - matrix_vector_multiplication
   - probability_distribution
+  - sampling
+  - tokens
 confusables:
-  - encoder_decoder_transformer
-  - recurrent_network
-difficulty_prior: 0.55
+  - predicting_only_one_word
+  - deterministic_generation
+difficulty_prior: 0.42
 difficulty_source: llm_estimate
 tags:
-  - transformers
-  - architecture
-  - gpt
+  - autoregressive_generation
+  - next_token_prediction
+  - sampling
 provenance:
   origin: canonical_extract
   source_refs:
@@ -35,5 +34,5 @@ provenance:
       quote: people often refer to the inputs as logits... raw, unnormalized 
         output
       quote_hash: sha256:src_logits
-created_at: '2026-05-28T21:34:27Z'
-updated_at: '2026-05-28T22:11:47Z'
+created_at: '2026-05-28T22:06:13Z'
+updated_at: '2026-05-28T22:06:13Z'

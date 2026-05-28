@@ -73,3 +73,12 @@ edges:
       positional encodings to input embeddings in encoder and decoder stacks.
     created_at: '2026-05-28T21:34:36Z'
     updated_at: '2026-05-28T21:34:36Z'
+  - id: edge_dot_product_alignment_to_scaled_dot_product_attention
+    relation_type: related
+    source: concept_scaled_dot_product_attention
+    target: concept_query_key
+    strength: 0.5
+    rationale: Dot products are used to measure alignment between vectors, which
+      later supports query-key similarity in attention.
+    created_at: '2026-05-28T22:06:15Z'
+    updated_at: '2026-05-28T22:06:15Z'

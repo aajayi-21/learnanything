@@ -1,0 +1,99 @@
+schema_version: 1
+id: pi_transformer_data_flow_ordering_001
+learning_object_id: lo_transformer_encoder_decoder_architecture
+subjects:
+  - attn
+practice_mode: ordering_short_answer
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - tokenization_order
+  - embedding_order
+  - attention_role
+  - feed_forward_role
+  - unembedding_role
+  - softmax_role
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: 'Put these GPT-style transformer steps in order and briefly say what each
+  does: attention block, softmax distribution, tokenization, feed-forward layer, embedding
+  vectors, unembedding matrix.'
+expected_answer: Tokenization breaks the input into tokens; embedding vectors 
+  associate each token with a vector; attention blocks let vectors exchange 
+  contextual information; feed-forward layers process each vector in parallel; 
+  the unembedding matrix maps a final vector to raw scores for vocabulary 
+  tokens; softmax turns those scores into a probability distribution.
+difficulty: 0.57
+difficulty_source: llm_estimate
+tags:
+  - transformer_architecture
+  - data_flow
+hints:
+  - The source starts with little input pieces, then vectors.
+  - The probability distribution comes after raw vocabulary scores.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.55
+transfer_distance: 0.3
+scaffold_level: 0.25
+surface_family: transformer_pipeline_ordering
+repair_targets:
+  - tokenization_order
+  - embedding_order
+  - attention_role
+  - feed_forward_role
+  - unembedding_role
+  - softmax_role
+  - fatal_softmax_before_unembedding
+  - fatal_attention_as_tokenizer
+grading_rubric:
+  max_points: 6
+  criteria:
+    - id: correct_token_embedding_start
+      points: 1.0
+      description: Places tokenization before embedding vectors.
+    - id: correct_block_order
+      points: 1.0
+      description: Places attention before or alongside repeated feed-forward 
+        processing as part of transformer blocks.
+    - id: correct_output_order
+      points: 1.0
+      description: Places unembedding before softmax distribution.
+    - id: token_embedding_functions
+      points: 1.0
+      description: Correctly describes tokenization and embeddings.
+    - id: block_functions
+      points: 1.0
+      description: Correctly describes attention as context exchange and 
+        feed-forward as parallel per-vector processing.
+    - id: output_functions
+      points: 1.0
+      description: Correctly describes unembedding as raw scores/logits and 
+        softmax as probabilities.
+  fatal_errors:
+    - id: fatal_softmax_before_unembedding
+      description: Places softmax before the unembedding/raw-score step in a way
+        that reverses the source's output process.
+      max_grade: 3
+    - id: fatal_attention_as_tokenizer
+      description: Claims attention is what breaks text into tokens.
+      max_grade: 2
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: note_source_youtube_video_wjzofjx0v4m_e014c73c
+      path: 
+        subjects/attn/notes/note_source_youtube_video_wjzofjx0v4m_e014c73c.md
+      locator: t=1533.1-1561.4
+      quote: people often refer to the inputs as logits... raw, unnormalized 
+        output
+      quote_hash: sha256:src_logits
+created_at: '2026-05-28T22:11:59Z'
+updated_at: '2026-05-28T22:11:59Z'

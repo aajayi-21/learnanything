@@ -1,28 +1,27 @@
 schema_version: 1
-id: lo_contextual_embeddings
-title: Explain Why Attention Refines Token Embeddings With Context
+id: lo_dot_product_alignment_for_embeddings
+title: Interpret Dot Products As Vector Alignment
 subjects:
   - attn
-concept: concept_contextual_embedding
-knowledge_type: conceptual
+concept: concept_scaled_dot_product_attention
+knowledge_type: conceptual_procedural
 status: active
 contradicts:
-summary: Explain how a token vector starts as a learned embedding for a token, 
-  then becomes a contextual embedding as transformer blocks let it incorporate 
-  information from surrounding tokens.
+summary: Compute a dot product as multiply-then-sum and interpret its sign and 
+  magnitude as evidence of how well two vectors align in embedding space.
 prerequisites:
-  - tokens
   - vectors
-  - word_embeddings
+  - multiplication
+  - addition
 confusables:
-  - static_word_embedding
-  - token_id
-difficulty_prior: 0.48
+  - cosine_similarity
+  - euclidean_distance
+difficulty_prior: 0.42
 difficulty_source: llm_estimate
 tags:
-  - transformers
+  - dot_product
+  - alignment
   - embeddings
-  - context
 provenance:
   origin: canonical_extract
   source_refs:
@@ -34,5 +33,5 @@ provenance:
       quote: people often refer to the inputs as logits... raw, unnormalized 
         output
       quote_hash: sha256:src_logits
-created_at: '2026-05-28T21:34:17Z'
-updated_at: '2026-05-28T22:11:03Z'
+created_at: '2026-05-28T22:06:12Z'
+updated_at: '2026-05-28T22:06:12Z'

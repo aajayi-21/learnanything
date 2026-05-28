@@ -1,0 +1,84 @@
+schema_version: 1
+id: pi_embedding_unembedding_compare_001
+learning_object_id: lo_embedding_and_unembedding_matrices
+subjects:
+  - attn
+practice_mode: short_answer
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - embedding_direction
+  - embedding_weights
+  - unembedding_direction
+  - logits_before_softmax
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: Compare the embedding matrix W_E and the unembedding matrix W_U in a 
+  GPT-style transformer. What direction does each mapping go?
+expected_answer: The embedding matrix W_E maps each vocabulary token to its 
+  initial vector, often by selecting the column for that token. The unembedding 
+  matrix W_U maps a final context-rich vector back to one raw score or logit for
+  each vocabulary token before softmax.
+difficulty: 0.5
+difficulty_source: llm_estimate
+tags:
+  - embedding_matrix
+  - unembedding_matrix
+  - logits
+hints:
+  - One matrix appears at the very start; the other appears near the output.
+  - Softmax comes after raw vocabulary scores.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.5
+transfer_distance: 0.2
+scaffold_level: 0.1
+surface_family: matrix_role_comparison
+repair_targets:
+  - embedding_direction
+  - embedding_weights
+  - unembedding_direction
+  - logits_before_softmax
+  - fatal_reverse_mappings
+grading_rubric:
+  max_points: 4
+  criteria:
+    - id: we_token_to_vector
+      points: 1.0
+      description: States that W_E maps tokens/words to vectors.
+    - id: we_learned_weights
+      points: 1.0
+      description: Mentions that W_E is learned or consists of learned weight 
+        columns.
+    - id: wu_vector_to_vocab_scores
+      points: 1.0
+      description: States that W_U maps a vector to one score per vocabulary 
+        token.
+    - id: wu_before_softmax
+      points: 1.0
+      description: Mentions that W_U output is raw/unormalized logits before 
+        softmax.
+  fatal_errors:
+    - id: fatal_reverse_mappings
+      description: Reverses both mappings, saying W_E maps vectors to tokens and
+        W_U maps tokens to vectors.
+      max_grade: 1
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: note_source_youtube_video_wjzofjx0v4m_e014c73c
+      path: 
+        subjects/attn/notes/note_source_youtube_video_wjzofjx0v4m_e014c73c.md
+      locator: t=1533.1-1561.4
+      quote: people often refer to the inputs as logits... raw, unnormalized 
+        output
+      quote_hash: sha256:src_logits
+created_at: '2026-05-28T22:11:55Z'
+updated_at: '2026-05-28T22:11:55Z'

@@ -1,0 +1,94 @@
+schema_version: 1
+id: pi_softmax_temperature_interpretation_001
+learning_object_id: lo_softmax_logits_temperature
+subjects:
+  - attn
+practice_mode: short_answer
+attempt_types_allowed:
+  - independent_attempt
+  - hinted_attempt
+  - dont_know
+  - open_text
+evidence_facets:
+  - higher_temperature_uniformity
+  - lower_values_weight
+  - lower_temperature_peakedness
+  - zero_argmax_limit
+  - sampling_variability
+evidence_weights: {}
+criterion_facet_weights: {}
+prompt: A next-token sampler uses softmax with temperature. What happens to the 
+  output distribution when temperature is increased? What happens when it is 
+  decreased toward zero?
+expected_answer: Increasing temperature gives relatively more weight to 
+  lower-logit tokens, making the distribution more uniform and sampling less 
+  predictable. Decreasing temperature makes the highest-logit tokens dominate 
+  more strongly; in the limit near zero, all weight goes to the maximum value.
+difficulty: 0.53
+difficulty_source: llm_estimate
+tags:
+  - softmax
+  - temperature
+  - sampling
+hints:
+  - Think about whether lower-probability tokens get more or less chance as 
+    temperature rises.
+  - The source describes temperature zero as the extreme case.
+hint_policy:
+  max_useful_hints: 0
+  fsrs_rating_cap_by_hint: {}
+  mastery_alpha_dampening_by_hint: {}
+  coverage_surface_dampening_by_hint: {}
+retrieval_demand: 0.5
+transfer_distance: 0.25
+scaffold_level: 0.05
+surface_family: softmax_temperature_interpretation
+repair_targets:
+  - higher_temperature_uniformity
+  - lower_values_weight
+  - lower_temperature_peakedness
+  - zero_argmax_limit
+  - sampling_variability
+  - fatal_temperature_reversed
+grading_rubric:
+  max_points: 5
+  criteria:
+    - id: higher_more_uniform
+      points: 1.0
+      description: States that higher temperature makes the distribution more 
+        uniform or spread out.
+    - id: higher_lower_values_weight
+      points: 1.0
+      description: States that higher temperature gives more relative weight to 
+        lower-logit/lower-value tokens.
+    - id: lower_more_peaked
+      points: 1.0
+      description: States that lower temperature makes the distribution more 
+        peaked around larger values.
+    - id: zero_argmax_limit
+      points: 1.0
+      description: States that near zero temperature puts all or nearly all 
+        weight on the maximum value.
+    - id: sampling_consequence
+      points: 1.0
+      description: Connects the distribution shape to more varied versus more 
+        predictable sampling.
+  fatal_errors:
+    - id: fatal_temperature_reversed
+      description: Reverses the effect of temperature, saying higher temperature
+        makes the maximum dominate more and lower temperature makes it more 
+        uniform.
+      max_grade: 1
+provenance:
+  origin: canonical_extract
+  source_refs:
+    - ref_type: canonical_source
+      ref_id: note_source_youtube_video_wjzofjx0v4m_e014c73c
+      path: 
+        subjects/attn/notes/note_source_youtube_video_wjzofjx0v4m_e014c73c.md
+      locator: t=1533.1-1561.4
+      quote: people often refer to the inputs as logits... raw, unnormalized 
+        output
+      quote_hash: sha256:src_logits
+created_at: '2026-05-28T22:11:58Z'
+updated_at: '2026-05-28T22:11:58Z'
