@@ -1,7 +1,7 @@
 schema_version: 1
 goals:
   - id: goal_symmetric_matrices_and_variance
-    title: Symmetric matrices and variance PreTeXt logo
+    title: Symmetric matrices and variance
     status: active
     priority: 0.5
     concept_anchors:

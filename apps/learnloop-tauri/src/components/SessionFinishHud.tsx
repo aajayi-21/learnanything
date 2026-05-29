@@ -15,6 +15,8 @@ import type { SessionEndSummary } from "../api/dto";
 const EXIT_MS = 520;
 const CHAR_W = 7;
 const CHAR_H = 12;
+const ACTIVE_FRAME_MS = 33;
+const COMPLETE_FRAME_MS = 66;
 
 // 5-row block-digit font for the hero percentage.
 const GLYPHS: Record<string, string[]> = {
@@ -31,16 +33,30 @@ const GLYPHS: Record<string, string[]> = {
 };
 
 const C = {
-  amber: "#e3a063",
-  amberHi: "#f0c890",
-  amberMid: "#9a6f3a",
-  amberLow: "#4d3a23",
-  faintDot: "#33281b",
-  green: "#7fd28f",
-  text: "#d8d8e0",
-  dim: "#9090a0",
-  faint: "#666778"
+  amber: 1,
+  amberHi: 2,
+  amberMid: 3,
+  amberLow: 4,
+  faintDot: 5,
+  green: 6,
+  dim: 7,
+  faint: 8
+} as const;
+
+type ColorId = (typeof C)[keyof typeof C];
+
+const COLOR_CLASS: Record<ColorId, string> = {
+  [C.amber]: "sfin-c-amber",
+  [C.amberHi]: "sfin-c-amber-hi",
+  [C.amberMid]: "sfin-c-amber-mid",
+  [C.amberLow]: "sfin-c-amber-low",
+  [C.faintDot]: "sfin-c-faint-dot",
+  [C.green]: "sfin-c-green",
+  [C.dim]: "sfin-c-dim",
+  [C.faint]: "sfin-c-faint"
 };
+const NEEDS_ESCAPE_RE = /[&<>]/;
+const HTML_ESCAPE_RE = /[&<>]/g;
 
 export function SessionFinishHud({
   summary,
@@ -54,6 +70,12 @@ export function SessionFinishHud({
   const closingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const preRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    if (active) return;
+    closingRef.current = false;
+    setClosing(false);
+  }, [active]);
 
   const requestClose = useCallback(() => {
     if (closingRef.current) return;
@@ -94,12 +116,19 @@ export function SessionFinishHud({
     const items = String(summary.itemsReviewed);
     const followups = summary.followupsQueued != null ? String(summary.followupsQueued) : "—";
 
-    let cols = 80;
-    let rows = 40;
+    let cols = 0;
+    let rows = 0;
+    let grid: string[] = [];
+    let cgrid = new Uint8Array(0);
     const resize = () => {
       const rect = container.getBoundingClientRect();
-      cols = Math.max(40, Math.floor(rect.width / CHAR_W));
-      rows = Math.max(24, Math.floor(rect.height / CHAR_H));
+      const nextCols = Math.max(40, Math.floor(rect.width / CHAR_W));
+      const nextRows = Math.max(24, Math.floor(rect.height / CHAR_H));
+      if (nextCols === cols && nextRows === rows) return;
+      cols = nextCols;
+      rows = nextRows;
+      grid = new Array(cols * rows);
+      cgrid = new Uint8Array(cols * rows);
     };
     resize();
     const ro = new ResizeObserver(resize);
@@ -108,8 +137,10 @@ export function SessionFinishHud({
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     let raf = 0;
     let startTs = 0;
+    let lastDrawTs = 0;
 
     const draw = (ts: number) => {
+      if (closingRef.current) return;
       if (!startTs) startTs = ts;
       const sinceStart = ts - startTs;
       // 0→100 progress, eased, with a short lead-in.
@@ -119,17 +150,25 @@ export function SessionFinishHud({
       const done = pct >= 100;
       const phase = reduce ? 0 : ts / 1000;
 
-      const grid: string[][] = Array.from({ length: rows }, () => Array(cols).fill(" "));
-      const cgrid: (string | null)[][] = Array.from({ length: rows }, () => Array(cols).fill(null));
-      const set = (r: number, c: number, ch: string, color: string) => {
+      const frameMs = done ? COMPLETE_FRAME_MS : ACTIVE_FRAME_MS;
+      if (!reduce && lastDrawTs && ts - lastDrawTs < frameMs) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawTs = ts;
+
+      grid.fill(" ");
+      cgrid.fill(0);
+      const set = (r: number, c: number, ch: string, color: ColorId) => {
         if (r < 0 || r >= rows || c < 0 || c >= cols) return;
-        grid[r][c] = ch;
-        cgrid[r][c] = color;
+        const i = r * cols + c;
+        grid[i] = ch;
+        cgrid[i] = color;
       };
-      const put = (r: number, c: number, str: string, color: string) => {
+      const put = (r: number, c: number, str: string, color: ColorId) => {
         for (let k = 0; k < str.length; k++) set(r, c + k, str[k], color);
       };
-      const putCenter = (r: number, str: string, color: string) => put(r, Math.round((cols - str.length) / 2), str, color);
+      const putCenter = (r: number, str: string, color: ColorId) => put(r, Math.round((cols - str.length) / 2), str, color);
 
       // Centre on the middle *index* of the 0..cols-1 grid, not cols/2 (which is
       // half a cell too far right and shifts the ring + digits off-centre).
@@ -141,7 +180,7 @@ export function SessionFinishHud({
       const rClaw = maxR * 0.9;
       const rInner = maxR * 0.6;
 
-      const place = (rad: number, ang: number, ch: string, color: string) =>
+      const place = (rad: number, ang: number, ch: string, color: ColorId) =>
         set(Math.round(cy + rad * aspect * Math.sin(ang)), Math.round(cx + rad * Math.cos(ang)), ch, color);
 
       const ringSteps = (rad: number) => Math.max(48, Math.round(2 * Math.PI * rad * 1.5));
@@ -252,7 +291,7 @@ export function SessionFinishHud({
       if (!done) {
         putCenter(Math.round(cy) + 5, `FINALIZING // ${code}`, C.faint);
       } else {
-        const segs: Array<[string, string]> = [
+        const segs: Array<[string, ColorId]> = [
           ["ATTEMPTS ", C.faint], [attempts, C.amber], ["    ", C.faint],
           ["ITEMS ", C.faint], [items, C.amber], ["    ", C.faint],
           ["FOLLOW-UPS ", C.faint], [followups, C.green]
@@ -270,19 +309,20 @@ export function SessionFinishHud({
       let html = "";
       for (let r = 0; r < rows; r++) {
         let run = "";
-        let cur: string | null = null;
+        let cur = 0;
         const flush = () => {
           if (!run) return;
-          html += cur ? `<span style="color:${cur}">${esc(run)}</span>` : esc(run);
+          html += cur ? `<span class="${COLOR_CLASS[cur as ColorId]}">${esc(run)}</span>` : esc(run);
           run = "";
         };
         for (let c = 0; c < cols; c++) {
-          const color = cgrid[r][c];
+          const i = r * cols + c;
+          const color = cgrid[i];
           if (color !== cur) {
             flush();
             cur = color;
           }
-          run += grid[r][c];
+          run += grid[i];
         }
         flush();
         html += "\n";
@@ -297,7 +337,7 @@ export function SessionFinishHud({
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [active, summary?.sessionId]);
+  }, [active, summary]);
 
   if (!summary) return null;
 
@@ -316,7 +356,9 @@ export function SessionFinishHud({
 }
 
 function esc(s: string): string {
-  return s.replace(/[&<>]/g, (ch) => (ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : "&gt;"));
+  return NEEDS_ESCAPE_RE.test(s)
+    ? s.replace(HTML_ESCAPE_RE, (ch) => (ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : "&gt;"))
+    : s;
 }
 
 function formatElapsed(startedAt: string, endedAt: string): string {

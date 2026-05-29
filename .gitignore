@@ -188,8 +188,8 @@ cython_debug/
 
 # LearnLoop local runtime state
 .learnloop/
-/state.sqlite
-/state.sqlite-*
+#/state.sqlite
+#/state.sqlite-*
 
 # Local audit/scratch vaults
 /.audit_tmp_*/

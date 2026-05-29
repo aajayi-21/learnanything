@@ -913,6 +913,15 @@ button { color: inherit; }
   transform-origin: center;
 }
 
+.sfin-c-amber { color: #e3a063; }
+.sfin-c-amber-hi { color: #f0c890; }
+.sfin-c-amber-mid { color: #9a6f3a; }
+.sfin-c-amber-low { color: #4d3a23; }
+.sfin-c-faint-dot { color: #33281b; }
+.sfin-c-green { color: #7fd28f; }
+.sfin-c-dim { color: #9090a0; }
+.sfin-c-faint { color: #666778; }
+
 /* faint scanlines */
 .sfin-scan {
   position: absolute;
