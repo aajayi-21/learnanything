@@ -170,6 +170,10 @@ def build_due_queue(
             scheduled.practice_item_id,
         )
     )
+    # Propensity is computed on the greedy-sorted order, before exploration reorders
+    # it: it is P(this candidate is served | slate) under the seeded exploration
+    # policy, which is what off-policy estimation reweights by.
+    propensity_by_id = _selection_propensities(queue, session, config)
     queue = _apply_seeded_exploration(queue, session, config, now)
     queue = _insert_pending_followups(vault, queue, pending_followups, readiness_factor)
     considered_queue = list(queue)
@@ -178,7 +182,11 @@ def build_due_queue(
     if persist_explanations and session.session_id is not None:
         selected_ids = {item.practice_item_id for item in queue}
         explanations = [
-            _explanation_payload(item, selected=item.practice_item_id in selected_ids)
+            _explanation_payload(
+                item,
+                selected=item.practice_item_id in selected_ids,
+                selection_propensity=propensity_by_id.get(item.practice_item_id),
+            )
             for item in considered_queue
         ]
         repository.record_scheduler_slate(
@@ -323,6 +331,58 @@ def _priority(components: dict[str, float], config: LearnLoopConfig) -> float:
         + config.scheduler.recent_error_weight * components["recent_error"]
         + config.scheduler.probe_eig_weight * components["probe_eig"]
     )
+
+
+def _selection_propensities(
+    queue: list[ScheduledItem],
+    session: SchedulerSession,
+    config: LearnLoopConfig,
+) -> dict[str, float]:
+    """``P(item is served as the top candidate | slate)`` under seeded exploration.
+
+    Mirrors the gating of `_apply_seeded_exploration` exactly so the logged
+    propensity is the true probability the (stochastic) selection policy serves each
+    candidate. The seeded hash is the policy's *randomization source*, so the
+    propensity is the design probability — ``1 - rate`` on the greedy best and
+    ``rate`` split uniformly over the eligible near-tie alternatives — not the
+    realized deterministic outcome. Logging the design probability (rather than a
+    degenerate 1.0/0.0) is what makes IPS / doubly-robust off-policy estimation
+    identifiable across the logged dataset.
+
+    Scope is the selection-reward policy over its candidates; force-inserted pending
+    follow-ups (a separate, triggered decision) are not in this map and are logged
+    with a NULL propensity by the caller.
+    """
+
+    if not queue:
+        return {}
+    propensity = {item.practice_item_id: 0.0 for item in queue}
+    best = queue[0]
+
+    def greedy() -> dict[str, float]:
+        propensity[best.practice_item_id] = 1.0
+        return propensity
+
+    rate = clamp(config.scheduler.selection_exploration_rate)
+    if rate <= 0 or session.session_id is None or len(queue) < 2:
+        return greedy()
+    if (best.reward_debug or {}).get("intent") == SchedulerIntent.PROBE.value:
+        return greedy()
+    best_reward = best.components.get("selection_reward", 0.0)
+    window = max(config.scheduler.selection_exploration_reward_window, 0.0)
+    alternatives = [
+        item
+        for item in queue[1:]
+        if (item.reward_debug or {}).get("intent") != SchedulerIntent.PROBE.value
+        and best_reward - item.components.get("selection_reward", 0.0) <= window
+    ]
+    if not alternatives:
+        return greedy()
+    propensity[best.practice_item_id] = 1.0 - rate
+    share = rate / len(alternatives)
+    for item in alternatives:
+        propensity[item.practice_item_id] = share
+    return propensity
 
 
 def _apply_seeded_exploration(
@@ -514,7 +574,12 @@ def _plain_english(item: PracticeItem, components: dict[str, float]) -> list[str
     return reasons
 
 
-def _explanation_payload(item: ScheduledItem, *, selected: bool = True) -> dict[str, object]:
+def _explanation_payload(
+    item: ScheduledItem,
+    *,
+    selected: bool = True,
+    selection_propensity: float | None = None,
+) -> dict[str, object]:
     components = dict(item.components)
     components["selected"] = 1.0 if selected else 0.0
     return {
@@ -525,6 +590,10 @@ def _explanation_payload(item: ScheduledItem, *, selected: bool = True) -> dict[
         "readiness_factor": item.readiness_factor,
         "plain_english": {"reasons": item.plain_english},
         "expected_information_gain": item.components.get("probe_eig", 0.0),
+        "selection_propensity": selection_propensity,
+        # Realized flag: set only on the candidate actually promoted by exploration
+        # (`_apply_seeded_exploration` tags it `exploration_selected`).
+        "exploration_flag": 1 if float(item.components.get("exploration_selected") or 0.0) > 0.0 else 0,
         "target_scope": {
             "learning_object_id": item.learning_object_id,
             "selection_reward": item.reward_debug,

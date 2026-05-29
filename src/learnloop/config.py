@@ -22,6 +22,10 @@ active_goal_weight = 0.35
 recent_error_weight = 0.50
 probe_eig_weight = 0.25
 short_session_minutes = 20
+# Seeded exploration over near-tie candidates so logged slates carry non-degenerate
+# selection propensities (off-policy learnability). See architecture_pivot.md Stage 0.
+selection_exploration_rate = 0.1
+selection_exploration_reward_window = 0.15
 
 [scheduler.surprise]
 theta_pos = 1.5

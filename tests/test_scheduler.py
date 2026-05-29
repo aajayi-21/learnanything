@@ -3,8 +3,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from learnloop.clock import FrozenClock
+from learnloop.config import LearnLoopConfig
 from learnloop.db.repositories import MasteryState, Repository
-from learnloop.services.scheduler import SchedulerSession, build_due_queue
+from learnloop.services.scheduler import (
+    ScheduledItem,
+    SchedulerSession,
+    _selection_propensities,
+    build_due_queue,
+)
+from learnloop.services.selection_rewards import SchedulerIntent
 from learnloop.vault.loader import add_subject, init_vault, load_vault
 from learnloop.vault.paths import VaultPaths
 from learnloop.vault.yaml_io import write_yaml
@@ -478,3 +485,139 @@ def test_scheduler_candidate_logs_are_retained_per_configured_limit(tmp_path):
     explanations = repository.latest_scheduler_explanations_by_session("s_retention")
     assert len(explanations) == 1
     assert explanations[0]["practice_item_id"] == "pi_svd_define_001"
+
+
+def _scheduled(item_id: str, reward: float, *, intent: str = "practice") -> ScheduledItem:
+    return ScheduledItem(
+        practice_item_id=item_id,
+        learning_object_id="lo",
+        priority=reward,
+        components={"selection_reward": reward},
+        readiness_factor=None,
+        selected_mode="short_answer",
+        plain_english=[],
+        reward_debug={"intent": intent},
+    )
+
+
+def _config(rate: float, window: float) -> LearnLoopConfig:
+    config = LearnLoopConfig()
+    config.scheduler.selection_exploration_rate = rate
+    config.scheduler.selection_exploration_reward_window = window
+    return config
+
+
+def test_selection_propensities_epsilon_split_over_near_ties():
+    # rate of probability mass goes to the best; (1 - rate) -- no, the *design* is
+    # 1 - rate stays on the greedy best, rate is split uniformly over the eligible
+    # near-tie alternatives. Window is wide here so both followers are eligible.
+    queue = [_scheduled("a", 1.0), _scheduled("b", 0.95), _scheduled("c", 0.90)]
+    propensity = _selection_propensities(queue, SchedulerSession(session_id="s"), _config(0.1, 1.0))
+    assert propensity["a"] == 0.9
+    assert propensity["b"] == 0.05
+    assert propensity["c"] == 0.05
+    assert abs(sum(propensity.values()) - 1.0) < 1e-9
+
+
+def test_selection_propensities_window_excludes_far_candidates():
+    # Only "b" is within the 0.10 window of the best; "c" is too far to be explored,
+    # so it carries zero served-probability and "a" keeps 1 - rate.
+    queue = [_scheduled("a", 1.0), _scheduled("b", 0.95), _scheduled("c", 0.50)]
+    propensity = _selection_propensities(queue, SchedulerSession(session_id="s"), _config(0.2, 0.10))
+    assert propensity["a"] == 0.8
+    assert propensity["b"] == 0.2
+    assert propensity["c"] == 0.0
+
+
+def test_selection_propensities_greedy_when_disabled_or_singleton_or_probe():
+    rate_off = _config(0.0, 1.0)
+    queue = [_scheduled("a", 1.0), _scheduled("b", 0.95)]
+    assert _selection_propensities(queue, SchedulerSession(session_id="s"), rate_off) == {"a": 1.0, "b": 0.0}
+
+    # No session id -> no exploration (matches _apply_seeded_exploration gating).
+    assert _selection_propensities(queue, SchedulerSession(session_id=None), _config(0.2, 1.0)) == {
+        "a": 1.0,
+        "b": 0.0,
+    }
+
+    # Single candidate -> always served.
+    assert _selection_propensities([_scheduled("a", 1.0)], SchedulerSession(session_id="s"), _config(0.2, 1.0)) == {
+        "a": 1.0
+    }
+
+    # A probe at the top is never displaced by exploration, so it keeps propensity 1.
+    probe_queue = [_scheduled("a", 1.0, intent=SchedulerIntent.PROBE.value), _scheduled("b", 0.95)]
+    assert _selection_propensities(probe_queue, SchedulerSession(session_id="s"), _config(0.2, 1.0)) == {
+        "a": 1.0,
+        "b": 0.0,
+    }
+
+
+def test_scheduler_persists_selection_propensity_and_exploration_flag(tmp_path):
+    paths = create_basic_vault(tmp_path / "vault")
+    write_yaml(
+        paths.practice_item_path("linear-algebra", "pi_svd_define_999"),
+        {
+            "schema_version": 1,
+            "id": "pi_svd_define_999",
+            "learning_object_id": "lo_svd_definition",
+            "subjects": None,
+            "practice_mode": "short_answer",
+            "attempt_types_allowed": ["independent_attempt"],
+            "evidence_facets": ["recall"],
+            "evidence_weights": {"recall": 1.0},
+            "prompt": "State the SVD factors in order.",
+            "expected_answer": "U, Sigma, V transpose.",
+            "difficulty": 0.55,
+            "transfer_distance": 1.0,
+            "tags": [],
+            "hints": [],
+            "hint_policy": {"max_useful_hints": 0, "fsrs_rating_cap_by_hint": {}, "mastery_alpha_dampening_by_hint": {}},
+            "grading_rubric": {
+                "max_points": 4,
+                "criteria": [{"id": "correctness", "points": 4, "description": "Correct definition."}],
+                "fatal_errors": [],
+            },
+            "provenance": {"origin": "human", "source_refs": []},
+            "created_at": NOW_ISO,
+            "updated_at": NOW_ISO,
+        },
+    )
+    loaded = load_vault(paths.root)
+    repository = Repository(paths.sqlite_path)
+    clock = FrozenClock(NOW)
+    repository.upsert_mastery_state(
+        MasteryState(
+            learning_object_id="lo_svd_definition",
+            logit_mean=0.0,
+            logit_variance=1.0,
+            evidence_count=1,
+            last_evidence_at="2026-05-16T12:00:00Z",
+            algorithm_version="mvp-0.1",
+            updated_at=NOW_ISO,
+        )
+    )
+    for item_id in ("pi_svd_define_001", "pi_svd_define_999"):
+        repository.upsert_practice_item_state(
+            item_id,
+            difficulty=5.0,
+            stability=2.0,
+            due_at="2026-05-18T12:00:00Z",
+            last_attempt_at="2026-05-16T12:00:00Z",
+            active=True,
+            clock=clock,
+        )
+
+    # Wide window so both due items are eligible near-ties -> non-degenerate propensity.
+    loaded.config.scheduler.selection_exploration_rate = 0.1
+    loaded.config.scheduler.selection_exploration_reward_window = 1.0
+    build_due_queue(loaded, repository, clock=clock, session=SchedulerSession(session_id="s_prop"))
+
+    slate = repository.latest_scheduler_slate_by_session("s_prop")
+    candidates = repository.scheduler_slate_candidates(slate["id"])
+    propensity_by_id = {row["practice_item_id"]: row["selection_propensity"] for row in candidates}
+    assert all(value is not None for value in propensity_by_id.values())
+    assert abs(sum(propensity_by_id.values()) - 1.0) < 1e-9
+    # Exactly the candidate promoted by seeded exploration carries the realized flag.
+    explored = [row["practice_item_id"] for row in candidates if row["exploration_flag"] == 1]
+    assert len(explored) <= 1

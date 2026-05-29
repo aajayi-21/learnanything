@@ -1763,9 +1763,10 @@ class Repository:
                       priority, selection_reward, predicted_correctness,
                       legacy_priority, expected_information_gain, readiness_factor,
                       components_json, reward_debug_json, target_scope_json,
-                      plain_english_json, algorithm_version, created_at, chosen_at
+                      plain_english_json, selection_propensity, exploration_flag,
+                      selection_temperature, algorithm_version, created_at, chosen_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
                     """,
                     (
                         new_ulid(),
@@ -1786,6 +1787,8 @@ class Repository:
                         _json(reward_debug) if reward_debug is not None else None,
                         _json(target_scope) if target_scope else None,
                         _json(explanation.get("plain_english")) if explanation.get("plain_english") is not None else None,
+                        explanation.get("selection_propensity"),
+                        int(explanation.get("exploration_flag") or 0),
                         algorithm_version,
                         now,
                     ),
