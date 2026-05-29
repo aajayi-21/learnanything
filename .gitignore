@@ -223,6 +223,7 @@ apps/learnloop-tauri/dist/
 apps/learnloop-tauri/src-tauri/target/
 apps/learnloop-tauri/src-tauri/gen/
 apps/learnloop-tauri/*debug*.jsonl
+apps/*debug*.jsonl
 
 # Dev fixture vault runtime sidecar state
 fixtures/**/state.sqlite-*

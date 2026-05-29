@@ -494,6 +494,160 @@ def expected_information_gain(
     return max(eig, 0.0)
 
 
+def facet_conditional_distribution(
+    hypothesis_label: str,
+    *,
+    facet_id: str,
+    candidate_facet_support: set[str],
+    fatal_error_ids: set[str],
+    known_error_types: list[str],
+    item_a: float = 1.0,
+    item_b: float = 0.0,
+    irt: ProbeIRTConfig | None = None,
+) -> dict[Outcome, float]:
+    """Per-facet diagnostic outcome model for v0.3 follow-up selection.
+
+    This deliberately uses the static candidate facet support available before
+    an attempt is served. It does not depend on attempt-time covered facets.
+    """
+
+    irt = irt or ProbeIRTConfig()
+    error_types: list[str | None] = [None, *known_error_types]
+    distribution: dict[Outcome, float] = {
+        (bucket, error_type): 0.0 for bucket in SCORE_BUCKETS for error_type in error_types
+    }
+    probes_facet = facet_id in candidate_facet_support
+    hypothesis_error = hypothesis_label.split(":", 1)[1] if hypothesis_label.startswith("misconception:") else None
+    probes_misconception = hypothesis_error is not None and hypothesis_error in fatal_error_ids
+
+    if not probes_facet:
+        low, mid, high = _graded_marginals(item_a * (irt.theta_mastered - item_b), irt.cut_mid, irt.cut_high)
+        distribution[("low", None)] = low
+        distribution[("mid", None)] = mid
+        distribution[("high", None)] = high
+        return distribution
+
+    if hypothesis_label == f"facet_solid:{facet_id}" or (hypothesis_error is not None and not probes_misconception):
+        low, mid, high = _graded_marginals(item_a * (irt.theta_mastered - item_b), irt.cut_mid, irt.cut_high)
+        distribution[("low", None)] = low
+        distribution[("mid", None)] = mid
+        distribution[("high", None)] = high
+        return distribution
+
+    low, mid, high = _graded_marginals(item_a * (irt.theta_unfamiliar - item_b), irt.cut_mid, irt.cut_high)
+    if hypothesis_label == f"facet_absent:{facet_id}" or hypothesis_error is None:
+        distribution[("low", None)] = low
+        distribution[("mid", None)] = mid
+        distribution[("high", None)] = high
+        return distribution
+
+    distribution[("low", hypothesis_error)] = low * irt.err_low_frac
+    distribution[("low", None)] = low * (1.0 - irt.err_low_frac)
+    distribution[("mid", hypothesis_error)] = mid * irt.err_mid_frac
+    distribution[("mid", None)] = mid * (1.0 - irt.err_mid_frac)
+    distribution[("high", None)] = high
+    return distribution
+
+
+def facet_expected_information_gain(
+    hypothesis_marginal: dict[str, float],
+    *,
+    facet_id: str,
+    candidate_facet_support: set[str],
+    fatal_error_ids: set[str],
+    item_a: float = 1.0,
+    item_b: float = 0.0,
+    irt: ProbeIRTConfig | None = None,
+) -> float:
+    """Expected entropy drop for one facet marginal, in nats.
+
+    This is the facet-objective counterpart to ``expected_information_gain``.
+    It uses per-facet score buckets and must not call the global outcome EIG.
+    """
+
+    prior = _normalized_prior(hypothesis_marginal)
+    if len(prior) <= 1:
+        return 0.0
+    known_error_types = sorted(
+        label.split(":", 1)[1]
+        for label in prior
+        if label.startswith("misconception:")
+    )
+    conditionals = {
+        label: facet_conditional_distribution(
+            label,
+            facet_id=facet_id,
+            candidate_facet_support=candidate_facet_support,
+            fatal_error_ids=fatal_error_ids,
+            known_error_types=known_error_types,
+            item_a=item_a,
+            item_b=item_b,
+            irt=irt,
+        )
+        for label in prior
+    }
+    outcomes = next(iter(conditionals.values())).keys()
+    mixture: dict[Outcome, float] = {outcome: 0.0 for outcome in outcomes}
+    for label, weight in prior.items():
+        for outcome, probability in conditionals[label].items():
+            mixture[outcome] += weight * probability
+
+    eig = 0.0
+    for label, weight in prior.items():
+        conditional = conditionals[label]
+        kl = 0.0
+        for outcome, probability in conditional.items():
+            mixture_probability = mixture[outcome]
+            if probability > 0 and mixture_probability > 0:
+                kl += probability * log(probability / mixture_probability)
+        eig += weight * kl
+    return max(eig, 0.0)
+
+
+def apply_facet_observation(
+    hypothesis_marginal: dict[str, float],
+    *,
+    facet_id: str,
+    candidate_facet_support: set[str],
+    fatal_error_ids: set[str],
+    observed_bucket: str,
+    observed_error_type: str | None,
+    item_a: float = 1.0,
+    item_b: float = 0.0,
+    irt: ProbeIRTConfig | None = None,
+) -> dict[str, float]:
+    prior = _normalized_prior(hypothesis_marginal)
+    if not prior:
+        return prior
+    known_error_types = sorted(
+        label.split(":", 1)[1]
+        for label in prior
+        if label.startswith("misconception:")
+    )
+    updated: dict[str, float] = {}
+    for label, probability in prior.items():
+        conditional = facet_conditional_distribution(
+            label,
+            facet_id=facet_id,
+            candidate_facet_support=candidate_facet_support,
+            fatal_error_ids=fatal_error_ids,
+            known_error_types=known_error_types,
+            item_a=item_a,
+            item_b=item_b,
+            irt=irt,
+        )
+        likelihood = conditional.get((observed_bucket, observed_error_type), 0.0)
+        if likelihood <= 0 and observed_error_type is not None:
+            likelihood = sum(
+                p for (bucket, _error), p in conditional.items() if bucket == observed_bucket
+            )
+        updated[label] = probability * likelihood
+    total = sum(updated.values())
+    if total <= 0:
+        return prior
+    return {label: value / total for label, value in updated.items()}
+
+
 def probe_eig_component(
     hypothesis_set: HypothesisSet,
     item: PracticeItem,
@@ -546,6 +700,14 @@ def score_bucket(rubric_score: int) -> str:
 
 def _entropy(distribution: dict[str, float]) -> float:
     return -sum(p * log(p) for p in distribution.values() if p > 0)
+
+
+def _normalized_prior(distribution: dict[str, float]) -> dict[str, float]:
+    cleaned = {str(label): max(float(probability), 0.0) for label, probability in distribution.items()}
+    total = sum(cleaned.values())
+    if total <= 0:
+        return {}
+    return {label: probability / total for label, probability in cleaned.items()}
 
 
 def _observation_likelihoods(

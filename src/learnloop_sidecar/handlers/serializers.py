@@ -108,7 +108,7 @@ def practice_item_detail(vault: LoadedVault, repository: Repository, practice_it
             "tags": item.tags,
             "source_refs": [source_ref.model_dump() for source_ref in item.provenance.source_refs],
             "state": practice_item_state_dto(repository, item.id),
-            "mastery": mastery_dto(repository, learning_object.id),
+            "mastery": mastery_dto(repository, learning_object.id, vault),
             "scheduler": scheduler_explanation_dto(scheduler) if scheduler is not None else None,
             "attempts": practice_item_attempts(repository, item.id, max_points),
         }
@@ -156,7 +156,7 @@ def learning_object_detail(vault: LoadedVault, repository: Repository, learning_
             "confusables": learning_object.confusables,
             "difficulty_prior": learning_object.difficulty_prior,
             "tags": learning_object.tags,
-            "mastery": mastery_dto(repository, learning_object.id),
+            "mastery": mastery_dto(repository, learning_object.id, vault),
         }
     )
 
@@ -202,7 +202,7 @@ def feedback_bundle(vault: LoadedVault, repository: Repository, attempt_id: str)
     metadata = repository.fetch_attempt_feedback_metadata(attempt_id) or _legacy_feedback_metadata(repository, attempt_id)
     state = repository.practice_item_state(item.id)
     surprise = repository.latest_attempt_surprise(attempt_id) or {}
-    mastery_after = mastery_dto(repository, attempt["learning_object_id"])
+    mastery_after = mastery_dto(repository, attempt["learning_object_id"], vault)
     intervention_need = repository.intervention_need_for_attempt(attempt_id)
     return versioned(
         {

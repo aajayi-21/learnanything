@@ -6,8 +6,9 @@ from typing import Any
 
 from learnloop.clock import Clock, parse_utc
 from learnloop.db.repositories import Repository
-from learnloop.services.probes import HypothesisSet, probe_eig_component, probe_posterior, resolve_item_irt
-from learnloop.services.recall_coverage import familiarity_discount, resolve_coverage
+from learnloop.services.facet_diagnostics import candidate_facet_support
+from learnloop.services.probes import facet_expected_information_gain, probe_posterior, resolve_item_irt
+from learnloop.services.recall_coverage import familiarity_discount
 from learnloop.vault.models import LoadedVault, PracticeItem
 
 FOLLOWUP_ACTION = "negative_surprise_followup"
@@ -32,6 +33,14 @@ class FollowupDecision:
     suppressed_actions: list[str]
     intent: str | None = None
     need_id: str | None = None
+
+
+@dataclass(frozen=True)
+class InterventionSelection:
+    candidate: PracticeItem | None
+    dominant_target_facet: str | None
+    open_facets: list[str]
+    slate: list[dict[str, Any]]
 
 
 def evaluate_intervention_followup(
@@ -120,17 +129,24 @@ def evaluate_intervention_followup(
         lo_independent_evidence_mass=lo_independent_evidence_mass,
         cold_start_min_lo_evidence=config.cold_start_min_lo_evidence,
     )
-    candidate = _choose_intervention_item(
+    selection = _choose_intervention_item(
         vault,
         repository,
         learning_object_id=learning_object_id,
         exclude_practice_item_id=practice_item_id,
         target_facets=target_facets,
         intent=intent,
+        max_error_severity=max_error_severity,
     )
+    candidate = selection.candidate
     triggered = [f"{INTERVENTION_ACTION}:{reason}:{practice_item_id}" for reason in triggered_reasons]
     if candidate is None:
         now = _now_iso(clock)
+        need_target_facets = (
+            [selection.dominant_target_facet]
+            if selection.dominant_target_facet is not None
+            else target_facets
+        )
         need_id = repository.upsert_intervention_need(
             {
                 "attempt_id": attempt_id,
@@ -138,14 +154,14 @@ def evaluate_intervention_followup(
                 "practice_item_id": practice_item_id,
                 "desired_intent": intent,
                 "trigger_reason": triggered_reasons[0],
-                "target_facets": target_facets,
+                "target_facets": need_target_facets,
                 "error_types": [],
                 "priority": min(1.0, 0.5 + max_error_severity / 2),
                 "status": "pending",
                 "blocked_reason": "no_suitable_item",
                 "candidate_requirements": {
                     "same_learning_object": True,
-                    "min_target_facet_overlap": 0.5,
+                    "min_target_facet_overlap": config.min_target_facet_overlap,
                     "avoid_bad_item_suspicion_above": 0.65,
                 },
                 "created_at": now,
@@ -154,10 +170,32 @@ def evaluate_intervention_followup(
         )
         suppressed = [f"{INTERVENTION_ACTION}:no_suitable_item:{need_id}"]
         repository.update_attempt_surprise_actions(attempt_id, triggered_actions=triggered, suppressed_actions=suppressed)
+        _record_followup_decision_features(
+            vault,
+            repository,
+            attempt_id=attempt_id,
+            learning_object_id=learning_object_id,
+            selection=selection,
+            outcome="created_need_for_generation",
+            need_id=need_id,
+            selected_item_id=None,
+            clock=clock,
+        )
         return _decision(False, None, suppressed[0], triggered, suppressed, intent=intent, need_id=need_id)
 
     triggered.append(f"{INTERVENTION_ACTION}:queued:{candidate.id}")
     repository.update_attempt_surprise_actions(attempt_id, triggered_actions=triggered)
+    _record_followup_decision_features(
+        vault,
+        repository,
+        attempt_id=attempt_id,
+        learning_object_id=learning_object_id,
+        selection=selection,
+        outcome="queued_diagnostic" if selection.open_facets else "queued_non_diagnostic_review",
+        need_id=None,
+        selected_item_id=candidate.id,
+        clock=clock,
+    )
     return _decision(True, candidate.id, triggered_reasons[0], triggered, [], intent=intent)
 
 
@@ -287,60 +325,6 @@ def _probe_unfamiliar_probability(
     return float(posterior.posterior.get("unfamiliar", 0.0))
 
 
-def _choose_followup_item(
-    vault: LoadedVault,
-    repository: Repository,
-    *,
-    learning_object_id: str,
-    exclude_practice_item_id: str,
-) -> PracticeItem | None:
-    candidates = [
-        item
-        for item in vault.practice_items.values()
-        if item.learning_object_id == learning_object_id and item.id != exclude_practice_item_id
-    ]
-    if not candidates:
-        return None
-
-    probe_state = repository.probe_state(learning_object_id)
-    if probe_state is not None and probe_state.status == "in_progress" and probe_state.hypothesis_set_id:
-        record = repository.fetch_hypothesis_set(probe_state.hypothesis_set_id)
-        if record is not None:
-            hypothesis_set = HypothesisSet.from_record(record)
-
-            def _eig(item: PracticeItem) -> float:
-                item_a, item_b, probe_irt = resolve_item_irt(vault, item)
-                rubric = vault.rubric_for_item(item)
-                coverage = resolve_coverage(
-                    item,
-                    rubric,
-                    attempt_type="diagnostic_probe",
-                    hints_used=0,
-                    learner_answer_md="prospective_probe",
-                )
-                familiarity = familiarity_discount(
-                    repository,
-                    item,
-                    learning_object_id=learning_object_id,
-                    covered_facets=coverage.covered_facets,
-                    config=vault.config,
-                )
-                return familiarity.independent_evidence_discount * probe_eig_component(
-                    hypothesis_set,
-                    item,
-                    rubric,
-                    item_a=item_a,
-                    item_b=item_b,
-                    irt=probe_irt,
-                )
-
-            candidates.sort(key=lambda item: (-_eig(item), item.id))
-            return candidates[0]
-
-    candidates.sort(key=lambda item: item.id)
-    return candidates[0]
-
-
 def _target_facets_from_debug(debug_payload: dict[str, Any]) -> list[str]:
     facet_outcomes = debug_payload.get("facet_outcomes")
     if isinstance(facet_outcomes, dict):
@@ -443,27 +427,155 @@ def _choose_intervention_item(
     exclude_practice_item_id: str,
     target_facets: list[str],
     intent: str,
-) -> PracticeItem | None:
+    max_error_severity: float,
+) -> InterventionSelection:
     candidates = [
         item
         for item in vault.practice_items.values()
         if item.learning_object_id == learning_object_id and item.id != exclude_practice_item_id
     ]
-    if not candidates:
-        return None
+    diagnostic_states = [
+        state
+        for state in repository.facet_uncertainty_states(learning_object_id)
+        if state.status in {"open", "resolving"} or _is_known_gap_state(state)
+    ]
+    severity = max(max_error_severity, 0.05)
     target = set(target_facets)
+    dominant_pool = [
+        state for state in diagnostic_states if not target or state.facet_id in target
+    ] or diagnostic_states
+    dominant_state = max(
+        dominant_pool,
+        key=lambda state: (state.uncertainty * severity, state.uncertainty, state.facet_id),
+        default=None,
+    )
+    dominant_target_facet = (
+        dominant_state.facet_id
+        if dominant_state is not None
+        else (sorted(target)[0] if target else None)
+    )
+    open_facets = sorted(state.facet_id for state in diagnostic_states)
+    if not candidates:
+        return InterventionSelection(
+            candidate=None,
+            dominant_target_facet=dominant_target_facet,
+            open_facets=open_facets,
+            slate=[],
+        )
 
-    def rank(item: PracticeItem) -> tuple[float, float, str]:
-        facets = set(item.repair_targets or item.evidence_facets)
-        overlap = len(target & facets) / len(target | facets) if target and facets else 0.0
+    gate_applies = bool(diagnostic_states) and dominant_target_facet is not None
+    min_overlap = vault.config.scheduler.followup.min_target_facet_overlap
+    slate: list[dict[str, Any]] = []
+    for item in candidates:
+        support = candidate_facet_support(item)
+        target_overlap = (
+            _jaccard(support, {dominant_target_facet})
+            if dominant_target_facet is not None
+            else 0.0
+        )
         quality = repository.practice_item_quality_state(item.id)
         suspicion = quality.bad_item_suspicion if quality is not None else 0.0
+        gate_passed = True
+        filtered_reason = None
+        if gate_applies and target_overlap < min_overlap:
+            gate_passed = False
+            filtered_reason = "subthreshold_overlap"
+        if suspicion >= 0.65:
+            gate_passed = False
+            filtered_reason = "bad_item_suspicion"
+        facet_eig_by_facet: dict[str, float] = {}
+        total_facet_eig = 0.0
+        if diagnostic_states:
+            item_a, item_b, probe_irt = resolve_item_irt(vault, item)
+            rubric = vault.rubric_for_item(item)
+            fatal_error_ids = {fatal_error.id for fatal_error in rubric.fatal_errors} if rubric is not None else set()
+            for state in diagnostic_states:
+                eig = facet_expected_information_gain(
+                    state.hypothesis_marginal,
+                    facet_id=state.facet_id,
+                    candidate_facet_support=support,
+                    fatal_error_ids=fatal_error_ids,
+                    item_a=item_a,
+                    item_b=item_b,
+                    irt=probe_irt,
+                )
+                facet_eig_by_facet[state.facet_id] = eig
+                total_facet_eig += (1.0 + vault.config.recall_coverage.kappa_uncertain * state.uncertainty) * eig
+        familiarity = familiarity_discount(
+            repository,
+            item,
+            learning_object_id=learning_object_id,
+            covered_facets={facet: 1.0 for facet in support},
+            config=vault.config,
+        )
         scaffold = float(item.scaffold_level or 0.0)
         intent_bonus = scaffold if intent in {"repair", "guided_reconstruction"} else 0.0
-        return (-(overlap + intent_bonus), suspicion, item.id)
+        fallback_overlap = _jaccard(support, target) if target else 0.0
+        rank_score = (
+            familiarity.independent_evidence_discount * total_facet_eig + intent_bonus
+            if diagnostic_states
+            else fallback_overlap + intent_bonus
+        )
+        slate.append(
+            {
+                "practice_item_id": item.id,
+                "candidate_facet_support": sorted(support),
+                "dominant_target_facet": dominant_target_facet,
+                "open_facets": open_facets,
+                "target_overlap": target_overlap,
+                "min_target_facet_overlap": min_overlap,
+                "gate_passed": gate_passed,
+                "filtered_reason": filtered_reason,
+                "facet_eig_by_facet": facet_eig_by_facet,
+                "total_facet_eig": total_facet_eig,
+                "familiarity_discount": familiarity.independent_evidence_discount,
+                "bad_item_suspicion": suspicion,
+                "intent_bonus": intent_bonus,
+                "rank_score": rank_score,
+                "selected": False,
+                "final_rank": None,
+            }
+        )
 
-    candidates.sort(key=rank)
-    return candidates[0]
+    eligible = [row for row in slate if row["gate_passed"]]
+    eligible.sort(
+        key=lambda row: (
+            -float(row["rank_score"]),
+            float(row["bad_item_suspicion"]),
+            str(row["practice_item_id"]),
+        )
+    )
+    selected_id = str(eligible[0]["practice_item_id"]) if eligible else None
+    rank_by_id = {
+        str(row["practice_item_id"]): rank
+        for rank, row in enumerate(eligible, start=1)
+    }
+    for row in slate:
+        row["selected"] = row["practice_item_id"] == selected_id
+        row["final_rank"] = rank_by_id.get(str(row["practice_item_id"]))
+    selected = next((item for item in candidates if item.id == selected_id), None)
+    return InterventionSelection(
+        candidate=selected,
+        dominant_target_facet=dominant_target_facet,
+        open_facets=open_facets,
+        slate=slate,
+    )
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _is_known_gap_state(state: Any) -> bool:
+    if getattr(state, "status", None) != "resolved":
+        return False
+    marginal = getattr(state, "hypothesis_marginal", {}) or {}
+    if not marginal:
+        return False
+    top_label = max(marginal, key=marginal.get)
+    return top_label != f"facet_solid:{getattr(state, 'facet_id', '')}"
 
 
 def _attempt_target_facets(repository: Repository, practice_item_id: str) -> list[str]:
@@ -494,6 +606,65 @@ def _current_inclusive_same_facet_failures(repository: Repository, learning_obje
             or float(attempt.get("correctness") or 0.0) <= 0.40
             or bool(attempt.get("error_type"))
         )
+    )
+
+
+def _record_followup_decision_features(
+    vault: LoadedVault,
+    repository: Repository,
+    *,
+    attempt_id: str,
+    learning_object_id: str,
+    selection: InterventionSelection,
+    outcome: str,
+    need_id: str | None,
+    selected_item_id: str | None,
+    clock: Clock | None,
+) -> None:
+    uncertainties = repository.facet_uncertainty_states(
+        learning_object_id, statuses=("open", "resolving", "resolved")
+    )
+    source_debug = repository.attempt_debug_payload(attempt_id) or {}
+    uncertainty_trace = source_debug.get("facet_uncertainty_trace")
+    drops: dict[str, float] = {}
+    if isinstance(uncertainty_trace, dict):
+        updates = uncertainty_trace.get("updates")
+        if isinstance(updates, dict):
+            for facet, payload in updates.items():
+                if isinstance(payload, dict):
+                    drops[str(facet)] = float(payload.get("uncertainty_drop") or 0.0)
+    selected_row = next(
+        (row for row in selection.slate if row.get("practice_item_id") == selected_item_id),
+        None,
+    )
+    prior = {
+        state.facet_id: state.hypothesis_marginal
+        for state in uncertainties
+        if not selection.open_facets or state.facet_id in set(selection.open_facets)
+    }
+    repository.record_decision_features(
+        decision_id=attempt_id,
+        decision_type="followup",
+        ability_vector={
+            "facet_hypothesis_prior": prior,
+            "open_facets": selection.open_facets,
+            "realized_facet_uncertainty_drop": drops,
+        },
+        item_demand_vector={
+            "selected_practice_item_id": selected_item_id,
+            "candidate_facet_support": selected_row.get("candidate_facet_support") if selected_row else None,
+            "dominant_target_facet": selection.dominant_target_facet,
+            "per_facet_eig": selected_row.get("facet_eig_by_facet") if selected_row else {},
+            "total_facet_eig": selected_row.get("total_facet_eig") if selected_row else 0.0,
+        },
+        context={
+            "candidate_slate": selection.slate,
+            "decision_outcome": outcome,
+            "need_id": need_id,
+            "generation_need_id": need_id if outcome == "created_need_for_generation" else None,
+        },
+        algorithm_version=vault.config.algorithms.algorithm_version,
+        clock=clock,
     )
 
 

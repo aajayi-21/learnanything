@@ -36,8 +36,26 @@ def test_fresh_db_applies_all_migrations(tmp_path):
         "scheduler_slates",
         "scheduler_slate_candidates",
         "learning_outcome_labels",
+        "facet_uncertainty",
     }:
         assert required in tables
+
+
+def test_facet_diagnostic_schema_is_available(tmp_path):
+    sqlite_path = tmp_path / "state.sqlite"
+    apply_migrations(sqlite_path)
+
+    with connect(sqlite_path) as connection:
+        grading_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(grading_evidence)")
+        }
+        decision_type_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decision_features'"
+        ).fetchone()["sql"]
+
+    assert "learner_confidence" in grading_columns
+    assert "followup" in decision_type_sql
 
 
 def test_migrations_are_idempotent(tmp_path):

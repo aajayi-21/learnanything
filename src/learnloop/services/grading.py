@@ -78,6 +78,7 @@ class ValidatedCriterionEvidence:
     points_awarded: float
     evidence: str
     notes: str | None = None
+    learner_confidence: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,7 @@ def validate_codex_grading_proposal(
                 points_awarded=evidence.points_awarded,
                 evidence=evidence.evidence,
                 notes=evidence.notes,
+                learner_confidence=evidence.learner_confidence,
             )
         )
 

@@ -8,6 +8,7 @@ from learnloop.ai.runtime import check_ai_runtime
 from learnloop.codex.runtime import check_codex_runtime
 from learnloop.db.migrate import applied_versions, discover_migrations
 from learnloop.db.repositories import Repository
+from learnloop.services.facet_diagnostics import mastery_diagnostic_view
 from learnloop.services.mastery import display_mastery
 from learnloop.services.startup import run_startup_maintenance
 from learnloop.services.state_sync import sync_vault_state
@@ -204,19 +205,22 @@ def checkpoint_dto(row: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def mastery_dto(repository: Repository, learning_object_id: str) -> dict[str, Any] | None:
+def mastery_dto(repository: Repository, learning_object_id: str, vault: LoadedVault | None = None) -> dict[str, Any] | None:
     state = repository.mastery_state(learning_object_id)
     if state is None:
         return None
     display = display_mastery(state)
-    return to_camel(
-        {
-            "mean": display.mastery_mean,
-            "variance": display.mastery_variance,
-            "evidence_count": state.evidence_count,
-            "last_evidence_at": state.last_evidence_at,
-        }
-    )
+    payload: dict[str, Any] = {
+        "mean": display.mastery_mean,
+        "variance": display.mastery_variance,
+        "evidence_count": state.evidence_count,
+        "last_evidence_at": state.last_evidence_at,
+    }
+    if vault is not None:
+        diagnostic = mastery_diagnostic_view(vault, repository, learning_object_id)
+        payload["required_facets"] = diagnostic["required_facets"]
+        payload["facet_diagnostics"] = diagnostic["facets"]
+    return to_camel(payload)
 
 
 def _nowish() -> str:

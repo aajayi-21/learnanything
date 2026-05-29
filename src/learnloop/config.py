@@ -14,7 +14,7 @@ DEFAULT_CONFIG_TEXT = """schema_version = 1
 sqlite_path = "state.sqlite"
 
 [algorithms]
-algorithm_version = "mvp-0.2"
+algorithm_version = "mvp-0.3"
 
 [scheduler]
 forgetting_risk_weight = 1.0
@@ -38,6 +38,7 @@ epsilon_error_surprise = 0.05
 [scheduler.followup]
 tau_followup_nats = 0.05
 gamma_min = 0.5
+min_target_facet_overlap = 0.5
 
 [mastery]
 base_observation_variance = 1.0
@@ -263,7 +264,7 @@ class StorageConfig(BaseModel):
 
 
 class AlgorithmsConfig(BaseModel):
-    algorithm_version: str = "mvp-0.2"
+    algorithm_version: str = "mvp-0.3"
 
 
 class SchedulerSurpriseConfig(BaseModel):
@@ -287,6 +288,7 @@ class SchedulerFollowupConfig(BaseModel):
     tau_unfamiliar_intervention: float = 0.85
     max_interventions_per_lo_per_session: int = 1
     cold_start_min_lo_evidence: float = 2.0
+    min_target_facet_overlap: float = 0.5
 
 
 class SchedulerConfig(BaseModel):
@@ -419,7 +421,20 @@ class RecallCoverageConfig(BaseModel):
     bad_item_suspicion_review_threshold: float = 0.65
     bad_item_suspicion_damage_mitigation_cap: float = 0.20
     max_error_sharpening: float = 3.0
+    kappa_uncertain: float = 2.0
+    coverage_epsilon: float = 1e-3
+    tau_facet_share: float = 0.10
+    min_facet_evidence_mass: float = 0.50
+    variance_floor_at_zero_coverage: float = 0.5
+    variance_floor_at_full_coverage: float = 0.0
     severity_examples: dict[str, SeverityExampleConfig] = Field(default_factory=default_severity_examples)
+
+
+class FacetDiagnosticConfig(BaseModel):
+    tau_facet_failed: float = 0.40
+    tau_facet_uncertain_variance: float = 0.15
+    hedge_uncertainty_floor: float = 0.50
+    facet_resolved_threshold: float = 0.10
 
 
 class IngestConfig(BaseModel):
@@ -536,6 +551,7 @@ class LearnLoopConfig(BaseModel):
     mastery: MasteryConfig = Field(default_factory=MasteryConfig)
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
     recall_coverage: RecallCoverageConfig = Field(default_factory=RecallCoverageConfig)
+    facet_diagnostic: FacetDiagnosticConfig = Field(default_factory=FacetDiagnosticConfig)
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     ai: AIConfig = Field(default_factory=AIConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)

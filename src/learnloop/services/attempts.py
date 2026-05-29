@@ -15,6 +15,7 @@ from learnloop.codex.schemas import GradingProposal
 from learnloop.db.repositories import (
     ActiveErrorEvent,
     FacetRecallState,
+    FacetUncertaintyState,
     MasteryState,
     PracticeItemQualityState,
     PracticeItemState,
@@ -36,6 +37,12 @@ from learnloop.services.grading import (
     validate_codex_grading_proposal,
 )
 from learnloop.services.error_taxonomy import persist_unknown_error_type_proposals
+from learnloop.services.facet_diagnostics import (
+    apply_mastery_variance_floor,
+    build_facet_uncertainty_updates,
+    covered_required_fraction,
+    lo_relative_coverage,
+)
 from learnloop.services.mastery import (
     MasteryObservation,
     MasteryObservationTrace,
@@ -215,6 +222,7 @@ class AttemptPriorState:
     recent_practice_item_attempts: list[dict[str, Any]]
     aggregate_facet_recall: dict[str, FacetRecallState | None]
     item_facet_recall: dict[str, FacetRecallState | None]
+    facet_uncertainty: dict[str, FacetUncertaintyState | None]
 
     def facet_recall_state(self, facet_id: str, practice_item_id: str | None = None) -> FacetRecallState | None:
         if practice_item_id is None:
@@ -245,6 +253,7 @@ class AttemptApplication:
     practice_item_state: PracticeItemState
     mastery_state: MasteryState
     facet_recall_states: list[dict[str, Any]]
+    facet_uncertainty_states: list[dict[str, Any]]
     quality_state: dict[str, Any]
     ability_transition: dict[str, Any]
     attempt_debug_payload: dict[str, object]
@@ -505,6 +514,7 @@ def complete_self_graded_attempt(
             "notes": grade.notes,
             "local_grader_id": "self",
             "grader_tier": 1,
+            "learner_confidence": "hedged" if grade.confidence <= 2 else "confident",
             "created_at": now_iso,
         }
         for criterion in rubric.criteria
@@ -762,6 +772,7 @@ def _persist_attempt_application(
             practice_item_state=application.practice_item_state,
             mastery_state=application.mastery_state,
             facet_recall_states=application.facet_recall_states,
+            facet_uncertainty_states=application.facet_uncertainty_states,
             quality_state=application.quality_state,
             ability_transition=application.ability_transition,
             attempt_debug_payload=application.attempt_debug_payload,
@@ -775,6 +786,7 @@ def _persist_attempt_application(
             practice_item_state=application.practice_item_state,
             mastery_state=application.mastery_state,
             facet_recall_states=application.facet_recall_states,
+            facet_uncertainty_states=application.facet_uncertainty_states,
             quality_state=application.quality_state,
             ability_transition=application.ability_transition,
             attempt_debug_payload=application.attempt_debug_payload,
@@ -815,6 +827,10 @@ def load_attempt_prior_state(
         },
         item_facet_recall={
             facet: repository.facet_recall_state(learning_object_id, facet, practice_item_id)
+            for facet in facet_ids
+        },
+        facet_uncertainty={
+            facet: repository.facet_uncertainty_state(learning_object_id, facet)
             for facet in facet_ids
         },
     )
@@ -887,6 +903,13 @@ def _compute_resolved_grade_application(
         config=vault.config,
         exclude_attempt_id=attempt_id,
     )
+    lo_coverage, lo_coverage_trace = lo_relative_coverage(
+        vault,
+        repository,
+        learning_object_id=learning_object.id,
+        normalized_facet_weights=coverage.normalized_facet_weights,
+        effective_item_coverage=coverage.effective_coverage,
+    )
     prior_quality = prior_state.practice_item_quality_state
     prior_bad_item_suspicion = prior_quality.bad_item_suspicion if prior_quality is not None else 0.0
     severity_traces: dict[str, dict[str, object]] = {}
@@ -912,11 +935,35 @@ def _compute_resolved_grade_application(
         resolved_attributions.append(replace(attribution, severity=severity))
     primary_error_type = _primary_error_type(resolved_attributions)
     max_event_severity = max((attribution.severity for attribution in resolved_attributions), default=0.0)
+    facet_recall_updates = build_facet_recall_updates_from_prior(
+        prior_state.facet_recall_by_scope(coverage.covered_facets, item.id),
+        learning_object_id=learning_object.id,
+        practice_item_id=item.id,
+        covered_facets=coverage.covered_facets,
+        facet_outcomes=facet_outcomes,
+        independent_evidence_discount=familiarity.independent_evidence_discount,
+        attempt_type=draft.attempt_type,
+        error_event_written=bool(resolved_attributions),
+        algorithm_version=vault.config.algorithms.algorithm_version,
+        now_iso=now_iso,
+    )
+    post_aggregate_facet_recall: dict[str, FacetRecallState | dict[str, Any] | None] = dict(
+        prior_state.aggregate_facet_recall
+    )
+    for state in facet_recall_updates:
+        if state.get("practice_item_id") is None:
+            post_aggregate_facet_recall[str(state["facet_id"])] = state
+    breadth_fraction, breadth_trace = covered_required_fraction(
+        vault,
+        repository,
+        learning_object_id=learning_object.id,
+        aggregate_facet_recall=post_aggregate_facet_recall,
+    )
     error_impact = resolve_error_impact(
         vault.config,
         error_type=primary_error_type,
         max_event_severity=max_event_severity,
-        effective_coverage=coverage.effective_coverage,
+        effective_coverage=lo_coverage,
         observation_reliability=reliability.observation_reliability,
         independent_evidence_discount=familiarity.independent_evidence_discount,
     )
@@ -951,6 +998,11 @@ def _compute_resolved_grade_application(
         item_a=item_a,
         item_b=item_b,
         item_id=item.id,
+    )
+    posterior_mastery, mastery_variance_floor = apply_mastery_variance_floor(
+        posterior_mastery,
+        vault.config,
+        covered_fraction=breadth_fraction,
     )
     surprise = compute_surprise(
         prior=prior_mastery,
@@ -1021,15 +1073,22 @@ def _compute_resolved_grade_application(
                 "updated_at": now_iso,
             }
         )
-    facet_recall_updates = build_facet_recall_updates_from_prior(
-        prior_state.facet_recall_by_scope(coverage.covered_facets, item.id),
+    facet_evidence_rows: Iterable[Any] = grade.evidence_rows
+    if not grade.evidence_rows:
+        facet_evidence_rows = repository.fetch_grading_evidence(attempt_id)
+    facet_uncertainty_updates, facet_uncertainty_trace = build_facet_uncertainty_updates(
+        vault,
+        item=item,
+        rubric=rubric,
         learning_object_id=learning_object.id,
-        practice_item_id=item.id,
-        covered_facets=coverage.covered_facets,
+        attempt_id=attempt_id,
         facet_outcomes=facet_outcomes,
-        independent_evidence_discount=familiarity.independent_evidence_discount,
-        attempt_type=draft.attempt_type,
-        error_event_written=bool(error_events),
+        normalized_facet_weights=coverage.normalized_facet_weights,
+        evidence_rows=facet_evidence_rows,
+        error_attributions=resolved_attributions,
+        prior_uncertainties=prior_state.facet_uncertainty,
+        prior_facet_recall=prior_state.aggregate_facet_recall,
+        observed_error_type=primary_error_type,
         algorithm_version=vault.config.algorithms.algorithm_version,
         now_iso=now_iso,
     )
@@ -1074,6 +1133,11 @@ def _compute_resolved_grade_application(
     debug_payload = {
         "item_coverage": coverage.item_coverage,
         "effective_coverage": coverage.effective_coverage,
+        "lo_relative_coverage": lo_coverage,
+        "lo_relative_coverage_trace": lo_coverage_trace,
+        "covered_required_fraction": breadth_fraction,
+        "covered_required_fraction_trace": breadth_trace,
+        "mastery_variance_floor": mastery_variance_floor,
         "coverage_trace": coverage.trace,
         "reliability_trace": reliability.trace,
         "familiarity_trace": familiarity.trace,
@@ -1089,6 +1153,8 @@ def _compute_resolved_grade_application(
         "predicted_correctness": expected_correctness,
         "prediction_trace": prediction_trace,
         "facet_recall_updates": facet_recall_updates,
+        "facet_uncertainty_updates": facet_uncertainty_updates,
+        "facet_uncertainty_trace": facet_uncertainty_trace,
         "ability_transition": ability_transition,
         "algorithm_version": vault.config.algorithms.algorithm_version,
         "created_at": now_iso,
@@ -1136,6 +1202,7 @@ def _compute_resolved_grade_application(
         practice_item_state=practice_state,
         mastery_state=posterior_mastery,
         facet_recall_states=facet_recall_updates,
+        facet_uncertainty_states=facet_uncertainty_updates,
         quality_state=quality_state,
         ability_transition=ability_transition_event,
         attempt_debug_payload=debug_payload,
@@ -1304,6 +1371,7 @@ def _resolved_codex_grade(
             "agent_run_id": agent_run_id,
             "local_grader_id": None,
             "grader_tier": 3,
+            "learner_confidence": evidence.learner_confidence,
             "created_at": now_iso,
         }
         for evidence in validated.criterion_evidence

@@ -99,6 +99,7 @@ class GradingEvidenceRecord:
     grader_tier: int
     local_grader_id: str | None
     agent_run_id: str | None
+    learner_confidence: str | None
     created_at: str
     superseded_at: str | None
 
@@ -118,6 +119,22 @@ class FacetRecallState:
     last_attempt_at: str | None
     last_error_at: str | None
     consecutive_failures: int
+    algorithm_version: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class FacetUncertaintyState:
+    id: str
+    learning_object_id: str
+    facet_id: str
+    hypothesis_marginal: dict[str, float]
+    uncertainty: float
+    status: str
+    opened_by_attempt_id: str
+    opened_reason: str
+    last_evidence_at: str | None
     algorithm_version: str
     created_at: str
     updated_at: str
@@ -873,6 +890,7 @@ class Repository:
         practice_item_state: PracticeItemState,
         mastery_state: MasteryState,
         facet_recall_states: Iterable[Mapping[str, Any]] = (),
+        facet_uncertainty_states: Iterable[Mapping[str, Any]] = (),
         quality_state: Mapping[str, Any] | None = None,
         ability_transition: Mapping[str, Any] | None = None,
         attempt_debug_payload: Mapping[str, Any] | None = None,
@@ -888,6 +906,8 @@ class Repository:
             self._upsert_mastery_state_record(connection, mastery_state)
             for state in facet_recall_states:
                 self._upsert_facet_recall_state(connection, state)
+            for state in facet_uncertainty_states:
+                self._upsert_facet_uncertainty_state(connection, state)
             if quality_state is not None:
                 self._upsert_practice_item_quality_state(connection, quality_state)
             if ability_transition is not None:
@@ -965,6 +985,10 @@ class Repository:
                 "DELETE FROM evidence_facet_recall_state WHERE learning_object_id = ?",
                 (learning_object_id,),
             )
+            connection.execute(
+                "DELETE FROM facet_uncertainty WHERE learning_object_id = ?",
+                (learning_object_id,),
+            )
             if attempt_ids:
                 placeholders = ",".join("?" for _ in attempt_ids)
                 connection.execute(f"DELETE FROM error_events WHERE attempt_id IN ({placeholders})", attempt_ids)
@@ -989,6 +1013,7 @@ class Repository:
         practice_item_state: PracticeItemState,
         mastery_state: MasteryState,
         facet_recall_states: Iterable[Mapping[str, Any]] = (),
+        facet_uncertainty_states: Iterable[Mapping[str, Any]] = (),
         quality_state: Mapping[str, Any] | None = None,
         ability_transition: Mapping[str, Any] | None = None,
         attempt_debug_payload: Mapping[str, Any] | None = None,
@@ -1034,6 +1059,8 @@ class Repository:
             self._upsert_mastery_state_record(connection, mastery_state)
             for state in facet_recall_states:
                 self._upsert_facet_recall_state(connection, state)
+            for state in facet_uncertainty_states:
+                self._upsert_facet_uncertainty_state(connection, state)
             if quality_state is not None:
                 self._upsert_practice_item_quality_state(connection, quality_state)
             if ability_transition is not None:
@@ -1106,6 +1133,52 @@ class Repository:
                     (learning_object_id,),
                 ).fetchall()
         return [_facet_recall_state(row) for row in rows]
+
+    def facet_uncertainty_state(
+        self,
+        learning_object_id: str,
+        facet_id: str,
+    ) -> FacetUncertaintyState | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM facet_uncertainty
+                WHERE learning_object_id = ? AND facet_id = ?
+                """,
+                (learning_object_id, facet_id),
+            ).fetchone()
+        return _facet_uncertainty_state(row) if row is not None else None
+
+    def facet_uncertainty_states(
+        self,
+        learning_object_id: str | None = None,
+        *,
+        statuses: Iterable[str] | None = None,
+    ) -> list[FacetUncertaintyState]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if learning_object_id is not None:
+            clauses.append("learning_object_id = ?")
+            parameters.append(learning_object_id)
+        status_values = list(statuses or [])
+        if status_values:
+            clauses.append(f"status IN ({','.join('?' for _ in status_values)})")
+            parameters.extend(status_values)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM facet_uncertainty{where}
+                ORDER BY learning_object_id, status, uncertainty DESC, facet_id
+                """,
+                parameters,
+            ).fetchall()
+        return [_facet_uncertainty_state(row) for row in rows]
+
+    def upsert_facet_uncertainty_state(self, state: Mapping[str, Any]) -> None:
+        with self.connection() as connection:
+            self._upsert_facet_uncertainty_state(connection, state)
+            connection.commit()
 
     def merge_facet_recall_aliases(
         self,
@@ -1634,6 +1707,68 @@ class Repository:
             )
             connection.commit()
         return event_id
+
+    def record_decision_features(
+        self,
+        *,
+        decision_id: str,
+        decision_type: str,
+        ability_vector: Mapping[str, Any],
+        item_demand_vector: Mapping[str, Any] | None = None,
+        context: Mapping[str, Any] | None = None,
+        algorithm_version: str,
+        clock: Clock | None = None,
+    ) -> str:
+        feature_id = new_ulid()
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            existing = connection.execute(
+                """
+                SELECT id FROM decision_features
+                WHERE decision_id = ? AND decision_type = ?
+                """,
+                (decision_id, decision_type),
+            ).fetchone()
+            if existing is not None:
+                feature_id = existing["id"]
+            connection.execute(
+                """
+                INSERT INTO decision_features(
+                  id, decision_id, decision_type, ability_vector_json,
+                  item_demand_vector_json, context_json, algorithm_version, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(decision_id, decision_type) DO UPDATE SET
+                  ability_vector_json = excluded.ability_vector_json,
+                  item_demand_vector_json = excluded.item_demand_vector_json,
+                  context_json = excluded.context_json,
+                  algorithm_version = excluded.algorithm_version,
+                  created_at = excluded.created_at
+                """,
+                (
+                    feature_id,
+                    decision_id,
+                    decision_type,
+                    _json(dict(ability_vector)),
+                    _json(dict(item_demand_vector)) if item_demand_vector is not None else None,
+                    _json(dict(context or {})),
+                    algorithm_version,
+                    now,
+                ),
+            )
+            connection.commit()
+        return feature_id
+
+    def decision_features(self, *, decision_id: str, decision_type: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM decision_features
+                WHERE decision_id = ? AND decision_type = ?
+                """,
+                (decision_id, decision_type),
+            ).fetchone()
+        return _decode_decision_features(row) if row is not None else None
 
     def elicitation_events(self, session_id: str | None = None) -> list[dict[str, Any]]:
         with self.connection() as connection:
@@ -2603,12 +2738,14 @@ class Repository:
             ("attempt_surprise", "attempt_surprise", "attempt_id", _decode_surprise),
             ("practice_item_state", "practice_item_state", "practice_item_id", dict),
             ("learning_object_mastery", "learning_object_mastery", "learning_object_id", dict),
+            ("facet_uncertainty", "facet_uncertainty", "id", _facet_uncertainty_state),
             ("learner_theta", "learner_theta", "id", dict),
             ("learner_claim", "learner_claims", "id", dict),
             ("lo_probe_state", "lo_probe_state", "learning_object_id", _probe_state_record),
             ("hypothesis_set", "hypothesis_sets", "id", _decode_hypothesis_set),
             ("learner_state_belief", "learner_state_beliefs", "id", dict),
             ("elicitation_event", "elicitation_events", "id", _decode_elicitation_event),
+            ("decision_feature", "decision_features", "id", _decode_decision_features),
             ("proposal", "proposed_patches", "id", _decode_proposal_batch),
             ("proposal_item", "proposed_patch_items", "id", _decode_proposal_item),
             ("change_batch", "change_batches", "id", dict),
@@ -2715,9 +2852,9 @@ class Repository:
             INSERT INTO grading_evidence(
               id, attempt_id, criterion_id, points_awarded, evidence, notes,
               agent_run_id, local_grader_id, grader_tier, created_at,
-              superseded_at, superseded_by_evidence_id
+              superseded_at, superseded_by_evidence_id, learner_confidence
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row.get("id") or new_ulid(),
@@ -2732,6 +2869,7 @@ class Repository:
                 row["created_at"],
                 row.get("superseded_at"),
                 row.get("superseded_by_evidence_id"),
+                row.get("learner_confidence"),
             ),
         )
 
@@ -2922,6 +3060,75 @@ class Repository:
                 state.get("last_attempt_at"),
                 state.get("last_error_at"),
                 state.get("consecutive_failures", 0),
+                state["algorithm_version"],
+                state.get("created_at", state["updated_at"]),
+                state["updated_at"],
+            ),
+        )
+
+    def _upsert_facet_uncertainty_state(self, connection: sqlite3.Connection, state: Mapping[str, Any]) -> None:
+        marginal = {
+            str(label): float(probability)
+            for label, probability in dict(state.get("hypothesis_marginal") or {}).items()
+        }
+        existing = connection.execute(
+            """
+            SELECT id, created_at, opened_by_attempt_id, opened_reason
+            FROM facet_uncertainty
+            WHERE learning_object_id = ? AND facet_id = ?
+            """,
+            (state["learning_object_id"], state["facet_id"]),
+        ).fetchone()
+        state_id = str(state.get("id") or (existing["id"] if existing is not None else new_ulid()))
+        opened_by_attempt_id = str(
+            state.get("opened_by_attempt_id")
+            or (existing["opened_by_attempt_id"] if existing is not None else "")
+        )
+        opened_reason = str(
+            state.get("opened_reason")
+            or (existing["opened_reason"] if existing is not None else "low_facet_outcome")
+        )
+        if existing is not None:
+            connection.execute(
+                """
+                UPDATE facet_uncertainty
+                SET hypothesis_marginal = ?, uncertainty = ?, status = ?,
+                    opened_by_attempt_id = ?, opened_reason = ?,
+                    last_evidence_at = ?, algorithm_version = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    _json(marginal),
+                    state["uncertainty"],
+                    state["status"],
+                    opened_by_attempt_id,
+                    opened_reason,
+                    state.get("last_evidence_at"),
+                    state["algorithm_version"],
+                    state["updated_at"],
+                    state_id,
+                ),
+            )
+            return
+        connection.execute(
+            """
+            INSERT INTO facet_uncertainty(
+              id, learning_object_id, facet_id, hypothesis_marginal, uncertainty,
+              status, opened_by_attempt_id, opened_reason, last_evidence_at,
+              algorithm_version, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                state_id,
+                state["learning_object_id"],
+                state["facet_id"],
+                _json(marginal),
+                state["uncertainty"],
+                state["status"],
+                opened_by_attempt_id,
+                opened_reason,
+                state.get("last_evidence_at"),
                 state["algorithm_version"],
                 state.get("created_at", state["updated_at"]),
                 state["updated_at"],
@@ -3192,6 +3399,26 @@ def _facet_recall_state(row: sqlite3.Row) -> FacetRecallState:
     )
 
 
+def _facet_uncertainty_state(row: sqlite3.Row) -> FacetUncertaintyState:
+    return FacetUncertaintyState(
+        id=row["id"],
+        learning_object_id=row["learning_object_id"],
+        facet_id=row["facet_id"],
+        hypothesis_marginal={
+            str(label): float(probability)
+            for label, probability in _loads(row["hypothesis_marginal"], {}).items()
+        },
+        uncertainty=float(row["uncertainty"]),
+        status=row["status"],
+        opened_by_attempt_id=row["opened_by_attempt_id"],
+        opened_reason=row["opened_reason"],
+        last_evidence_at=row["last_evidence_at"],
+        algorithm_version=row["algorithm_version"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
 def _merged_facet_recall_state(
     rows: list[sqlite3.Row],
     *,
@@ -3300,6 +3527,14 @@ def _decode_elicitation_event(row: sqlite3.Row) -> dict[str, Any]:
     return payload
 
 
+def _decode_decision_features(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["ability_vector"] = _loads(payload.pop("ability_vector_json"), {})
+    payload["item_demand_vector"] = _loads(payload.pop("item_demand_vector_json"), None)
+    payload["context"] = _loads(payload.pop("context_json"), {})
+    return payload
+
+
 def _decode_hypothesis_set(row: sqlite3.Row) -> dict[str, Any]:
     payload = dict(row)
     payload["hypotheses"] = _loads(payload.pop("hypotheses_json"), [])
@@ -3337,6 +3572,7 @@ def _grading_evidence(row: sqlite3.Row) -> GradingEvidenceRecord:
         grader_tier=row["grader_tier"],
         local_grader_id=row["local_grader_id"],
         agent_run_id=row["agent_run_id"],
+        learner_confidence=row["learner_confidence"] if "learner_confidence" in row.keys() else None,
         created_at=row["created_at"],
         superseded_at=row["superseded_at"],
     )

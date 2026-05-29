@@ -192,6 +192,7 @@ class CriterionEvidence(BaseModel):
     points_awarded: float
     evidence: str
     notes: str | None = None
+    learner_confidence: Literal["confident", "hedged", "unknown"] | None = None
 
 
 class ErrorAttribution(BaseModel):

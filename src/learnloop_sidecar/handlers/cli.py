@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 from learnloop_sidecar.context import SidecarContext
@@ -32,6 +33,13 @@ def run_cli_command(ctx: SidecarContext, params: RunCliCommandInput) -> dict[str
 
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    source_root = str(Path(__file__).resolve().parents[2])
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        source_root
+        if not existing_pythonpath
+        else source_root + os.pathsep + existing_pythonpath
+    )
     try:
         completed = subprocess.run(
             [sys.executable, "-m", "learnloop", *cli_argv],
