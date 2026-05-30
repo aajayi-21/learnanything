@@ -50,22 +50,22 @@ repair_targets:
   - zero_interpretation
   - fatal_distance_confusion
 grading_rubric:
-  max_points: 5
+  max_points: 4
   criteria:
     - id: computes_ab
-      points: 1.0
+      points: 0.8
       description: Correctly computes a . b as 11.
     - id: computes_ac
-      points: 1.0
+      points: 0.8
       description: Correctly computes a . c as 0.
     - id: explains_multiply_sum
-      points: 1.0
+      points: 0.8
       description: Shows or describes multiply corresponding components and add.
     - id: identifies_b_more_aligned
-      points: 1.0
+      points: 0.8
       description: Identifies b as more aligned with a.
     - id: interprets_zero
-      points: 1.0
+      points: 0.8
       description: Interprets the zero dot product as perpendicular/no alignment
         in this example.
   fatal_errors:

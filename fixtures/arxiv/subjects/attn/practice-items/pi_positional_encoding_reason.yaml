@@ -55,34 +55,34 @@ repair_targets:
   - fatal_positions_as_vocab
   - fatal_recurrence_claim
 grading_rubric:
-  max_points: 6
+  max_points: 4
   criteria:
     - id: no_recurrence_convolution
-      points: 1.5
+      points: 1.0
       description: Connects the need for positions to the absence of recurrence 
         and convolution.
     - id: order_information
-      points: 1.0
+      points: 0.666667
       description: States that positional encodings inject sequence order.
     - id: added_to_embeddings
-      points: 1.0
+      points: 0.666667
       description: States that encodings are added to token embeddings.
     - id: relative_positions
-      points: 1.0
+      points: 0.666667
       description: Mentions easier learning of relative positions as a 
         hypothesis.
     - id: extrapolation
-      points: 1.0
+      points: 0.666667
       description: Mentions possible extrapolation to longer sequences.
     - id: learned_comparison
-      points: 0.5
+      points: 0.333332
       description: Notes learned positional embeddings had nearly identical 
         results.
   fatal_errors:
     - id: fatal_positions_as_vocab
       description: Describes positional encodings as replacing token embeddings 
         or vocabulary IDs.
-      max_grade: 3
+      max_grade: 2
     - id: fatal_recurrence_claim
       description: Claims positional encodings are needed because recurrent 
         networks cannot represent order.

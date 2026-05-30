@@ -48,22 +48,22 @@ repair_targets:
   - fatal_missing_softmax
   - fatal_wrong_score_target
 grading_rubric:
-  max_points: 5
+  max_points: 4
   criteria:
     - id: dot_products
-      points: 1.0
+      points: 0.8
       description: Includes dot products between queries and keys.
     - id: scaling
-      points: 1.0
+      points: 0.8
       description: Includes scaling by the key-dimension factor.
     - id: softmax
-      points: 1.0
+      points: 0.8
       description: Includes softmax normalization.
     - id: value_weighting
-      points: 1.0
+      points: 0.8
       description: Includes weighting values to compute outputs.
     - id: correct_order
-      points: 1.0
+      points: 0.8
       description: Orders the steps correctly.
   fatal_errors:
     - id: fatal_missing_softmax

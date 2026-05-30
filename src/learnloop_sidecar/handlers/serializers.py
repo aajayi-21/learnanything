@@ -265,6 +265,7 @@ def intervention_need_dto(row: dict[str, Any] | None) -> dict[str, Any] | None:
             "status": row["status"],
             "blocked_reason": row["blocked_reason"],
             "candidate_requirements": row.get("candidate_requirements") or {},
+            "diagnostic_focus": row.get("diagnostic_focus"),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -351,6 +352,9 @@ def surprise_dto(row: dict[str, Any], followup_threshold_nats: float | None = No
             "followup_threshold_nats": followup_threshold_nats,
             "triggered_actions": row.get("triggered_actions") or [],
             "suppressed_actions": row.get("suppressed_actions") or [],
+            # Per-attempt record of which trigger/threshold/gate decided the
+            # follow-up outcome; the feedback screen renders its decisive signal.
+            "gate_diagnostics": row.get("gate_diagnostics"),
         }
     )
 

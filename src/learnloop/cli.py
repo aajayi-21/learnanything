@@ -387,11 +387,23 @@ def add_note(
             help="Source type: learner_note, canonical_source, or imported.",
         ),
     ] = "learner_note",
+    related_los: Annotated[
+        str | None,
+        typer.Option("--related-los", help="Comma-separated learning object ids to link this note to."),
+    ] = None,
     vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
 ) -> None:
     note_body = file.read_text(encoding="utf-8") if file else body
     try:
-        path = add_note_to_vault(_root(vault), subject_id, note_id, title, note_body, source_type=source_type)
+        path = add_note_to_vault(
+            _root(vault),
+            subject_id,
+            note_id,
+            title,
+            note_body,
+            source_type=source_type,
+            related_los=_split_items(related_los),
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--source-type") from exc
     typer.echo(f"Added note at {path}")

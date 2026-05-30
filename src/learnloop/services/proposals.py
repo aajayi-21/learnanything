@@ -479,9 +479,109 @@ def maybe_promote_self_tagged_fatal_error(
 def reject_items(root: Path, patch_id: str, item_ids: list[str] | None = None) -> int:
     vault = load_vault(root)
     repository = Repository(VaultPaths(vault.root, vault.config).sqlite_path)
+    diagnostic_reopen_candidates = _diagnostic_reopen_candidates(repository, patch_id, item_ids)
     applied_count = reject_applied_items(root, patch_id, item_ids)
     pending_count = repository.set_proposal_item_decision(patch_id, "rejected", item_ids)
+    if applied_count + pending_count:
+        _reopen_diagnostic_needs_for_rejected_items(repository, patch_id, diagnostic_reopen_candidates)
     return applied_count + pending_count
+
+
+def _diagnostic_reopen_candidates(
+    repository: Repository,
+    patch_id: str,
+    item_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    selected = set(item_ids) if item_ids else None
+    return [
+        item
+        for item in repository.proposal_items(patch_id)
+        if item["decision"] in {"pending", "accepted"}
+        and (selected is None or item["id"] in selected)
+        and _is_diagnostic_probe_item(item)
+    ]
+
+
+def _is_diagnostic_probe_item(item: dict[str, Any]) -> bool:
+    if item.get("item_type") != "practice_item" or item.get("operation") != "create":
+        return False
+    payloads = [item.get("payload")]
+    if item.get("edited_payload") is not None:
+        payloads.append(item.get("edited_payload"))
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("practice_mode") == "diagnostic_probe":
+            return True
+        attempt_types = payload.get("attempt_types_allowed")
+        if isinstance(attempt_types, list) and "diagnostic_probe" in attempt_types:
+            return True
+    return False
+
+
+def _reopen_diagnostic_needs_for_rejected_items(
+    repository: Repository,
+    patch_id: str,
+    candidate_items: list[dict[str, Any]],
+) -> None:
+    if not candidate_items:
+        return
+    queued_needs = repository.intervention_needs_for_diagnostic_proposal(patch_id)
+    if not queued_needs:
+        return
+    queued_by_id = {need["id"]: need for need in queued_needs}
+    matched: dict[str, str | None] = {}
+    unmatched_items: list[dict[str, Any]] = []
+    for item in candidate_items:
+        need_ids = _need_ids_for_diagnostic_item(item, queued_by_id, patch_id)
+        if need_ids:
+            for need_id in need_ids:
+                matched.setdefault(need_id, item["id"])
+        else:
+            unmatched_items.append(item)
+
+    remaining_patch_level_needs = [
+        need
+        for need in queued_needs
+        if need["id"] not in matched
+        and need.get("blocked_reason") == f"diagnostic_proposal_queued:{patch_id}"
+    ]
+    if len(unmatched_items) == 1 and len(remaining_patch_level_needs) == 1:
+        matched[remaining_patch_level_needs[0]["id"]] = unmatched_items[0]["id"]
+
+    for need_id, item_id in matched.items():
+        blocked_reason = f"diagnostic_proposal_rejected:{patch_id}"
+        if item_id:
+            blocked_reason = f"{blocked_reason}:{item_id}"
+        repository.update_intervention_need_status(
+            need_id,
+            status="pending",
+            blocked_reason=blocked_reason,
+        )
+
+
+def _need_ids_for_diagnostic_item(
+    item: dict[str, Any],
+    queued_by_id: dict[str, dict[str, Any]],
+    patch_id: str,
+) -> list[str]:
+    item_id = str(item["id"])
+    item_specific_reason = f"diagnostic_proposal_queued:{patch_id}:{item_id}"
+    item_specific = [
+        need_id
+        for need_id, need in queued_by_id.items()
+        if need.get("blocked_reason") == item_specific_reason
+    ]
+    if item_specific:
+        return item_specific
+
+    source_ref_ids = {str(ref_id) for ref_id in item.get("source_ref_ids") or []}
+    source_ref_matches = sorted(need_id for need_id in source_ref_ids if need_id in queued_by_id)
+    if source_ref_matches:
+        return source_ref_matches
+
+    client_item_id = str(item.get("client_item_id") or "")
+    return sorted(need_id for need_id in queued_by_id if need_id in client_item_id)
 
 
 def edit_proposal_item(
@@ -581,8 +681,98 @@ def delete_proposal_item(root: Path, patch_id: str, item_id: str) -> bool:
     return repository.delete_proposal_item(item_id)
 
 
-def accept_items(root: Path, patch_id: str, item_ids: list[str] | None = None) -> PatchApplyResult:
-    return apply_accepted_items(root, patch_id, item_ids)
+def accept_items(
+    root: Path,
+    patch_id: str,
+    item_ids: list[str] | None = None,
+    *,
+    clock: Clock | None = None,
+) -> PatchApplyResult:
+    vault = load_vault(root)
+    repository = Repository(VaultPaths(vault.root, vault.config).sqlite_path)
+    selected_items = repository.pending_proposal_items(patch_id, item_ids)
+    diagnostic_items = [item for item in selected_items if _is_diagnostic_probe_item(item)]
+    result = apply_accepted_items(root, patch_id, item_ids, clock=clock)
+    if result.applied_count and diagnostic_items:
+        _queue_accepted_diagnostic_followups_for_patch(repository, patch_id, diagnostic_items)
+    return result
+
+
+def queue_accepted_diagnostic_followups(
+    repository: Repository,
+    *,
+    patch_id: str | None = None,
+) -> int:
+    """Backfill queued follow-up actions for accepted diagnostic proposals.
+
+    New acceptances are queued by ``accept_items``. This reconciler handles
+    already-accepted diagnostic probes from before that handoff existed, so the
+    Today queue can still surface them as intervention follow-ups.
+    """
+
+    batches = [repository.proposal_batch(patch_id)] if patch_id else repository.proposal_batches()
+    queued = 0
+    for batch in batches:
+        if batch is None:
+            continue
+        accepted_diagnostics = [
+            item
+            for item in repository.proposal_items(batch["id"])
+            if item.get("decision") == "accepted" and _is_diagnostic_probe_item(item)
+        ]
+        queued += _queue_accepted_diagnostic_followups_for_patch(
+            repository,
+            batch["id"],
+            accepted_diagnostics,
+        )
+    return queued
+
+
+def _queue_accepted_diagnostic_followups_for_patch(
+    repository: Repository,
+    patch_id: str,
+    diagnostic_items: list[dict[str, Any]],
+) -> int:
+    queued_needs = repository.intervention_needs_for_diagnostic_proposal(patch_id)
+    if not queued_needs:
+        return 0
+    queued_by_id = {need["id"]: need for need in queued_needs}
+    queued_count = 0
+    for item in diagnostic_items:
+        practice_item_id = _accepted_practice_item_id(item)
+        if practice_item_id is None:
+            continue
+        for need_id in _need_ids_for_diagnostic_item(item, queued_by_id, patch_id):
+            attempt_id = queued_by_id[need_id].get("attempt_id")
+            if attempt_id and _append_intervention_queued_action(repository, str(attempt_id), practice_item_id):
+                queued_count += 1
+    return queued_count
+
+
+def _accepted_practice_item_id(item: dict[str, Any]) -> str | None:
+    payload = item.get("edited_payload") if item.get("edited_payload") is not None else item.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    entity_id = payload.get("id") or item.get("target_entity_id")
+    return str(entity_id) if entity_id else None
+
+
+def _append_intervention_queued_action(
+    repository: Repository,
+    attempt_id: str,
+    practice_item_id: str,
+) -> bool:
+    surprise = repository.latest_attempt_surprise(attempt_id)
+    if surprise is None:
+        return False
+    action = f"intervention_followup:queued:{practice_item_id}"
+    triggered_actions = list(surprise.get("triggered_actions") or [])
+    if action in triggered_actions:
+        return False
+    return repository.update_attempt_surprise_actions(
+        attempt_id,
+        triggered_actions=[*triggered_actions, action],
+    )
 
 
 def reset_items(
@@ -612,6 +802,10 @@ def _proposal_item_row(
     proposal: AuthoringProposal,
     provider: str,
 ) -> dict:
+    if item.item_type == "practice_item" and _looks_source_linked_generated(item):
+        # Mutate the model before dumping so the persisted payload and the validators
+        # (which re-dump item.payload) agree on the backfilled maps.
+        _backfill_practice_item_facet_weights(item, vault)
     payload = item.payload.model_dump(mode="json", exclude_none=True)
     if payload.get("id") is None and item.proposed_entity_id is not None:
         payload["id"] = item.proposed_entity_id
@@ -631,6 +825,7 @@ def _proposal_item_row(
         "target_entity_type": item.target.entity_type if item.target else None,
         "target_entity_id": item.target.entity_id if item.target else None,
         "payload": payload,
+        "source_ref_ids": list(item.source_ref_ids),
         "audit": item.audit.model_dump(mode="json", exclude_none=True) if item.audit is not None else None,
         "decision": "pending",
         "validation_status": validation_status,
@@ -664,6 +859,41 @@ def _provenance_for_refs(source_refs: list[dict[str, Any]], provider: str) -> di
     if any(source.get("ref_type") == "canonical_source" for source in source_refs):
         origin = "canonical_extract"
     return {"origin": origin, "source_refs": source_refs}
+
+
+def _backfill_practice_item_facet_weights(item: AuthoringProposalItem, vault: LoadedVault) -> None:
+    """Derive the facet-weight maps the authoring model commonly omits.
+
+    ``evidence_weights`` / ``criterion_facet_weights`` are optional in the authoring
+    schema, so generated diagnostic probes routinely arrive without them and trip the
+    ``metadata_review:missing_*`` review warnings on every diagnostic review. Both are
+    recoverable from data already on the payload, so we fill the unambiguous cases here
+    (mirroring the ``provenance`` backfill above) rather than relying on LLM compliance:
+
+    - ``evidence_weights``: a uniform normalized distribution over ``evidence_facets``.
+    - ``criterion_facet_weights``: when the item has a *single* evidence facet, every
+      rubric criterion maps to it with weight ``1.0``. With multiple facets the
+      criterion->facet assignment is not derivable, so it is left for human review.
+
+    Mutates ``item.payload`` in place (only missing/empty maps are filled, so
+    author-supplied weights are never overwritten) so the persisted payload and the
+    re-dumping validators stay in agreement.
+    """
+
+    payload = item.payload
+    evidence_facets = [str(facet) for facet in (getattr(payload, "evidence_facets", None) or []) if str(facet)]
+    if not evidence_facets:
+        return
+    if not (getattr(payload, "evidence_weights", None) or {}):
+        share = 1.0 / len(evidence_facets)
+        payload.evidence_weights = {facet: share for facet in evidence_facets}
+    if not (getattr(payload, "criterion_facet_weights", None) or {}) and len(evidence_facets) == 1:
+        facet = evidence_facets[0]
+        criterion_ids = _rubric_criterion_ids(payload.model_dump(mode="json", exclude_none=True), vault, None)
+        if criterion_ids:
+            payload.criterion_facet_weights = {
+                criterion_id: {facet: 1.0} for criterion_id in sorted(criterion_ids)
+            }
 
 
 def _has_direct_grounding(source_refs: list[SourceRef], source_ref_ids: list[str]) -> bool:
@@ -868,12 +1098,60 @@ def _practice_item_metadata_errors(
     weight_sum = sum(max(0.0, weight) for facet, weight in evidence_weights.items() if facet in evidence_facets)
     if generated and evidence_weights and weight_sum <= 0:
         errors.append("empty_evidence_weight_sum")
+    errors.extend(_practice_item_rubric_errors(payload))
     criterion_ids = _rubric_criterion_ids(payload, vault, proposal)
     for criterion_id, facet_weights in criterion_facet_weights.items():
         if criterion_id not in criterion_ids:
             errors.append(f"unknown_criterion_facet_criterion:{criterion_id}")
         for facet in sorted(set(facet_weights) - set(evidence_facets)):
             errors.append(f"unknown_criterion_facet_facet:{facet}")
+    return errors
+
+
+def _practice_item_rubric_errors(payload: dict[str, Any]) -> list[str]:
+    rubric = payload.get("grading_rubric")
+    if not isinstance(rubric, dict):
+        return []
+
+    errors: list[str] = []
+    try:
+        max_points = float(rubric.get("max_points", 4))
+    except (TypeError, ValueError):
+        return ["invalid_grading_rubric:max_points"]
+    if max_points <= 0:
+        errors.append("invalid_grading_rubric:max_points")
+    if max_points > 4:
+        errors.append("invalid_grading_rubric:max_points_exceeds_grading_scale")
+
+    total_points = 0.0
+    criteria = rubric.get("criteria")
+    if isinstance(criteria, list):
+        for criterion in criteria:
+            if not isinstance(criterion, dict):
+                continue
+            try:
+                points = float(criterion.get("points", 0))
+            except (TypeError, ValueError):
+                errors.append(f"invalid_grading_rubric:criterion_points:{criterion.get('id') or 'unknown'}")
+                continue
+            if points <= 0 or points > 4:
+                errors.append(f"invalid_grading_rubric:criterion_points:{criterion.get('id') or 'unknown'}")
+            total_points += max(points, 0.0)
+    if criteria and total_points > max_points + 1e-6:
+        errors.append("invalid_grading_rubric:criteria_points_exceed_max_points")
+
+    fatal_errors = rubric.get("fatal_errors")
+    if isinstance(fatal_errors, list):
+        for fatal_error in fatal_errors:
+            if not isinstance(fatal_error, dict):
+                continue
+            try:
+                max_grade = float(fatal_error.get("max_grade", 0))
+            except (TypeError, ValueError):
+                errors.append(f"invalid_grading_rubric:fatal_max_grade:{fatal_error.get('id') or 'unknown'}")
+                continue
+            if max_grade < 0 or max_grade > min(max_points, 4):
+                errors.append(f"invalid_grading_rubric:fatal_max_grade:{fatal_error.get('id') or 'unknown'}")
     return errors
 
 

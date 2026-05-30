@@ -53,38 +53,38 @@ repair_targets:
   - fatal_encoder_masking
   - fatal_no_autoregression
 grading_rubric:
-  max_points: 6
+  max_points: 4
   criteria:
     - id: autoregressive_property
-      points: 1.5
+      points: 1.0
       description: Identifies the broken property as autoregressive prediction 
         or no future leakage.
     - id: future_leakage
-      points: 1.0
+      points: 0.666667
       description: Explains that later target tokens would leak information.
     - id: masking_mechanism
-      points: 1.5
+      points: 1.0
       description: States that future positions are masked out in 
         self-attention.
     - id: allowed_positions
-      points: 1.0
+      points: 0.666667
       description: States that a position may attend only to earlier positions 
         and itself.
     - id: offset_embeddings
-      points: 0.5
+      points: 0.333333
       description: Mentions the offset output embeddings if included.
     - id: specific_to_decoder
-      points: 0.5
+      points: 0.333333
       description: Keeps the explanation specific to decoder self-attention, not
         encoder attention.
   fatal_errors:
     - id: fatal_encoder_masking
       description: Claims the encoder must use this same causal mask for the 
         same reason.
-      max_grade: 3
+      max_grade: 2
     - id: fatal_no_autoregression
       description: Does not identify autoregression or future-token leakage.
-      max_grade: 3
+      max_grade: 2
 provenance:
   origin: canonical_extract
   source_refs:

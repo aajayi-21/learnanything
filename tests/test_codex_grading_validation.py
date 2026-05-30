@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from learnloop.codex.schemas import CriterionEvidence, ErrorAttribution, GradingProposal
+from learnloop.codex.schemas import CriterionEvidence, ErrorAttribution, GradingProposal, RepairSuggestion
 from learnloop.services.grading import GradingValidationError, validate_codex_grading_proposal
 from learnloop.vault.loader import load_vault
 
@@ -126,6 +126,67 @@ def test_codex_error_attribution_unknown_target_family_routes_to_manual_review(t
     assert validated.error_attributions[0].target_evidence_families == []
 
 
+def test_repair_suggestion_target_families_are_canonicalized(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    vault = load_vault(vault_root)
+    item = vault.practice_items["pi_svd_define_001"].model_copy(
+        update={"evidence_facets": ["recall", "numeric"], "evidence_weights": {"recall": 0.5, "numeric": 0.5}}
+    )
+    proposal = _proposal(
+        repair_suggestions=[
+            RepairSuggestion(
+                practice_mode="targeted_review",
+                rationale="Fix numeric setup.",
+                target_evidence_families=["numeric"],
+            )
+        ]
+    )
+
+    validated = validate_codex_grading_proposal(
+        proposal,
+        attempt_id="attempt_1",
+        item=item,
+        vault=vault,
+    )
+
+    assert validated.manual_review_reason is None
+    assert validated.repair_suggestions == [
+        {
+            "practice_mode": "targeted_review",
+            "learning_object_id": None,
+            "rationale": "Fix numeric setup.",
+            "target_evidence_families": ["numeric"],
+        }
+    ]
+
+
+def test_unknown_repair_suggestion_target_family_routes_to_manual_review(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    vault = load_vault(vault_root)
+    item = vault.practice_items["pi_svd_define_001"]
+    proposal = _proposal(
+        repair_suggestions=[
+            RepairSuggestion(
+                practice_mode="targeted_review",
+                rationale="Fix the missing facet.",
+                target_evidence_families=["missing_facet"],
+            )
+        ]
+    )
+
+    validated = validate_codex_grading_proposal(
+        proposal,
+        attempt_id="attempt_1",
+        item=item,
+        vault=vault,
+    )
+
+    assert validated.manual_review_reason == "unknown_target_evidence_family:missing_facet"
+    assert validated.repair_suggestions[0]["target_evidence_families"] == []
+
+
 def test_codex_grade_rejects_mismatched_attempt_and_item(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)
@@ -232,6 +293,7 @@ def _proposal(
     evidence: str = "Confuses details.",
     target_evidence_families: list[str] | None = None,
     target_criterion_ids: list[str] | None = None,
+    repair_suggestions: list[RepairSuggestion] | None = None,
 ) -> GradingProposal:
     return GradingProposal(
         attempt_id=attempt_id,
@@ -256,4 +318,5 @@ def _proposal(
             )
         ],
         grader_confidence=0.9,
+        repair_suggestions=repair_suggestions or [],
     )

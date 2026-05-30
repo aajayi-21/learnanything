@@ -1,0 +1,13 @@
+schema_version: 1
+goals:
+  - id: goal_parabolas
+    title: YouTube video hvJkCMzFiX8
+    status: active
+    priority: 0.5
+    concept_anchors:
+      - concept_complete_square_to_vertex_form
+      - concept_graph_parabola_standard_form
+      - concept_parabola_focus_directrix
+    due_at:
+    created_at: '2026-05-30T00:57:59Z'
+    updated_at: '2026-05-30T00:57:59Z'

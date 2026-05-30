@@ -289,6 +289,7 @@ class SchedulerFollowupConfig(BaseModel):
     max_interventions_per_lo_per_session: int = 1
     cold_start_min_lo_evidence: float = 2.0
     min_target_facet_overlap: float = 0.5
+    max_diagnostic_target_facets: int = 2
 
 
 class SchedulerConfig(BaseModel):
@@ -352,6 +353,21 @@ class ProbeConfig(BaseModel):
     hypothesis_set_max_size: int = 5
     irt: ProbeIRTConfig = Field(default_factory=ProbeIRTConfig)
     self_tag: ProbeSelfTagConfig = Field(default_factory=ProbeSelfTagConfig)
+
+
+class PracticeGenerationConfig(BaseModel):
+    """Difficulty-calibration targets for authored Practice Items and probes.
+
+    Difficulty is calibrated to a target *success rate* (research_on_learning.md
+    §8/§10), inverted through the mastery 2PL link at the learner's ability.
+    Practice items sit in the desirable-difficulty band - effortful but usually
+    successful. Probes sit on the learner's boundary, where outcome variance (and
+    thus diagnostic information / EIG) is maximized. Each band is ``(low, high)``
+    on the success-probability scale.
+    """
+
+    practice_success_band: tuple[float, float] = (0.70, 0.85)
+    probe_success_band: tuple[float, float] = (0.45, 0.55)
 
 
 class SeverityExampleConfig(BaseModel):
@@ -552,6 +568,7 @@ class LearnLoopConfig(BaseModel):
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
     recall_coverage: RecallCoverageConfig = Field(default_factory=RecallCoverageConfig)
     facet_diagnostic: FacetDiagnosticConfig = Field(default_factory=FacetDiagnosticConfig)
+    practice_generation: PracticeGenerationConfig = Field(default_factory=PracticeGenerationConfig)
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     ai: AIConfig = Field(default_factory=AIConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)

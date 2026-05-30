@@ -1042,7 +1042,7 @@ def _extract_html_markdown(raw_html: str) -> dict[str, Any]:
         extracted = None
     else:
         extracted = trafilatura.extract(raw_html, output_format="markdown", include_tables=True, include_comments=False)
-    if extracted:
+    if extracted and (_first_markdown_heading(extracted) or not _first_markdown_heading(markdown)):
         markdown = extracted
     return {
         "markdown": markdown,
@@ -1287,10 +1287,11 @@ def _proposal_with_locator_validation(
             rewritten_refs.append(ref.model_dump(mode="json", exclude_none=True))
             continue
         path = ref.path or registered.path
-        if ref.locator is not None and not _locator_resolves(window.chunks, ref.locator):
-            path = f"{registered.path}#unresolved-locator:{ref.locator}"
+        locator = ref.locator or _time_locator_from_ref_id(ref.ref_id)
+        if locator is not None and not _locator_resolves(window.chunks, locator):
+            path = f"{registered.path}#unresolved-locator:{locator}"
         rewritten_refs.append(
-            ref.model_copy(update={"path": path}).model_dump(mode="json", exclude_none=True)
+            ref.model_copy(update={"path": path, "locator": locator}).model_dump(mode="json", exclude_none=True)
         )
     for ref_id in _missing_source_ref_ids(proposal, known_ref_ids):
         ref = _canonical_source_ref_from_id(ref_id, registered, window)
@@ -1336,6 +1337,13 @@ def _canonical_source_ref_from_id(
 
 
 def _time_locator_from_ref_id(ref_id: str) -> str | None:
+    match = re.search(r"(?:^|[:#?&])t=(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$", ref_id)
+    if match:
+        start = float(match.group(1))
+        end = float(match.group(2))
+        if end <= start:
+            return None
+        return f"t={start:.1f}-{end:.1f}"
     match = re.search(r"_(\d+(?:p\d+)?)_(\d+(?:p\d+)?)$", ref_id)
     if not match:
         return None

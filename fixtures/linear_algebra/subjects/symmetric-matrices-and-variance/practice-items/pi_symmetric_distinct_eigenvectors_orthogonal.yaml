@@ -46,19 +46,19 @@ repair_targets:
   - fatal_assumes_all_eigenvectors_orthogonal
   - fatal_omits_symmetry_condition
 grading_rubric:
-  max_points: 5
+  max_points: 4
   criteria:
     - id: criterion_uses_symmetric_dot_identity
-      points: 1.5
+      points: 1.2
       description: Correctly uses (Au) dot v = u dot (Av) for symmetric A.
     - id: criterion_substitutes_eigen_equations
-      points: 1.5
+      points: 1.2
       description: Substitutes Au = lambda u and Av = mu v correctly.
     - id: criterion_distinct_eigenvalues_argument
-      points: 1.0
+      points: 0.8
       description: Uses lambda != mu to force u dot v = 0.
     - id: criterion_orthogonality_conclusion
-      points: 1.0
+      points: 0.8
       description: States that u and v are orthogonal.
   fatal_errors:
     - id: fatal_assumes_all_eigenvectors_orthogonal

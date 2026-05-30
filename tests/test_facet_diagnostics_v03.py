@@ -101,7 +101,7 @@ def test_subthreshold_noisy_item_creates_single_facet_generation_need_and_logs_s
     noisy = next(row for row in slate if row["practice_item_id"] == "pi_noisy_recall")
     assert noisy["gate_passed"] is False
     assert noisy["filtered_reason"] == "subthreshold_overlap"
-    assert noisy["target_overlap"] == pytest.approx(1 / 3)
+    assert noisy["target_precision"] == pytest.approx(1 / 3)
     assert features["context"]["generation_need_id"] == need["id"]
     plan = build_diagnostic_practice_plan(loaded, repository, learning_object_id=result.learning_object_id)
     assert plan.targets[0].need_id == need["id"]
@@ -152,7 +152,9 @@ def test_single_facet_probe_passes_gate_even_with_multiple_open_facets(tmp_path)
     features = repository.decision_features(decision_id=result.attempt_id, decision_type="followup")
     clean = next(row for row in features["context"]["candidate_slate"] if row["practice_item_id"] == "pi_clean_recall")
     assert clean["dominant_target_facet"] == "recall"
-    assert clean["target_overlap"] == 1.0
+    assert clean["diagnostic_gate_facets"] == ["alpha", "beta", "recall"]
+    assert clean["diagnostic_gate_source"] == "failed-set"
+    assert clean["target_precision"] == 1.0
     assert clean["gate_passed"] is True
     assert "recall" in features["ability_vector"]["facet_hypothesis_prior"]
     assert "recall" in features["item_demand_vector"]["per_facet_eig"]
@@ -380,3 +382,100 @@ def test_mastery_diagnostic_view_distinguishes_known_gap_from_unexamined(tmp_pat
 
     assert states["recall"] == "known_gap"
     assert states["other"] == "unexamined"
+
+
+def test_diagnostic_plan_carries_grader_repair_rationales(tmp_path):
+    root = tmp_path / "vault"
+    paths = create_basic_vault(root)
+    loaded = load_vault(root)
+    repository = Repository(paths.sqlite_path)
+    result = _wrong_attempt(loaded, repository)
+
+    decision = evaluate_intervention_followup(
+        loaded,
+        repository,
+        attempt_id=result.attempt_id,
+        learning_object_id=result.learning_object_id,
+        practice_item_id=result.practice_item_id,
+        surprise_direction="negative",
+        bayesian_surprise=1.0,
+        grader_confidence=result.grader_confidence,
+        error_event_written=True,
+        max_error_severity=0.9,
+        target_facets=["recall"],
+        available_minutes=30,
+    )
+    assert decision.need_id is not None
+
+    repository.upsert_attempt_feedback_metadata(
+        attempt_id=result.attempt_id,
+        grading_source="codex",
+        repair_suggestions=[
+            {"practice_mode": "targeted_review", "rationale": "Contrast symmetric and orthogonal matrices."},
+            {"practice_mode": "worked_example", "rationale": "Study a full proof deriving the dot product identity."},
+            {"rationale": "   "},
+        ],
+    )
+
+    plan = build_diagnostic_practice_plan(loaded, repository, learning_object_id=result.learning_object_id)
+    target = plan.targets[0]
+    assert target.repair_rationales == [
+        {"rationale": "Contrast symmetric and orthogonal matrices.", "practice_mode": "targeted_review"},
+        {"rationale": "Study a full proof deriving the dot product identity.", "practice_mode": "worked_example"},
+    ]
+    assert "repair_rationales" in target.as_dict()
+
+
+def test_need_target_builder_freezes_structured_repair_focus(tmp_path):
+    root = tmp_path / "vault"
+    paths = create_basic_vault(root)
+    loaded = load_vault(root)
+    repository = Repository(paths.sqlite_path)
+    result = _wrong_attempt(loaded, repository)
+    repository.upsert_attempt_feedback_metadata(
+        attempt_id=result.attempt_id,
+        grading_source="codex",
+        repair_suggestions=[
+            {
+                "practice_mode": "targeted_review",
+                "rationale": "Contrast the definition with a supporting mechanism.",
+                "target_evidence_families": ["supporting_mechanism"],
+            }
+        ],
+    )
+
+    decision = evaluate_intervention_followup(
+        loaded,
+        repository,
+        attempt_id=result.attempt_id,
+        learning_object_id=result.learning_object_id,
+        practice_item_id=result.practice_item_id,
+        surprise_direction="negative",
+        bayesian_surprise=1.0,
+        grader_confidence=result.grader_confidence,
+        error_event_written=True,
+        max_error_severity=0.9,
+        target_facets=["recall"],
+        available_minutes=30,
+    )
+
+    assert decision.need_id is not None
+    need = repository.intervention_need_for_attempt(result.attempt_id)
+    assert need["target_facets"] == ["recall", "supporting_mechanism"]
+    assert need["diagnostic_focus"]["primary_target_facet"] == "recall"
+    assert need["diagnostic_focus"]["diagnostic_gate_source"] == "enriched"
+    assert need["diagnostic_focus"]["repair_rationales"] == [
+        {
+            "rationale": "Contrast the definition with a supporting mechanism.",
+            "practice_mode": "targeted_review",
+            "target_evidence_families": ["supporting_mechanism"],
+        }
+    ]
+
+    features = repository.decision_features(decision_id=result.attempt_id, decision_type="followup")
+    assert features["context"]["diagnostic_focus"] == need["diagnostic_focus"]
+    plan = build_diagnostic_practice_plan(loaded, repository, learning_object_id=result.learning_object_id)
+    target = plan.targets[0]
+    assert target.target_facets == ["recall", "supporting_mechanism"]
+    assert target.diagnostic_focus == need["diagnostic_focus"]
+    assert target.repair_rationales[0]["target_evidence_families"] == ["supporting_mechanism"]

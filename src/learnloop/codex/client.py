@@ -399,8 +399,10 @@ _PRACTICE_METADATA_GUIDANCE = (
     "For every generated Practice Item, include reward-facing metadata: "
     "`evidence_facets`, `evidence_weights`, `criterion_facet_weights` when a rubric "
     "exists, `retrieval_demand`, `transfer_distance`, `scaffold_level`, "
-    "`surface_family`, and `repair_targets`. `repair_targets` must name evidence "
-    "facets or rubric fatal error ids."
+    "`surface_family`, and `repair_targets`. Generated grading rubrics must stay on "
+    "the LearnLoop 0-4 grading scale: set `max_points` to 4 or less, and make rubric "
+    "criterion points sum to `max_points`. `repair_targets` must name evidence facets "
+    "or rubric fatal error ids."
 )
 
 
@@ -460,6 +462,9 @@ def _grading_prompt(context: GradingContext) -> str:
                 "failure. For each error_attribution, fill "
                 "`target_criterion_ids` and/or `target_evidence_families` with "
                 "the rubric line(s) and item evidence facet(s) most directly affected. "
+                "For each repair_suggestion, also fill `target_evidence_families` "
+                "with the narrow item evidence facet(s) the learner-facing repair "
+                "rationale is meant to diagnose or repair. "
                 "Use the supplied `error_taxonomy.selection_policy` and "
                 "`error_taxonomy.targeting_policy` exactly."
             ),

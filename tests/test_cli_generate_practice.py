@@ -9,9 +9,11 @@ from typer.testing import CliRunner
 from learnloop.cli import app
 from learnloop.clock import FrozenClock
 from learnloop.db.repositories import MasteryState, Repository
+from learnloop.services.proposals import queue_accepted_diagnostic_followups
+from learnloop.services.scheduler import build_due_queue
 from learnloop.vault.loader import load_vault
 
-from tests.helpers import NOW, NOW_ISO, create_basic_vault
+from tests.helpers import ALGORITHM_VERSION, NOW, NOW_ISO, create_basic_vault
 
 
 def test_generate_practice_dry_run_targets_completed_probe(tmp_path):
@@ -83,7 +85,8 @@ def test_generate_diagnostics_dry_run_targets_pending_intervention_need(tmp_path
     assert target["source_practice_item_id"] == "pi_svd_define_001"
     assert target["source_prompt"] == "Define SVD."
     assert target["candidate_requirements"] == {"avoid_practice_item_ids": ["pi_svd_define_001"]}
-    assert target["recommended_difficulty_band"] == [0.45, 0.65]
+    # No facet/mastery evidence -> ability 0.5 -> probe sits on the boundary (~50% success).
+    assert target["recommended_difficulty_band"] == [0.46, 0.54]
 
 
 def test_generate_diagnostics_reports_no_pending_needs(tmp_path):
@@ -182,6 +185,106 @@ def test_generate_diagnostics_runs_codex_http_and_marks_need_fulfilled(tmp_path)
     assert status["blocked_reason"].startswith("diagnostic_proposal_queued:")
 
 
+def test_accepting_diagnostic_proposal_queues_today_followup(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    need_id = _seed_diagnostic_need(repository)
+    _seed_diagnostic_surprise(repository, need_id)
+    checkout = tmp_path / "codex"
+    checkout.mkdir()
+    (checkout / "HEAD").write_text("abc123", encoding="utf-8")
+    server = _ProposalServer(_diagnostic_proposal_payload())
+    server.start()
+    try:
+        _configure_codex(vault_root, checkout, server.base_url)
+        runner = CliRunner()
+        generated = runner.invoke(
+            app,
+            [
+                "generate-diagnostics",
+                "--vault",
+                str(vault_root),
+                "--json",
+            ],
+        )
+    finally:
+        server.stop()
+
+    assert generated.exit_code == 0, generated.output
+    patch_id = json.loads(generated.output)["proposal_id"]
+
+    accepted = runner.invoke(app, ["accept", patch_id, "--vault", str(vault_root)])
+
+    assert accepted.exit_code == 0, accepted.output
+    surprise = repository.latest_attempt_surprise("attempt_svd_recall_gap")
+    assert "intervention_followup:queued:pi_svd_recall_diagnostic_001" in surprise["triggered_actions"]
+    repository.update_attempt_surprise_actions(
+        "attempt_svd_recall_gap",
+        triggered_actions=["intervention_followup:severe_error_event:pi_svd_define_001"],
+    )
+    assert queue_accepted_diagnostic_followups(repository) == 1
+    assert queue_accepted_diagnostic_followups(repository) == 0
+    queue = build_due_queue(load_vault(vault_root), repository, clock=FrozenClock(NOW), persist_explanations=False)
+    assert queue[0].practice_item_id == "pi_svd_recall_diagnostic_001"
+    assert queue[0].components["intervention_followup"] == 1.0
+
+
+def test_rejecting_review_required_diagnostic_reopens_need_for_regeneration(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    need_id = _seed_diagnostic_need(repository)
+    checkout = tmp_path / "codex"
+    checkout.mkdir()
+    (checkout / "HEAD").write_text("abc123", encoding="utf-8")
+    server = _ProposalServer(_diagnostic_proposal_payload())
+    server.start()
+    try:
+        _configure_codex(vault_root, checkout, server.base_url)
+        runner = CliRunner()
+        generated = runner.invoke(
+            app,
+            [
+                "generate-diagnostics",
+                "--vault",
+                str(vault_root),
+                "--json",
+            ],
+        )
+    finally:
+        server.stop()
+
+    assert generated.exit_code == 0, generated.output
+    patch_id = json.loads(generated.output)["proposal_id"]
+    item = repository.proposal_items(patch_id)[0]
+
+    rejected = runner.invoke(app, ["reject", patch_id, "--vault", str(vault_root)])
+
+    assert rejected.exit_code == 0, rejected.output
+    with repository.connection() as connection:
+        status = connection.execute(
+            "SELECT status, blocked_reason FROM intervention_needs WHERE id = ?",
+            (need_id,),
+        ).fetchone()
+    assert status["status"] == "pending"
+    assert status["blocked_reason"] == f"diagnostic_proposal_rejected:{patch_id}:{item['id']}"
+
+    dry_run = runner.invoke(
+        app,
+        [
+            "generate-diagnostics",
+            "--vault",
+            str(vault_root),
+            "--dry-run",
+            "--json",
+        ],
+    )
+    assert dry_run.exit_code == 0, dry_run.output
+    target = json.loads(dry_run.output)["plan"]["targets"][0]
+    assert target["need_id"] == need_id
+
+
 def test_generate_diagnostics_resolves_diagnostic_need_source_refs(tmp_path):
     vault_root = tmp_path / "vault"
     paths = create_basic_vault(vault_root)
@@ -213,6 +316,7 @@ def test_generate_diagnostics_resolves_diagnostic_need_source_refs(tmp_path):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     item = repository.proposal_items(payload["proposal_id"])[0]
+    assert item["source_ref_ids"] == [need_id]
     assert item["validation_status"] == "valid"
     assert not any(error.startswith("unresolved_source_ref:") for error in item["validation_errors"])
     batch = repository.proposal_batch(payload["proposal_id"])
@@ -268,6 +372,49 @@ def _seed_diagnostic_need(repository: Repository, *, need_id: str = "need_svd_re
             "candidate_requirements": {"avoid_practice_item_ids": ["pi_svd_define_001"]},
             "created_at": NOW_ISO,
             "updated_at": NOW_ISO,
+        }
+    )
+
+
+def _seed_diagnostic_surprise(repository: Repository, need_id: str) -> None:
+    repository.insert_practice_attempt(
+        {
+            "id": "attempt_svd_recall_gap",
+            "practice_item_id": "pi_svd_define_001",
+            "learning_object_id": "lo_svd_definition",
+            "subject": "linear-algebra",
+            "concept": "singular_value_decomposition",
+            "practice_mode": "short_answer",
+            "attempt_type": "independent_attempt",
+            "learner_answer_md": "I do not remember.",
+            "evidence_facets": ["recall"],
+            "evidence_weights": {"recall": 1.0},
+            "rubric_score": 0,
+            "correctness": 0.0,
+            "confidence": 4,
+            "latency_seconds": 10,
+            "hints_used": 0,
+            "error_type": "conceptual_slip",
+            "grader_confidence": 1.0,
+            "created_at": NOW_ISO,
+            "updated_at": NOW_ISO,
+        }
+    )
+    repository.insert_attempt_surprise(
+        {
+            "attempt_id": "attempt_svd_recall_gap",
+            "predicted_score_dist": {"expected_correctness": 0.8},
+            "predicted_error_type_dist": {},
+            "observed_joint_bucket": {"score_bucket": "low", "error_type": "recall_failure"},
+            "predictive_surprise": 1.0,
+            "bayesian_surprise": 2.0,
+            "surprise_direction": "negative",
+            "fsrs_interval_factor": 0.5,
+            "posterior_delta": {},
+            "triggered_actions": ["intervention_followup:severe_error_event:pi_svd_define_001"],
+            "suppressed_actions": [f"intervention_followup:no_suitable_item:{need_id}"],
+            "algorithm_version": ALGORITHM_VERSION,
+            "created_at": NOW_ISO,
         }
     )
 

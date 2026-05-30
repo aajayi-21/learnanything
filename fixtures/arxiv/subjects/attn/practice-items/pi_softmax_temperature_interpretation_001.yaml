@@ -51,26 +51,26 @@ repair_targets:
   - sampling_variability
   - fatal_temperature_reversed
 grading_rubric:
-  max_points: 5
+  max_points: 4
   criteria:
     - id: higher_more_uniform
-      points: 1.0
+      points: 0.8
       description: States that higher temperature makes the distribution more 
         uniform or spread out.
     - id: higher_lower_values_weight
-      points: 1.0
+      points: 0.8
       description: States that higher temperature gives more relative weight to 
         lower-logit/lower-value tokens.
     - id: lower_more_peaked
-      points: 1.0
+      points: 0.8
       description: States that lower temperature makes the distribution more 
         peaked around larger values.
     - id: zero_argmax_limit
-      points: 1.0
+      points: 0.8
       description: States that near zero temperature puts all or nearly all 
         weight on the maximum value.
     - id: sampling_consequence
-      points: 1.0
+      points: 0.8
       description: Connects the distribution shape to more varied versus more 
         predictable sampling.
   fatal_errors:

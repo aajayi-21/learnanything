@@ -11,7 +11,7 @@ existing EIG plumbing becomes *efficacious* (it currently is not wired into the
 follow-up path at all) and so the decision is logged at a grain that
 `learning_outcome_labels` can later be regressed against per facet.
 
-Status: proposal / direction. Written 2026-05-28; revised 2026-05-28 — corrected the
+Status: implemented in current worktree. Written 2026-05-28; revised 2026-05-28 — corrected the
 §1B.2 coverage formula (1/N normalization bug), serialized the facet `hypothesis_marginal`
 (§1.4), pinned `learner_confidence` to raw `grading_evidence` (§1.3), made the §2.4 gate
 enforce `min_target_facet_overlap` (not just non-empty overlap), reconciled multi-facet
@@ -20,18 +20,38 @@ consistency fixes against the live code: (1) §1B coverage is wired into the
 `observation_weight_override` the live path actually consumes (the `effective_coverage`
 argument to `resolve_error_impact`), not the short-circuited `evidence_coverage` term;
 (2) added the §1B.2 open-facet restriction so a disjoint attempt is *literally* ≈0, not
-merely attenuated under `kappa_uncertain`; (3) the §2.4 eligibility gate keys on the
-need's single dominant facet, not the full failed set (Jaccard 1/N would reject a clean
-single-facet probe for N ≥ 3); (4) facet EIG is an importance-weighted sum of
+merely attenuated under `kappa_uncertain`; (3) the §2.4 eligibility gate keys on a
+primary `dominant_target_facet` plus target precision, not Jaccard against the full
+failed set (Jaccard 1/N would reject a clean single-facet probe for N ≥ 3); (4) facet
+EIG is an importance-weighted sum of
 independent per-facet marginals over the grader's per-facet `facet_outcomes`, not one
 joint set over the global score bucket. Revised 2026-05-29 (round 2) — removed the
-dominant-facet gate circularity (derive `dominant_target_facet` before selection and
-reuse it as the need target), replaced attempt-time `covered_facets(item)` with a static
+dominant-facet gate circularity (derive `dominant_target_facet` before selection),
+replaced attempt-time `covered_facets(item)` with a static
 `candidate_facet_support(item)` for selection-time gating/EIG, added `tau_facet_share` /
 `min_facet_evidence_mass` so incidental annotation can't count as covered, and called for
 a dedicated `facet_expected_information_gain` rather than reusing the global-outcome EIG.
 Revised 2026-05-29 (round 3) — added the known-gap honest-UI distinction (§1B.7) and
-follow-up candidate-slate logging (§2.6). Not yet implemented.
+follow-up candidate-slate logging (§2.6). Revised 2026-05-29 (round 4) — split the
+follow-up gate's single `dominant_target_facet` from the generated need's assessed
+`target_facets`, and added rationale-driven target enrichment from structured grader
+repair-suggestion facets (§2.7 / §3.2). Revised 2026-05-29 (round 5) — reconciled §2.4
+against the landed code: the live gate's `_jaccard(candidate_facet_support, {dominant_target_facet})`
+is *algebraically* the precision gate evaluated on a singleton reference set, not a rival
+metric, so the fix is to feed it a richer reference set, not to change the metric; pinned
+the explicit `diagnostic_gate_facets → failed set → {dominant_target_facet}` fallback
+chain; retired Jaccard from the gate (its symmetry leaks *recall* into a test that should
+be pure precision, which is the real cause of the `1/N` rejection the round-3 note blamed
+on "the full failed set"); showed the failed set is a *safe* interim reference under
+precision (so §7 Phase 1 need not fall back to the bare singleton); and made the
+gate/cap coupling explicit (§2.4 / §2.7). Implemented in the current worktree:
+Workstreams 1 / 1B / 2 core landed in `a02b11e` (`facet_uncertainty`,
+`facet_expected_information_gain`, `candidate_facet_support`, EIG-ranked
+`_choose_intervention_item` + slate logging, known-gap detection, the
+`learner_confidence` field), and the remaining §2.4 / §2.7 pieces now land on top:
+the enriched-reference `target_precision` gate, structured
+`RepairSuggestion.target_evidence_families`, frozen `diagnostic_focus_json`, and the
+need-time target/focus scorer.
 
 ---
 
@@ -532,42 +552,116 @@ regardless of EIG ranking. A non-empty-only gate would still admit a *noisy* ite
 target facet buried among many unrelated ones, Jaccard ≈ `1/(1+k) ≪ 0.5` — which is
 exactly the off-target probe this workstream exists to stop.
 
-**Measure overlap against a pre-derived dominant target facet, with static candidate
+**Measure overlap against a pre-derived diagnostic gate target, with static candidate
 support.** The gate is
 
 ```
-Jaccard(candidate_facet_support(item), {dominant_target_facet}) ≥ min_target_facet_overlap
+dominant_target_facet ∈ candidate_facet_support(item)
+AND
+target_precision(candidate_facet_support(item), diagnostic_gate_facets)
+  ≥ min_target_facet_overlap
+
+where target_precision = |candidate_facet_support ∩ diagnostic_gate_facets|
+                         / |candidate_facet_support|
 ```
 
-and **both operands are computable at selection, before any need exists** — closing the
-circularity the earlier draft had (it keyed the gate on "the current need's dominant
-facet" while the need was created only *after* the gate):
+and **all operands are computable at selection, before any need exists** — closing the
+circularity the earlier draft had (it keyed the gate on "the current need's target"
+while the need was created only *after* the gate):
 
 - `dominant_target_facet` is derived *ahead of* selection by ranking the open
-  `facet_uncertainty` rows by `uncertainty · max_error_severity` (the §3.2 ranking,
-  pulled earlier) and taking the top facet. It is a pure function of belief state, so it
-  needs no need to exist — it is a **virtual need target** that the gate and §3.2
-  generation share, and that §3.2 then **reuses verbatim** as the upserted need's
-  `target_facets`. One value derived once, not two.
+  `facet_uncertainty` rows by the §3.2 / §2.7 target score and taking the top facet. It
+  is the **primary gate facet**: a candidate that does not exercise it is not a
+  diagnostic follow-up for this need.
+- `diagnostic_gate_facets` is the **best available reference set**, resolved by a strict
+  fallback chain so the gate is well-defined at every rollout phase:
+  1. the enriched, **capped, grader-attested** assessed target set from §2.7 / §3.2
+     (failed facets ∪ grader error-attribution targets ∪ structured repair-suggestion
+     targets, scored and capped per the §2.7 builder) — the Phase-C reference;
+  2. failing that (pre-Phase-C, no enrichment yet), the raw **failed facet set**
+     (`_target_facets_from_debug`, `services/followups.py:328`) — a *safe* interim under
+     a precision metric (see "Reconciling the live gate" below);
+  3. failing that (cold LO, no failed/target metadata), the singleton
+     `{dominant_target_facet}`.
+  Rung 3 is exactly what the live code measures against unconditionally today; rungs 1–2
+  are the enrichment this section adds.
 - `candidate_facet_support(item)` is the **static** support from §2.2
   (`repair_targets or evidence_facets`), never the attempt-time `covered_facets`.
 
-Against a singleton target `{f}`, `Jaccard(support, {f})` reduces to `1/|support|` — the
-*fraction of the candidate's facets that is the target*, which is exactly the noisy-item
-precision measure. So `min_target_facet_overlap = 0.5` means "the target is ≥half the
-candidate's facets" (≤1 unrelated facet): a probe supporting just `{f}` scores 1.0 and
-passes; a noisy `{f, x, y, …}` scores `1/(1+k)` and is filtered. Measuring against the
-full failed set instead would score a clean single-facet probe `1/N` and reject it for
-`N ≥ 3` — and, because the same gate runs at generation-acceptance time (§3.2 point 2),
-make the system reject its own freshly generated probe, a non-terminating gap. The
-diagnostic *target set* the §2.2 EIG ranker sums over may still be multi-facet (the open
-set, §2.1); only the *eligibility gate* keys on the single `dominant_target_facet`.
+This is a precision gate, not a Jaccard gate over the whole failed set. A clean
+single-facet probe supporting `{f}` passes even when the broader diagnostic context is
+`{f, g, h}`; a generated two-facet probe supporting `{f, g}` also passes if both facets
+are in the enriched target; a noisy `{f, x, y, ...}` fails because most of its support is
+unrelated. The extra `dominant_target_facet ∈ support` requirement keeps the primary
+repair focus from being dropped just because a candidate covers some adjacent rationale
+facet — and it is **not** redundant with the precision threshold: precision `≥ θ` can be
+met by *other* gate facets while the primary is absent (`diagnostic_gate_facets = {f, g}`,
+support `= {g}` → precision `1.0` but `dominant = f ∉ support`), which would serve a probe
+that misses the actual focus. Read the gate as **full recall on the primary, precision on
+the rest**.
+
+**Reconciling the live `_jaccard` gate.** The landed selector computes
+`_jaccard(candidate_facet_support(item), {dominant_target_facet})`
+(`services/followups.py:471`). This is **not a different metric** — for a one-element
+right operand, `_jaccard(S, {d})` equals `target_precision(S, {d})` exactly: when
+`d ∈ S` both reduce to `1/|S|`, and when `d ∉ S` both are `0` (the union/denominator
+difference only appears for `d ∉ S`, where the numerator is already `0`). So the live
+gate *is* this section's precision gate evaluated on the impoverished singleton reference
+set (rung 3). The fix is therefore to **feed the richer reference set (rungs 1–2), not to
+change the metric** — and the singleton path is preserved as the exact current behavior,
+making the change additive and backward-compatible.
+
+But once the reference set has more than one element, **drop `_jaccard` and use
+`target_precision`** — Jaccard is symmetric, so it leaks *recall* into a gate that should
+be pure precision:
+
+| `candidate_facet_support` | `diagnostic_gate_facets` | `_jaccard` | `target_precision` |
+|---|---|---|---|
+| `{f}` | `{f, g, h}` | 0.33 — **wrongly fails** | 1.00 ✓ |
+| `{f, g}` (both targeted) | `{f, g, h}` | 0.67 | 1.00 ✓ |
+| `{f, g, h}` (all targeted) | `{f, g, h}` | 1.00 | 1.00 ✓ |
+| `{f, x, y}` (one targeted) | `{f, g, h}` | 0.20 | 0.33 — both reject ✓ |
+
+Covering *every* open facet is not one probe's job (that is what multiple needs are for,
+§3.2), so the gate must not penalize a focused probe for low recall against the target
+set — exactly what the `{f}`-vs-`{f,g,h}` row shows Jaccard doing. This also corrects the
+round-3 diagnosis: the `Jaccard = 1/N` rejection it attributed to "measuring against the
+full failed set" is really an artifact of the *metric*, not the *reference set*.
+`target_precision` against the full failed set does **not** reject a clean single-facet
+probe (`{f}` vs `{f, g, h}` → `1.0`). So the failed set is a safe rung-2 reference under
+precision, and §7 Phase 1 does not need to retreat to the bare singleton to dodge `1/N`.
+
+The diagnostic *target set* the §2.2 EIG ranker sums over may still be the full open set
+(§2.1). The *eligibility gate* uses the primary facet plus precision against the enriched
+gate facets. This preserves the non-circular generation path while allowing rationale
+text to expand the assessed facets when the learner-facing remediation genuinely points
+at an adjacent mechanism.
 
 The eligibility threshold needs a single source of truth: the gate reads
 `min_target_facet_overlap`, and EIG (§2.2–2.3) does fine-ranking *above* it. Either
 honor the configured value everywhere or delete the knob — do not ship a documented
 threshold that nothing enforces (its state today: stamped only onto a need at
 `followups.py:148`, never checked at selection).
+
+**The gate and the cap are one decision.** A precision gate is only as sound as the
+reference set is tight: an off-target facet that sneaks into `diagnostic_gate_facets`
+stops counting as noise and starts *helping* a candidate clear the threshold. This is why
+the gate's correctness is bounded by the §2.7 capping rule, and why the two must ship
+together. The bound applies specifically to **rung-1 enrichment beyond the failed set**
+(error-attribution and repair-suggestion targets, adjacent mechanisms): those admit
+facets the learner did not necessarily fail, so they must be *grader-attested and capped*
+(`max_diagnostic_target_facets`) before entering the reference. The **failed set itself
+(rung 2) is self-justifying** — every facet in it is one the learner actually scored low
+on, so covering it is signal by definition; it needs no cap for gate purposes. So: cap
+hard on the enrichment, not on the failures.
+
+**Derive `dominant_target_facet` from the same scorer that builds the reference.** The
+primary gate facet must be `argmax` of the §2.7 facet score (restricted to failed/open
+facets), so the primary and the reference set never disagree about what matters most. The
+landed code's interim heuristic (`max` over open `facet_uncertainty` by
+`uncertainty × severity`, `services/followups.py:458`) is acceptable until the scorer
+lands, but converge them then — this is what round-2's "derive the dominant facet before
+selection" was protecting.
 
 **Design tension, to set deliberately:** a stricter threshold trips Workstream 3
 generation more often, leaning harder on in-session Codex availability
@@ -603,8 +697,13 @@ cleaner). The logged payload must include, for each existing LO candidate consid
 
 - `practice_item_id`, `candidate_facet_support`, `dominant_target_facet`, and the open
   facet set used by EIG.
-- `target_overlap`, `min_target_facet_overlap`, `gate_passed`, and `filtered_reason`
-  (`subthreshold_overlap`, `bad_item_suspicion`, `excluded_source_item`, etc.).
+- `target_precision`, `min_target_facet_overlap`, `gate_passed`, and `filtered_reason`
+  (`subthreshold_overlap`, `bad_item_suspicion`, `excluded_source_item`, etc.). Log it as
+  `target_precision`, not the landed `target_overlap` field name (`services/followups.py`):
+  the value is `target_precision(support, diagnostic_gate_facets)` (§2.4), and naming it
+  "overlap" invites the Jaccard reading the gate explicitly rejects. Also log the resolved
+  `diagnostic_gate_facets` and the fallback rung used (enriched / failed-set / singleton),
+  so the reference set the precision was taken against is auditable.
 - `facet_eig_by_facet`, `total_facet_eig`, familiarity discount, bad-item suspicion,
   scaffold / intent bonus, final rank, and `selected`.
 - Decision outcome: `queued_diagnostic`, `created_need_for_generation`,
@@ -614,8 +713,102 @@ cleaner). The logged payload must include, for each existing LO candidate consid
 Record **filtered candidates too**. Otherwise the training log cannot learn the
 threshold, diagnose overly strict gates, or explain why the thin-pool generation path
 fired. When no candidate passes the gate, the slate still records the rejected options
-and the generated need's `target_facets = {dominant_target_facet}` so the generate/accept
-loop is auditable at the same facet grain as the selector.
+and the generated need records both `dominant_target_facet` and the enriched
+`target_facets` so the generate/accept loop is auditable at the same facet grain as the
+selector and the authored probe's metadata.
+
+### 2.7 Grader remediation intent is lossy at the facet grain (structural note)
+
+The facet id is the **only** handle that survives the chain diagnosis → need →
+authoring → decision log. But the grader's actual remediation intent is richer than
+the facet id and lives as free text in
+`attempt_feedback_metadata.repair_suggestions[].rationale` — the same text already
+surfaced to the learner as the diagnostic need. Two records key on the facet alone: the
+`intervention_need` (`target_facets_json`, `services/followups.py:150`) and the
+follow-up `decision_features` (§2.5/§2.6: facet-keyed prior, per-facet EIG, realized
+drop). So a generated probe can be **perfectly on-facet yet miss the grader's intent**,
+and — worse for the pivot — the training log cannot *see* that mismatch. The off-policy
+reward is blind to intent fidelity, which is exactly the signal a per-facet
+`learning_outcome_labels` regression (§2.5, `architecture_pivot.md` §3) would want.
+
+Observed instance (adjacent to the §0 case): a real run whose UI diagnostic need read
+*"contrast symmetric (`Aᵀ=A`) vs orthogonal (`Aᵀ=A⁻¹`) matrices, then derive
+`(Au)·v = u·(Av)`"* drove an authoring call that saw only
+`target_facets = ["orthogonality_definition"]` and returned a generic
+orthogonality-*definition* probe — on-facet, but not the mechanism the grader flagged.
+
+This is fixed in four independently shippable, reversible phases. The invariant across
+all of them: **`target_facets` remains the authoritative assessment contract, but it is
+derived from the same remediation signals the learner saw.** The §2.4 gate keeps a
+single `dominant_target_facet` as the primary hard requirement, while `target_facets`
+may include one or two supporting facets when the rationale explicitly targets them.
+`evidence_facets == target_facets` remains the authoring invariant; the change is how
+`target_facets` is chosen before authoring.
+
+- **Phase A — plan-time steering (shipped).** `build_diagnostic_practice_plan`
+  (`services/practice_generation.py:188`) joins the source attempt's
+  `repair_suggestions` via `fetch_attempt_feedback_metadata`, carries them as
+  `repair_rationales` on `DiagnosticPracticeTarget`, and
+  `_diagnostic_practice_instructions` tells Codex to *frame* the probe around them
+  (choosing among several) while keeping `evidence_facets == target_facets`. This patches
+  the **authoring prompt** only. It does **not** fix the records: the rationale is
+  reconstructed at plan time, so it drifts if the attempt is regraded between need
+  creation and authoring, and the decision log still cannot see which intent drove the
+  need.
+
+- **Phase B — structured facet targets on repair suggestions.** Extend
+  `RepairSuggestion` with `target_evidence_families: list[str] = []`. The grader already
+  emits `ErrorAttribution.target_evidence_families`; repair suggestions need the same
+  narrow facet handle so a learner-facing sentence like *"contrast symmetric
+  (`A^T = A`) vs orthogonal (`A^T = A^{-1}`), then derive `(Au) dot v = u dot (Av)`"*
+  carries `["symmetric_dot_identity"]` (and, only if directly assessed, an adjacent
+  facet such as `orthogonality_definition`). Validation canonicalizes these ids through
+  `vault.canonical_facet_id`, drops unknown facets with a manual-review reason just like
+  error attributions, and preserves the free-text `rationale` for the UI.
+
+- **Phase C — enrich and freeze the need target.** At need creation
+  (`evaluate_intervention_followup` → `upsert_intervention_need`,
+  `services/followups.py:134`), compute `target_facets` with a need-time target builder
+  instead of copying only `selection.dominant_target_facet`:
+
+  1. Add failed attempt facets from `_target_facets_from_debug`.
+  2. Add each `error_events[*].repair_plan.target_evidence_families`, weighted by error
+     severity.
+  3. Add each `repair_suggestions[*].target_evidence_families`, weighted as remediation
+     intent and linked to its `rationale` / `practice_mode`.
+  4. Seed with `dominant_target_facet` if the scored set is empty.
+  5. Sort by score, keep the primary `dominant_target_facet`, and cap the assessed set
+     with `max_diagnostic_target_facets` (default 2; hard maximum 3 only when every facet
+     is explicitly targeted by grader metadata).
+
+  Store the enriched set in `intervention_needs.target_facets_json`. Snapshot the
+  rationale(s), facet-source scores, and `primary_target_facet` into a dedicated nullable
+  `diagnostic_focus_json` column on `intervention_needs` rather than overloading
+  `candidate_requirements_json`; the latter is consumed as a hard gate spec and focus
+  metadata must stay auditable rather than silently changing acceptance semantics. Echo
+  the same snapshot into `decision_features.context`. Backward compatibility: needs
+  created before Phase C have no frozen focus, so `build_diagnostic_practice_plan` keeps
+  the Phase-A join as a fallback when `diagnostic_focus_json` is null. This removes
+  regrade drift and lets rationale text influence `target_facets` before authoring.
+
+- **Phase D — first-class diagnostic focus.** Promote the snapshot from "free text
+  reverse-engineered from `repair_suggestions`" to a typed object the **grader emits
+  directly** alongside per-facet `facet_outcomes` (e.g. `{facet_id, remediation_kind,
+  target_mechanism_ref?, rationale}`), and extend the §2.6 EIG/selection logging to key on
+  `(facet_id, diagnostic_focus)` rather than `facet_id` alone — the substrate for a
+  fidelity-aware learned policy. Migration is cheap *because* Phase C already added
+  `diagnostic_focus_json`: Phase D only (a) swaps the **producer** (grader emits instead
+  of `practice_generation` deriving), and (b) adds focus to the logging/EIG key. The
+  free-text `rationale` field persists, so Phase-C rows stay readable; the structured
+  fields are additive and nullable.
+
+Why not jump straight to Phase D: the free-text rationale **already exists and is
+validated by being learner-facing**, and the narrow facet ids needed for Phase B mirror
+`ErrorAttribution.target_evidence_families`. That is enough to fix the current
+target-facet lossiness. The richer diagnostic-focus schema should be designed against the
+recurring fields seen in real frozen rationales rather than guessed up front — the same
+"ship the placeholder, refit against data once it exists" stance as the §1B.4
+variance-floor curve.
 
 ---
 
@@ -636,25 +829,28 @@ second item to return. v0.3 changes the trigger from *"no item physically exists
 Generation must be triggered by **facet coverage of the open uncertainty**, not by
 "is there literally any other item":
 
-1. **Derive `dominant_target_facet` *before* the gate** (§2.4): rank the open
-   `facet_uncertainty` rows by `uncertainty · max_error_severity` and take the top facet.
-   That single value drives the §2.4 eligibility gate now and becomes the need's
-   `target_facets` later — derived once, reused, never recomputed from a need that does
-   not yet exist. If, after the gate, **no eligible item** meets `min_target_facet_overlap`
-   against `dominant_target_facet`, create the intervention need now (today's
-   `upsert_intervention_need` path, `services/followups.py:134`) with `desired_intent`
-   from `_choose_intent` and `target_facets = {dominant_target_facet}`. **One need = one
-   dominant target facet** (§6); emit additional needs for lower-ranked facets only up to
-   `max_interventions_per_lo_per_session` — in v0.3 typically just the single top facet.
-   This keeps two things distinct *without* making them circular: the **diagnostic target
-   set** the §2.2 EIG ranker may sum over (the open failed facets, possibly multi-facet)
-   versus the **gate/generation target** (the single pre-derived `dominant_target_facet`,
-   so §3.3's instructions stay sharp and joint generation stays out of scope per §6).
+1. **Derive the diagnostic gate target *before* the gate** (§2.4 / §2.7): score the open
+   `facet_uncertainty` rows, failed attempt facets, grader error-attribution targets, and
+   structured repair-suggestion targets. The top scored facet is
+   `dominant_target_facet`; the capped scored set is `diagnostic_gate_facets`. These
+   values drive the §2.4 eligibility gate now and become the generated need's
+   `diagnostic_focus_json.primary_target_facet` and `target_facets` later — derived
+   once, reused, never recomputed from a need that does not yet exist. If, after the gate,
+   **no eligible item** meets `min_target_facet_overlap`, create the intervention need now
+   (today's `upsert_intervention_need` path, `services/followups.py:134`) with
+   `desired_intent` from `_choose_intent`, `target_facets = diagnostic_gate_facets`, and
+   the frozen `diagnostic_focus_json` snapshot from §2.7 Phase C. **One need = one
+   remediation intent with one primary gate facet**; `target_facets` may include a small
+   number of supporting assessed facets when the learner-facing rationale explicitly
+   targets them. Emit additional needs for lower-ranked *primary* facets only up to
+   `max_interventions_per_lo_per_session` — in v0.3 typically just the single top
+   primary facet.
 2. The need's `candidate_requirements.min_target_facet_overlap` is enforced *both*
    at generation-acceptance time and at any future selection, so a generated probe
-   that drifts off the target facet is rejected. Because the gate keys on the need's
-   single dominant facet (§2.4), a probe that cleanly isolates that facet passes its own
-   gate (Jaccard 1.0); only one that drifts onto unrelated facets is rejected — so the
+   that drifts off the target facets is rejected. Because the gate requires the primary
+   facet and measures support precision against the enriched target set (§2.4), a probe
+   that cleanly isolates the primary facet or covers only primary+supporting target
+   facets passes; one that drifts onto unrelated facets is rejected — so the
    generate→accept loop terminates even when many facets are open.
 3. **Synchronous thin-pool path:** when the pool is thin *and* the session is live,
    prefer generating a single targeted probe over deferring to a batch job, subject
@@ -669,12 +865,19 @@ Generation must be triggered by **facet coverage of the open uncertainty**, not 
 ### 3.3 Generation instructions are facet-scoped
 
 `_diagnostic_practice_instructions` (`services/practice_generation.py:360`) must
-pin the generated item to the open facet and its source claim. For the motivating
-case the target is `symmetric_dot_identity` / `distinct_eigenvalue_logic`, so the
-generated probe is something like *"Why does symmetry give `(Au)·v = u·(Av)`?"* or a
-contrast probe *"Are eigenvectors of a non-symmetric matrix with distinct
-eigenvalues necessarily orthogonal?"* — isolating the failed mechanism, not the
-already-mastered classification statement.
+pin the generated item to the enriched target facets and their source claim. For the
+motivating case the primary target is `symmetric_dot_identity`, so the generated probe is
+something like *"Why does symmetry give `(Au)·v = u·(Av)`?"*; when the frozen rationale
+also explicitly asks for a contrast with orthogonal matrices, the same item may carry a
+supporting assessed facet and ask the learner to distinguish `A^T = A` from
+`A^T = A^{-1}`. The point is to isolate the failed mechanism, not the already-mastered
+classification statement.
+
+The instructions also carry the grader's `repair_rationales` as **framing** (Phase A,
+§2.7) and, after Phase C, the frozen `diagnostic_focus_json` as the reason those
+`target_facets` were selected. `evidence_facets == target_facets` keeps the diagnostic
+state measured by the probe aligned with the learner-facing remediation rather than with
+the old single-facet fallback.
 
 ### 3.4 Cold-start / Bitter-Lesson alignment
 
@@ -697,11 +900,11 @@ the cold-start prior; generation fills facet gaps the pool cannot cover, exactly
 3. `pi_apply_spectral_theorem` covers neither failed facet → eligibility gate
    removes it (§2.4); its facet EIG is ≈0 anyway (§2.2).
 4. No eligible existing item → the open set `{symmetric_dot_identity,
-   distinct_eigenvalue_logic}` drives the gate and EIG, but generation splits per
-   dominant facet (§3.2): a need with `target_facets = {symmetric_dot_identity}` (the
-   higher `uncertainty · severity`) → `build_diagnostic_practice_plan` generates a
+   distinct_eigenvalue_logic}` drives EIG, while the enriched target builder (§2.7 /
+   §3.2) selects `symmetric_dot_identity` as the primary facet and adds any
+   rationale-targeted supporting facets. `build_diagnostic_practice_plan` generates a
    probe on the symmetry⇒dot-identity mechanism (§3.3); `distinct_eigenvalue_logic`
-   follows as a second need if session budget allows.
+   follows as a second primary-facet need if session budget allows.
 5. Had `pi_apply_spectral_theorem` been attempted anyway, its `lo_relative_coverage`
    is ≈0 against the open facets (§1B.2), so the 3/3 barely moves `logit_mean` and the
    variance floor (§1B.3) forbids the LO from becoming "confident" while
@@ -723,11 +926,19 @@ the follow-up interrogates the thing the learner actually flagged.
 - [ ] A sub-`min_target_facet_overlap` item is never served as a diagnostic
       follow-up — including a *noisy* item with one matching facet among many unrelated
       ones (regression test built from the motivating case fixture).
-- [ ] The eligibility gate measures overlap against a `dominant_target_facet` derived
-      *before* selection and reused verbatim as the upserted need's `target_facets` (one
-      value, no need→gate→need circularity); a clean single-facet probe is admitted even
-      with ≥3 open facets (the `Jaccard = 1/N` rejection against the full failed set never
-      occurs), and the generate→accept loop terminates.
+- [ ] The eligibility gate derives `dominant_target_facet` and
+      `diagnostic_gate_facets` *before* selection, requires the dominant facet in
+      candidate support, and measures target precision against the enriched set; a clean
+      single-facet probe is admitted even with ≥3 open facets (the `Jaccard = 1/N`
+      rejection against the full failed set never occurs), and the generate→accept loop
+      terminates.
+- [ ] The gate uses `target_precision`, not `_jaccard`, against a multi-facet reference
+      set: a probe supporting `{f}` passes against `diagnostic_gate_facets = {f, g, h}`
+      (precision `1.0`, where Jaccard would give `0.33` and reject), a probe supporting
+      `{f, g}` against `{f, g, h}` passes, and a noisy `{f, x, y}` fails. The reference set
+      resolves by the rung chain (enriched → failed set → singleton), and on a singleton
+      reference the new gate reproduces the landed `_jaccard(support, {dominant})` value
+      exactly (additive-change regression test).
 - [ ] Candidate ranking and gating use the static `candidate_facet_support(item)`
       (`repair_targets or evidence_facets`); selection never calls the attempt-dependent
       `resolve_coverage` / reads `covered_facets` for an unattempted candidate.
@@ -771,6 +982,16 @@ the follow-up interrogates the thing the learner actually flagged.
       (`probes.py:452`) is not called for the facet objective.
 - [ ] When no eligible item exists, an intervention need with the correct
       `target_facets` is created and reaches `build_diagnostic_practice_plan`.
+- [ ] Diagnostic generation carries the source attempt's grader `repair_rationales`
+      into the authoring instructions as framing (§2.7 Phase A), with blanks dropped and
+      `practice_mode` preserved; free-text rationale framing does not directly override
+      `target_facets` without structured facet targets.
+- [ ] `RepairSuggestion.target_evidence_families` is validated/canonicalized and the
+      need-time target builder uses it, along with error-attribution repair targets, to
+      enrich `intervention_needs.target_facets_json` before authoring (§2.7 Phase B/C).
+- [ ] `diagnostic_focus_json` freezes the selected rationale(s), facet-source scores,
+      and `primary_target_facet` onto the need and is echoed into `decision_features`
+      so plan-time authoring never has to infer intent from a later regrade.
 - [ ] `learner_confidence = hedged` raises facet uncertainty above
       `hedge_uncertainty_floor` even at partial rubric credit.
 - [ ] `facet_uncertainty` is fully rebuildable from raw attempts (replay parity test;
@@ -789,9 +1010,9 @@ the follow-up interrogates the thing the learner actually flagged.
 - [ ] A full-breadth, fully-covering multi-facet attempt yields `lo_relative_coverage`
       ≈ 1 (not ≈ 1/N) and moves `logit_mean` normally — the coverage term does not
       collapse legitimate broad evidence (unit test on the §1B.2 formula).
-- [ ] Generation creates one need per dominant target facet; no single need carries a
-      joint multi-facet target, while the gate/EIG diagnostic target set may be
-      multi-facet.
+- [ ] Generation creates one need per remediation intent with one primary gate facet;
+      `target_facets` may include a small rationale-targeted supporting set, and the
+      generated item's `evidence_facets` / `repair_targets` exactly match that set.
 
 ## 6. Out of scope for v0.3 (kept for later pivot stages)
 
@@ -804,11 +1025,17 @@ the follow-up interrogates the thing the learner actually flagged.
 - Learned/searched selection policy or MCTS lookahead over the facet objective
   (pivot Stage 3); v0.3 ships the myopic facet EIG as teacher + fallback.
 - Embeddings-derived facet inference from raw item text (pivot Stage 4); facets
-  remain authored `evidence_facets` for now.
-- Multi-facet *joint generation*: one need = one dominant target facet in v0.3 (§3.2).
-  The **diagnostic target set** the gate (§2.4) and EIG (§2.2) reason over may be
-  multi-facet; only generation is single-facet. (This resolves the earlier
-  inconsistency between §3.2 and this list.)
+  remain authored `evidence_facets` for now. The forward-looking design — facets as
+  coordinates, intent as a vector, supervised by outcome transfer — is written up in §8
+  so the §2.7 Phase A→B→C→D migration aims at it, but none of it ships in v0.3.
+- Open-ended multi-intent generation. v0.3 allows a need's `target_facets` to include a
+  small supporting set when one frozen rationale targets those facets, but it does not ask
+  one generated item to repair unrelated diagnostic intents. Additional primary facets
+  become additional needs.
+- A learned, first-class structured **diagnostic focus** and intent-aware EIG key
+  (`(facet_id, diagnostic_focus)`, §2.7 Phase D). v0.3 ships the narrower structured
+  repair-suggestion facet targets and frozen focus snapshot; the learned focus vector is a
+  later pivot-stage feature.
 
 ---
 
@@ -819,10 +1046,18 @@ Ship in phases so the visible bug dies long before the Codex-dependent work land
 
 **Phase 1 — kill the visible bug; no migration, no grader change.**
 - **Selection-time hard gate (§2.4):** filter `_choose_intervention_item`
-  (`followups.py:438`) candidates by `min_target_facet_overlap`, measured against the
-  need's **dominant target facet** (not the full failed set — §2.4). A few lines; alone
-  it makes the motivating 0-overlap follow-up impossible without rejecting clean
-  single-facet probes when many facets are open.
+  (`followups.py:438`) candidates by `target_precision(candidate_facet_support,
+  diagnostic_gate_facets) ≥ min_target_facet_overlap`, with `dominant_target_facet ∈
+  support` as the primary floor. On the no-grader-change path the reference set is the
+  **failed facet set** (`_target_facets_from_debug`, rung 2), *not* the bare singleton:
+  under a precision metric the failed set does not trigger the `1/N` rejection that round
+  3 feared (that was a Jaccard artifact — §2.4), and it correctly rewards a probe that
+  covers a *second* failed facet instead of treating it as noise. The landed code already
+  computes the equivalent singleton precision via `_jaccard(support, {dominant})`
+  (`followups.py:471`); this phase swaps the reference set (and renames the metric to
+  `target_precision`), which is additive — it reduces to the current behavior whenever the
+  failed set is a singleton. A few lines; alone it makes the motivating 0-overlap follow-up
+  impossible without rejecting clean single- or multi-facet probes when many facets are open.
 - **Create-need-when-no-*eligible*-item (§3.1 / §3.2):** change the need trigger from
   "`_choose_intervention_item` returned `None`" (no item *exists*) to "the eligibility
   gate left no candidate," so generation is actually reached.
@@ -858,6 +1093,13 @@ Ship in phases so the visible bug dies long before the Codex-dependent work land
 **Phase 4 — Codex-dependent (riskiest, longest pole).**
 - `learner_confidence` hedge signal (§1.3): new raw `grading_evidence` field + schema +
   prompt changes; **zero presence in the codebase today.**
+- `RepairSuggestion.target_evidence_families` (§2.7 Phase B): schema + prompt +
+  validation changes so learner-facing remediation text carries the facets it is meant to
+  repair.
+- Enriched need targets and frozen focus (§2.7 Phase C): compute
+  `diagnostic_gate_facets` / `target_facets` from failed facets, error-attribution
+  targets, and repair-suggestion targets; persist `diagnostic_focus_json` and echo it into
+  decision logs.
 - Synchronous in-session generation (§3.2), gated on `runtime.ready` with the
   documented queue-and-fallback path. Availability and latency are real risks; neither
   blocks Phases 1–3.
@@ -867,3 +1109,119 @@ logging (§2.5), which survives the architecture pivot. The hand-tuned constants
 (`kappa_uncertain`, the variance-floor curve, `min_target_facet_overlap`, the EIG
 anchors) are explicitly *disposable* teacher-policy parameters — refit them against
 `learning_outcome_labels` rather than over-investing in tuning them now.
+
+---
+
+## 8. Stage 4 design — facets as coordinates, intent as a vector (forward-looking)
+
+This is where §2.7's Phase D ("first-class diagnostic focus") evolves once transfer data
+accrues, and is the concrete design for the `architecture_pivot.md` Stage 4 item that §6
+lists as out of scope for v0.3. **Nothing here ships in v0.3.** It is written down now so
+the Phase A→B→C→D migration (§2.7) is aimed at the right destination — in particular so
+Phase C's frozen `(item, intent, target_facets, outcome)` tuples are collected in a shape
+the embedding can actually consume.
+
+### 8.1 The reframe: a facet is a region, not a point
+
+A discrete facet id (`orthogonality_definition`) is a single point, so it cannot separate
+*"state the definition of orthogonal"* from *"derive `(Au)·v = u·(Av)` from symmetry"* —
+both collapse onto one id though they are different competencies (the §2.7 lossiness, at
+its root). Stage 4 represents each **item** and each **diagnostic intent** as a vector in
+a facet space where **distance means "exercises the same underlying competence."** The
+discrete id becomes a *labeled region* over that space, not the unit of representation;
+the grader's rationale and a generated probe become nearby points.
+
+Representation: an **anchored residual embedding**, `intent = anchor(facet) + δ(intent)`.
+The authored discrete facets remain labeled anchor points — this preserves the §1B.7
+honest-UI story (a region still has a name) and keeps the §2.4 gate / §2.2 EIG machinery
+working unchanged on the anchors. The learned residual `δ` carries the intent refinement
+the discrete id throws away. **When `δ = 0` the system is bit-for-bit the discrete-facet
+system**, so Stage 4 is additive and reversible. (Interpretable-axis variants — recovering
+the dimensions as latent factors of the outcome covariance via multidimensional IRT /
+factor analysis, or a sparse dictionary basis — are the aspirational form of the same
+object; not required for the first cut.)
+
+### 8.2 The metric is the whole design: transfer, not text
+
+Two candidate geometries, and conflating them is the trap:
+
+- **Text/semantic similarity** (off-the-shelf encoder over prompt + rationale): available
+  with zero behavioral data, but semantic adjacency ≠ diagnostic equivalence. "Define
+  orthogonal" and "derive symmetry ⇒ dot-identity" are semantically close yet test
+  different skills; two differently-worded items can test the identical skill. Text is a
+  **prior**, never the target.
+- **Outcome-transfer geometry**: distance = how much performance on one item predicts
+  performance on another *after removing global ability*. This is the structure the pivot
+  optimizes (`learning_outcome_labels` per facet) and the **target** the embedding is
+  trained to.
+
+### 8.3 Data sources (the skeleton already exists)
+
+1. **Behavioral transfer — the target signal, already logged.** `learning_outcome_labels`
+   records transfer pairs: `(source_attempt → outcome_attempt, label_type, label_value,
+   elapsed_seconds, intervening_attempt_count)` with both attempts' full metadata. This is
+   the supervised label set: train so embedding distance predicts `label_value`,
+   residualized for ability via `learner_theta` / mastery. `evidence_facet_recall_state`
+   (per-`(facet, item)` Beta posteriors) is the co-movement substrate for factor-analyzing
+   latent axes. Ground truth, but data-hungry — currently single-digit rows.
+2. **Grader structured outputs — dense, cheap, per attempt.** `grading_evidence`
+   (`points_awarded` per criterion → per-facet outcome vectors via the criterion→facet
+   map; `learner_confidence`; free-text `evidence`) plus `repair_suggestions`. Dense
+   intent descriptions without waiting for transfer data — but they encode the *grader's*
+   ontology, so they must be corrected by signal (1) to avoid learning grader bias.
+3. **LLM-as-annotator bootstrap — synthetic cold-start pairs.** Codex emits cheap pairwise
+   judgments ("does probe X measure the same competence as intent Y?", "rank these by
+   transfer") to seed the metric before behavioral data exists; signal (1) then overrides
+   pairs that do not behave. Same "human-knowledge prior, computation fills the tail"
+   stance as the rest of the pivot.
+
+### 8.4 Implementation plan
+
+Each step is independently shippable, offline-first, and gated behind a reliability ramp
+before it touches live selection — mirroring how §2.3/§2.5 stage the facet EIG.
+
+- **Step 0 — prerequisite (§2.7 Phase C).** Freeze diagnostic intent onto the need
+  (`diagnostic_focus_json`) and echo it into `decision_features.context`. Without this the
+  `(item, intent, target_facets, outcome)` tuple is unrecoverable and there is no corpus.
+  *This is the gating dependency for all of Stage 4 and the reason Phase C is worth doing
+  even though Phase A already fixes the visible authoring bug.*
+- **Step 1 — assemble the corpus (offline, no runtime change).** A batch job joins
+  `learning_outcome_labels` ⨝ `practice_attempts` ⨝ `grading_evidence` ⨝ frozen focus into
+  training rows: `(item_text, intent_text, anchor_facets, per_facet_outcomes,
+  transfer_label, ability_residual)`. Materialize to a versioned artifact (not live state);
+  no schema change beyond Step 0.
+- **Step 2 — text-prior embedding (shadow, additive).** Encode `prompt + expected_answer +
+  frozen rationale` with an off-the-shelf encoder; store a coordinate per item in a new
+  nullable sidecar (`facet_embedding(item_id, vector, model_version, fit_id)` or a
+  `practice_item` column). Pure metadata — **read by nothing in the live path yet.**
+- **Step 3 — transfer-supervised refinement (offline fit).** Metric/contrastive learning
+  so distance predicts `label_value` (ability-residualized), anchored to the discrete
+  facets as fixed points and learning only the residual `δ`. Versioned by `fit_id`;
+  reproducible from the Step-1 corpus so it lands in `derived_state_rebuilds` discipline.
+- **Step 4 — shadow influence on selection, behind a ramp.** Add an embedding proximity
+  term (intent vector → open-uncertainty centroid) as an *additional* ranking feature in
+  `_choose_intervention_item` / facet EIG, **activated only when held-out transfer
+  prediction beats the discrete-overlap baseline** (an `eig_reliability`-style gate). The
+  §2.4 hard gate keeps keying on discrete `dominant_target_facet` — the embedding informs
+  *ranking*, never the hard constraint, so a bad fit degrades gracefully to today's
+  behavior.
+- **Step 5 — discrete labeling for the UI.** Nearest-anchor / clustering over the space so
+  the §1B.7 read-model can still say "`symmetric_dot_identity` region · unexamined." The
+  embedding is the internal metric; the labels stay the surface.
+
+### 8.5 Validation and guardrails
+
+- **Earn-its-place gate:** the embedding influences live selection only after held-out
+  transfer AUC (or rank correlation against `label_value`) **beats the discrete-facet
+  overlap baseline** on a replay split — same disposable-teacher discipline as §7's closing
+  note. Until then it is shadow-logged for evaluation only.
+- **Identifiability floor:** latent transfer structure needs cross-item and (ideally)
+  cross-learner density; below a minimum tuple count Step 3 is suppressed and the system
+  runs on the Step-2 text prior, because a thin corpus fits *text*, not transfer. Single-
+  user cold start is the genuinely hard regime — text + LLM priors (8.3.2–8.3.3) carry it.
+- **Circularity guard:** when both grader-derived (8.3.2) and behavioral (8.3.1) signals
+  are present, the fit must weight behavioral transfer dominant; an embedding trained only
+  on grader/text signals re-learns the authoring ontology rather than learning structure.
+  Behavioral transfer is the only signal exogenous to authoring/grading.
+- **Reversibility invariant:** discrete facets stay authoritative in the gate at every
+  step; dropping the embedding term reverts to the exact discrete-facet behavior (`δ = 0`).

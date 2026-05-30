@@ -50,24 +50,24 @@ repair_targets:
   - next_token_distribution
   - fatal_logits_are_probabilities
 grading_rubric:
-  max_points: 5
+  max_points: 4
   criteria:
     - id: logits_raw_scores
-      points: 1.0
+      points: 0.8
       description: Defines logits as raw scores or unnormalized outputs.
     - id: mentions_unembedding
-      points: 1.0
+      points: 0.8
       description: Connects logits to the final unembedding-matrix 
         multiplication.
     - id: invalid_probability_reason
-      points: 1.0
+      points: 0.8
       description: Explains that logits need not be between 0 and 1 or sum to 1.
     - id: softmax_valid_distribution
-      points: 1.0
+      points: 0.8
       description: States that softmax converts logits into a valid probability 
         distribution.
     - id: next_token_use
-      points: 1.0
+      points: 0.8
       description: Connects the distribution to next-token sampling or 
         prediction.
   fatal_errors:

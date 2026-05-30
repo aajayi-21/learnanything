@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import log
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ class PracticeExpansionTarget:
     probe_attempts_completed: int
     probe_attempts_target: int
     mastery_mean: float | None
+    recommended_difficulty_band: tuple[float, float]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +39,7 @@ class PracticeExpansionTarget:
             "probe_attempts_completed": self.probe_attempts_completed,
             "probe_attempts_target": self.probe_attempts_target,
             "mastery_mean": self.mastery_mean,
+            "recommended_difficulty_band": list(self.recommended_difficulty_band),
         }
 
 
@@ -82,6 +85,8 @@ class DiagnosticPracticeTarget:
     source_prompt: str | None
     source_expected_answer: str | dict | None
     candidate_requirements: dict[str, Any]
+    diagnostic_focus: dict[str, Any] | None
+    repair_rationales: list[dict[str, Any]]
     mastery_mean: float | None
     facet_recall_mean_by_facet: dict[str, float]
     facet_recall_variance_by_facet: dict[str, float]
@@ -101,6 +106,8 @@ class DiagnosticPracticeTarget:
             "source_prompt": self.source_prompt,
             "source_expected_answer": self.source_expected_answer,
             "candidate_requirements": self.candidate_requirements,
+            "diagnostic_focus": self.diagnostic_focus,
+            "repair_rationales": self.repair_rationales,
             "mastery_mean": self.mastery_mean,
             "facet_recall_mean_by_facet": self.facet_recall_mean_by_facet,
             "facet_recall_variance_by_facet": self.facet_recall_variance_by_facet,
@@ -152,6 +159,7 @@ def build_practice_expansion_plan(
         raise PracticeExpansionError("max_new_per_lo must be positive")
     subject_filter = set(subjects or [])
     item_counts = _active_practice_item_counts(vault, repository)
+    irt = vault.config.mastery.irt
     targets: list[PracticeExpansionTarget] = []
     for learning_object in sorted(vault.learning_objects.values(), key=lambda lo: lo.id):
         if learning_object.status != "active":
@@ -178,6 +186,12 @@ def build_practice_expansion_plan(
                 probe_attempts_completed=probe_state.probe_attempts_completed,
                 probe_attempts_target=probe_state.probe_attempts_target,
                 mastery_mean=mastery_mean,
+                recommended_difficulty_band=_success_band_difficulty(
+                    _ability_logit(mastery_mean),
+                    vault.config.practice_generation.practice_success_band,
+                    discrimination=irt.discrimination_default,
+                    difficulty_scale=irt.difficulty_prior_scale,
+                ),
             )
         )
     if max_los is not None:
@@ -194,6 +208,7 @@ def build_diagnostic_practice_plan(
 ) -> DiagnosticPracticePlan:
     if max_needs <= 0:
         raise PracticeExpansionError("max_needs must be positive")
+    irt = vault.config.mastery.irt
     targets: list[DiagnosticPracticeTarget] = []
     for need in repository.pending_intervention_needs(learning_object_id):
         learning_object = vault.learning_objects.get(need["learning_object_id"])
@@ -220,6 +235,10 @@ def build_diagnostic_practice_plan(
             for facet in target_facets
             if facet in facet_states
         }
+        diagnostic_focus = need.get("diagnostic_focus") if isinstance(need.get("diagnostic_focus"), dict) else None
+        repair_rationales = _repair_rationales_from_focus(diagnostic_focus) or _repair_rationales(
+            repository, need.get("attempt_id")
+        )
         targets.append(
             DiagnosticPracticeTarget(
                 need_id=need["id"],
@@ -234,10 +253,17 @@ def build_diagnostic_practice_plan(
                 source_prompt=source_item.prompt if source_item is not None else None,
                 source_expected_answer=source_item.expected_answer if source_item is not None else None,
                 candidate_requirements=dict(need.get("candidate_requirements") or {}),
+                diagnostic_focus=diagnostic_focus,
+                repair_rationales=repair_rationales,
                 mastery_mean=mastery_mean,
                 facet_recall_mean_by_facet=facet_means,
                 facet_recall_variance_by_facet=facet_variances,
-                recommended_difficulty_band=_difficulty_band(facet_means, mastery_mean),
+                recommended_difficulty_band=_success_band_difficulty(
+                    _ability_logit(_ability_estimate(facet_means, mastery_mean)),
+                    vault.config.practice_generation.probe_success_band,
+                    discrimination=irt.discrimination_default,
+                    difficulty_scale=irt.difficulty_prior_scale,
+                ),
             )
         )
         if len(targets) >= max_needs:
@@ -276,11 +302,16 @@ def generate_diagnostic_practice_proposal(
         merge_context_source_refs=True,
     )
     fulfilled: list[str] = []
+    diagnostic_item_ids_by_need = _diagnostic_item_ids_by_need(plan, repository.proposal_items(patch_id))
     for target in plan.targets:
+        blocked_reason = f"diagnostic_proposal_queued:{patch_id}"
+        item_id = diagnostic_item_ids_by_need.get(target.need_id)
+        if item_id:
+            blocked_reason = f"{blocked_reason}:{item_id}"
         if repository.update_intervention_need_status(
             target.need_id,
             status="fulfilled",
-            blocked_reason=f"diagnostic_proposal_queued:{patch_id}",
+            blocked_reason=blocked_reason,
         ):
             fulfilled.append(target.need_id)
     return DiagnosticPracticeResult(patch_id=patch_id, plan=plan, fulfilled_need_ids=fulfilled)
@@ -348,7 +379,8 @@ def _practice_expansion_instructions(
         "Each new Practice Item must attach to one of the target learning_object_id values below.",
         "Prefer constructed_response items with attempt_types_allowed ['open_text'] unless the Learning Object clearly calls for another existing supported attempt type.",
         "Use review_route='review_required' unless a direct note or canonical source reference in the supplied context supports auto_apply.",
-        "Avoid duplicating existing prompts in context; vary facets, difficulty, and expected answer shape.",
+        "Avoid duplicating existing prompts in context; vary facets and expected answer shape.",
+        "Calibrate each item's difficulty to its target's recommended_difficulty_band (~70-85% expected success - effortful but usually successful, the desirable-difficulty band), and set difficulty and difficulty_source='llm_estimate' accordingly. At most one item per target may be a harder transfer item above the band, and only when corrective feedback makes the challenge productive.",
         "For each target, create exactly requested_new_items Practice Items.",
         f"Targets: {[target.as_dict() for target in plan.targets]}",
     ]
@@ -369,7 +401,8 @@ def _diagnostic_practice_instructions(
         "Each item must use the target learning_object_id, honor candidate_requirements, and must not duplicate the source_prompt.",
         "Use practice_mode='diagnostic_probe' and attempt_types_allowed ['diagnostic_probe', 'open_text', 'dont_know'].",
         "The item should test the target_facets directly, not reteach the full original item.",
-        "Calibrate difficulty to the recommended_difficulty_band; use the lower half for recall_failure or low facet recall, and the upper half when facet recall is already high.",
+        "Each target's diagnostic_focus is the frozen reason those target_facets were selected; use its primary_target_facet and repair_rationales to frame the probe. Treat rationale text as intent/framing only - the target_facets remain authoritative and evidence_facets must still equal target_facets.",
+        "Set difficulty within the recommended_difficulty_band: it lies on the learner's boundary (~50% expected success) so the probe is maximally diagnostic. Do not soften the probe toward an easy item, even on recall_failure - a boundary item that the learner can only sometimes answer is what discriminates the target facets.",
         "Use evidence_facets exactly equal to target_facets, evidence_weights normalized across target_facets, and repair_targets equal to target_facets.",
         "The grading_rubric must include at least one criterion per target facet and criterion_facet_weights must map each criterion to its facet.",
         "Set retrieval_demand high (0.75-0.95), transfer_distance low-to-moderate (0.05-0.35), scaffold_level no higher than 0.35, and difficulty_source='llm_estimate'.",
@@ -380,6 +413,100 @@ def _diagnostic_practice_instructions(
     if extra_instructions:
         lines.append(f"Additional instructions: {extra_instructions}")
     return "\n".join(lines)
+
+
+def _diagnostic_item_ids_by_need(
+    plan: DiagnosticPracticePlan,
+    proposal_items: list[dict[str, Any]],
+) -> dict[str, str]:
+    target_need_ids = {target.need_id for target in plan.targets}
+    item_ids_by_need: dict[str, str] = {}
+    used_item_ids: set[str] = set()
+    for item in proposal_items:
+        if not _is_diagnostic_practice_item_row(item):
+            continue
+        source_ref_ids = {str(ref_id) for ref_id in item.get("source_ref_ids") or []}
+        for need_id in sorted(source_ref_ids & target_need_ids):
+            item_ids_by_need.setdefault(need_id, item["id"])
+            used_item_ids.add(item["id"])
+
+    unmatched_need_ids = [need_id for need_id in target_need_ids if need_id not in item_ids_by_need]
+    unmatched_items = [
+        item
+        for item in proposal_items
+        if _is_diagnostic_practice_item_row(item) and item["id"] not in used_item_ids
+    ]
+    if len(unmatched_need_ids) == 1 and len(unmatched_items) == 1:
+        item_ids_by_need[unmatched_need_ids[0]] = unmatched_items[0]["id"]
+    return item_ids_by_need
+
+
+def _is_diagnostic_practice_item_row(item: dict[str, Any]) -> bool:
+    if item.get("item_type") != "practice_item" or item.get("operation") != "create":
+        return False
+    payload = item.get("edited_payload") if item.get("edited_payload") is not None else item.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("practice_mode") == "diagnostic_probe":
+        return True
+    attempt_types = payload.get("attempt_types_allowed")
+    return isinstance(attempt_types, list) and "diagnostic_probe" in attempt_types
+
+
+def _repair_rationales_from_focus(diagnostic_focus: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not diagnostic_focus:
+        return []
+    raw_rationales = diagnostic_focus.get("repair_rationales")
+    if not isinstance(raw_rationales, list):
+        return []
+    rationales: list[dict[str, Any]] = []
+    for suggestion in raw_rationales:
+        if not isinstance(suggestion, dict):
+            continue
+        rationale = str(suggestion.get("rationale") or "").strip()
+        if not rationale:
+            continue
+        entry: dict[str, Any] = {"rationale": rationale}
+        practice_mode = suggestion.get("practice_mode")
+        if practice_mode:
+            entry["practice_mode"] = str(practice_mode)
+        targets = suggestion.get("target_evidence_families")
+        if isinstance(targets, list):
+            entry["target_evidence_families"] = [str(facet) for facet in targets]
+        rationales.append(entry)
+    return rationales
+
+
+def _repair_rationales(repository: Repository, attempt_id: str | None) -> list[dict[str, Any]]:
+    """Pull the grader's repair-suggestion rationales for the source attempt.
+
+    These are the same free-text remediations surfaced to the learner as the
+    diagnostic need. The target facet alone is a lossy handle for that intent,
+    so we pass every rationale through as steering context and let the authoring
+    model choose which to honor; the target_facets remain authoritative.
+    """
+
+    if not attempt_id:
+        return []
+    feedback = repository.fetch_attempt_feedback_metadata(attempt_id)
+    if feedback is None:
+        return []
+    rationales: list[dict[str, Any]] = []
+    for suggestion in feedback.get("repair_suggestions", []):
+        if not isinstance(suggestion, dict):
+            continue
+        rationale = str(suggestion.get("rationale") or "").strip()
+        if not rationale:
+            continue
+        entry: dict[str, Any] = {"rationale": rationale}
+        practice_mode = suggestion.get("practice_mode")
+        if practice_mode:
+            entry["practice_mode"] = str(practice_mode)
+        targets = suggestion.get("target_evidence_families")
+        if isinstance(targets, list):
+            entry["target_evidence_families"] = [str(facet) for facet in targets]
+        rationales.append(entry)
+    return rationales
 
 
 def _diagnostic_source_refs(plan: DiagnosticPracticePlan) -> list[dict[str, str]]:
@@ -402,11 +529,65 @@ def _diagnostic_source_refs(plan: DiagnosticPracticePlan) -> list[dict[str, str]
     return refs
 
 
-def _difficulty_band(facet_means: dict[str, float], mastery_mean: float | None) -> tuple[float, float]:
+def _ability_estimate(facet_means: dict[str, float], mastery_mean: float | None) -> float:
+    """Best available ability estimate (probability scale) for difficulty targeting.
+
+    Prefers the mean of the target facets' recall means — the latent the probe is
+    about — and falls back to scalar LO mastery, then to an uninformative 0.5.
+    """
+
     values = list(facet_means.values())
-    ability = sum(values) / len(values) if values else (mastery_mean if mastery_mean is not None else 0.5)
-    if ability < 0.45:
-        return (0.25, 0.45)
-    if ability > 0.65:
-        return (0.60, 0.80)
-    return (0.45, 0.65)
+    if values:
+        return sum(values) / len(values)
+    return mastery_mean if mastery_mean is not None else 0.5
+
+
+def _ability_logit(ability: float | None) -> float:
+    return _logit(ability if ability is not None else 0.5)
+
+
+def _logit(probability: float) -> float:
+    p = min(max(probability, 1e-6), 1.0 - 1e-6)
+    return log(p / (1.0 - p))
+
+
+def _difficulty_for_success(
+    ability_logit: float,
+    target_success: float,
+    *,
+    discrimination: float,
+    difficulty_scale: float,
+) -> float:
+    """Authored difficulty in [0,1] whose IRT ``b`` yields ``target_success`` at ``ability_logit``.
+
+    Inverts the mastery channel's 2PL link (``services/mastery.py``):
+    ``p = sigmoid(a·(theta − b))`` with ``b = scale·(2·difficulty − 1)``, so a
+    higher target success maps to an easier (lower-difficulty) item.
+    """
+
+    b = ability_logit - _logit(target_success) / max(discrimination, 1e-6)
+    difficulty = b / (2.0 * difficulty_scale) + 0.5
+    return round(min(max(difficulty, 0.0), 1.0), 2)
+
+
+def _success_band_difficulty(
+    ability_logit: float,
+    success_band: tuple[float, float],
+    *,
+    discrimination: float,
+    difficulty_scale: float,
+) -> tuple[float, float]:
+    """``(easier, harder)`` authored-difficulty band spanning a target success interval.
+
+    The *higher* success bound yields the *lower* (easier) difficulty edge, so the
+    band is returned low-to-high in difficulty.
+    """
+
+    success_low, success_high = min(success_band), max(success_band)
+    low = _difficulty_for_success(
+        ability_logit, success_high, discrimination=discrimination, difficulty_scale=difficulty_scale
+    )
+    high = _difficulty_for_success(
+        ability_logit, success_low, discrimination=discrimination, difficulty_scale=difficulty_scale
+    )
+    return (low, high)

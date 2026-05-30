@@ -241,6 +241,66 @@ def test_youtube_missing_source_ref_is_reconstructed_from_timecoded_id(tmp_path)
     assert item["validation_status"] == "valid"
 
 
+def test_youtube_missing_source_ref_accepts_registered_note_timecoded_id(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    normalized = _youtube_source()
+    chunks = chunk_normalized_source(normalized)
+    registered = register_canonical_source(
+        vault_root,
+        "linear-algebra",
+        normalized,
+        b"raw transcript",
+        source_content_hash(normalized.markdown),
+        clock=FrozenClock(NOW),
+    )
+    ref_id = f"{registered.note_id}:t=11.0-21.7"
+    proposal = AuthoringProposal.model_validate(
+        {
+            "summary": "Extract with omitted top-level source ref.",
+            "source_refs": [],
+            "items": [
+                {
+                    "client_item_id": "lo_youtube_note_timecoded_ref",
+                    "item_type": "learning_object",
+                    "operation": "create",
+                    "proposed_entity_id": "lo_youtube_note_timecoded_ref",
+                    "source_ref_ids": [ref_id],
+                    "rationale": "Extract the attention introduction.",
+                    "review_route": "review_required",
+                    "payload": {
+                        "title": "YouTube note timecoded ref reconstruction",
+                        "subjects": ["linear-algebra"],
+                        "concept_id": "singular_value_decomposition",
+                        "knowledge_type": "definition",
+                        "summary": "Attention is introduced as a key transformer mechanism.",
+                    },
+                }
+            ],
+        }
+    )
+
+    validated = _proposal_with_locator_validation(
+        proposal,
+        registered,
+        IngestWindow(chunks=chunks, ordinal=1),
+    )
+
+    assert validated.source_refs[0].ref_id == ref_id
+    assert validated.source_refs[0].locator == "t=11.0-21.7"
+    assert validated.source_refs[0].path == registered.path
+    patch_id = persist_authoring_proposal(
+        vault_root,
+        validated,
+        provider="codex",
+        clock=FrozenClock(NOW),
+    )
+    item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
+    assert item["validation_status"] == "valid"
+    assert item["validation_errors"] == []
+    assert item["payload"]["provenance"]["source_refs"][0]["locator"] == "t=11.0-21.7"
+
+
 def test_youtube_missing_source_ref_without_timecoded_id_stays_invalid(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)

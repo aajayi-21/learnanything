@@ -244,6 +244,7 @@ def test_sidecar_end_session_clears_checkpoint_and_blocks_future_writes(tmp_path
     assert ended["attemptsRecorded"] == 0
     assert ended["itemsReviewed"] == 0
     assert ended["followupsQueued"] == 0
+    assert ended["streak"] == {"current": 1, "activeToday": True, "longest": 1}
     assert responses[3]["result"]["activeSession"] is None
     assert responses[4]["error"]["data"]["code"] == "validation_error"
 

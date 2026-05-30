@@ -33,12 +33,19 @@ class FollowupDecision:
     suppressed_actions: list[str]
     intent: str | None = None
     need_id: str | None = None
+    # Populated only for manual (user-forced) follow-ups: records what the
+    # automatic intervention gate *would* have done, so surprise thresholds and
+    # the suppression gates can be retuned against real override behaviour.
+    gate_diagnostics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
 class InterventionSelection:
     candidate: PracticeItem | None
     dominant_target_facet: str | None
+    diagnostic_gate_facets: list[str]
+    diagnostic_gate_source: str | None
+    diagnostic_focus: dict[str, Any] | None
     open_facets: list[str]
     slate: list[dict[str, Any]]
 
@@ -66,12 +73,20 @@ def evaluate_intervention_followup(
     probe_phase_active: bool = False,
     lo_independent_evidence_mass: float = 0.0,
     lo_raw_attempt_count: int = 0,
+    manual_override: bool = False,
     clock: Clock | None = None,
 ) -> FollowupDecision:
     """Intervention follow-up evaluator from the recall-coverage spec.
 
     It records all satisfied trigger reasons, queues at most one item, and
     persists an intervention need when a trigger has no suitable item.
+
+    When ``manual_override`` is set (a user manually requesting a diagnostic
+    follow-up from the feedback screen) every trigger and suppression gate is
+    still *evaluated* — so the decision can report what the automatic policy
+    would have done — but none of them are allowed to short-circuit the
+    follow-up. The selection logic runs unchanged, queuing the best diagnostic
+    item or recording an intervention need when none fits.
     """
 
     config = vault.config.scheduler.followup
@@ -101,27 +116,76 @@ def evaluate_intervention_followup(
     if probe_unfamiliar_probability is not None and probe_unfamiliar_probability >= config.tau_unfamiliar_intervention:
         triggered_reasons.append("high_unfamiliar_posterior")
 
+    # Natural reasons (before any manual forcing) and the gates that would have
+    # blocked the automatic policy. ``natural_trigger_reasons`` / ``would_suppress``
+    # drive the manual-override tuning log; the per-attempt gate diagnostics built
+    # below are always persisted so the feedback screen can name the decisive
+    # signal even when nothing fired.
+    natural_trigger_reasons = list(triggered_reasons)
+    would_suppress: list[str] = []
+
+    def _gate(outcome: str, decisive_reason: str, suppress: list[str]) -> dict[str, Any]:
+        return _build_gate_diagnostics(
+            outcome=outcome,
+            decisive_reason=decisive_reason,
+            natural_trigger_reasons=natural_trigger_reasons,
+            triggered_reasons=triggered_reasons,
+            would_suppress=suppress,
+            manual_override=manual_override,
+            bayesian_surprise=bayesian_surprise,
+            surprise_direction=surprise_direction,
+            grader_confidence=grader_confidence,
+            max_error_severity=max_error_severity,
+            probe_unfamiliar_probability=probe_unfamiliar_probability,
+            session_interventions_for_lo=session_interventions_for_lo,
+            available_minutes=available_minutes,
+            target_facets=target_facets,
+            config=config,
+        )
+
     if not triggered_reasons:
-        return _decision(False, None, "no_trigger", [], [], intent=None)
+        if not manual_override:
+            gate = _gate("not_triggered", "no_trigger", ["no_trigger"])
+            repository.update_attempt_surprise_actions(attempt_id, gate_diagnostics=gate)
+            return _decision(False, None, "no_trigger", [], [], intent=None, gate_diagnostics=gate)
+        would_suppress.append("no_trigger")
     if not error_event_written and "high_unfamiliar_posterior" not in triggered_reasons:
-        return _decision(False, None, "no_error_event", [], [], intent=None)
+        if not manual_override:
+            gate = _gate("suppressed", "no_error_event", ["no_error_event"])
+            repository.update_attempt_surprise_actions(attempt_id, gate_diagnostics=gate)
+            return _decision(False, None, "no_error_event", [], [], intent=None, gate_diagnostics=gate)
+        would_suppress.append("no_error_event")
     deterministic_dont_know = any(
         attempt.get("practice_item_id") == practice_item_id and attempt.get("attempt_type") == "dont_know"
         for attempt in repository.list_recent_attempts_by_practice_item(practice_item_id, limit=1)
     )
     if grader_confidence is None or (grader_confidence < config.gamma_min and not deterministic_dont_know):
-        suppressed = [f"{INTERVENTION_ACTION}:low_grader_confidence"]
-        repository.update_attempt_surprise_actions(attempt_id, suppressed_actions=suppressed)
-        return _decision(False, None, suppressed[0], [], suppressed, intent=None)
+        if not manual_override:
+            suppressed = [f"{INTERVENTION_ACTION}:low_grader_confidence"]
+            gate = _gate("suppressed", "low_grader_confidence", ["low_grader_confidence"])
+            repository.update_attempt_surprise_actions(attempt_id, suppressed_actions=suppressed, gate_diagnostics=gate)
+            return _decision(False, None, suppressed[0], [], suppressed, intent=None, gate_diagnostics=gate)
+        would_suppress.append("low_grader_confidence")
     if available_minutes is not None and available_minutes <= 0:
-        suppressed = [f"{INTERVENTION_ACTION}:no_time"]
-        repository.update_attempt_surprise_actions(attempt_id, suppressed_actions=suppressed)
-        return _decision(False, None, suppressed[0], [], suppressed, intent=None)
+        if not manual_override:
+            suppressed = [f"{INTERVENTION_ACTION}:no_time"]
+            gate = _gate("suppressed", "no_time", ["no_time"])
+            repository.update_attempt_surprise_actions(attempt_id, suppressed_actions=suppressed, gate_diagnostics=gate)
+            return _decision(False, None, suppressed[0], [], suppressed, intent=None, gate_diagnostics=gate)
+        would_suppress.append("no_time")
     if session_interventions_for_lo >= config.max_interventions_per_lo_per_session:
-        suppressed = [f"{INTERVENTION_ACTION}:session_cap_reached:{learning_object_id}"]
-        triggered = [f"{INTERVENTION_ACTION}:{reason}:{practice_item_id}" for reason in triggered_reasons]
-        repository.update_attempt_surprise_actions(attempt_id, triggered_actions=triggered, suppressed_actions=suppressed)
-        return _decision(False, None, suppressed[0], triggered, suppressed, intent=None)
+        if not manual_override:
+            suppressed = [f"{INTERVENTION_ACTION}:session_cap_reached:{learning_object_id}"]
+            triggered = [f"{INTERVENTION_ACTION}:{reason}:{practice_item_id}" for reason in triggered_reasons]
+            gate = _gate("suppressed", "session_cap_reached", ["session_cap_reached"])
+            repository.update_attempt_surprise_actions(
+                attempt_id, triggered_actions=triggered, suppressed_actions=suppressed, gate_diagnostics=gate
+            )
+            return _decision(False, None, suppressed[0], triggered, suppressed, intent=None, gate_diagnostics=gate)
+        would_suppress.append("session_cap_reached")
+
+    if manual_override and not triggered_reasons:
+        triggered_reasons = ["manual_trigger"]
 
     intent = _choose_intent(
         triggered_reasons,
@@ -132,6 +196,7 @@ def evaluate_intervention_followup(
     selection = _choose_intervention_item(
         vault,
         repository,
+        attempt_id=attempt_id,
         learning_object_id=learning_object_id,
         exclude_practice_item_id=practice_item_id,
         target_facets=target_facets,
@@ -140,13 +205,13 @@ def evaluate_intervention_followup(
     )
     candidate = selection.candidate
     triggered = [f"{INTERVENTION_ACTION}:{reason}:{practice_item_id}" for reason in triggered_reasons]
+    if manual_override and not any(reason == "manual_trigger" for reason in triggered_reasons):
+        # Always tag manual triggers so the scheduler/tuning queries can tell a
+        # user-forced follow-up apart from one the automatic policy chose.
+        triggered.append(f"{INTERVENTION_ACTION}:manual_trigger:{practice_item_id}")
     if candidate is None:
         now = _now_iso(clock)
-        need_target_facets = (
-            [selection.dominant_target_facet]
-            if selection.dominant_target_facet is not None
-            else target_facets
-        )
+        need_target_facets = selection.diagnostic_gate_facets or target_facets
         need_id = repository.upsert_intervention_need(
             {
                 "attempt_id": attempt_id,
@@ -164,12 +229,16 @@ def evaluate_intervention_followup(
                     "min_target_facet_overlap": config.min_target_facet_overlap,
                     "avoid_bad_item_suspicion_above": 0.65,
                 },
+                "diagnostic_focus": selection.diagnostic_focus,
                 "created_at": now,
                 "updated_at": now,
             }
         )
         suppressed = [f"{INTERVENTION_ACTION}:no_suitable_item:{need_id}"]
-        repository.update_attempt_surprise_actions(attempt_id, triggered_actions=triggered, suppressed_actions=suppressed)
+        gate = _gate("need_recorded", "no_suitable_item", would_suppress)
+        repository.update_attempt_surprise_actions(
+            attempt_id, triggered_actions=triggered, suppressed_actions=suppressed, gate_diagnostics=gate
+        )
         _record_followup_decision_features(
             vault,
             repository,
@@ -179,12 +248,17 @@ def evaluate_intervention_followup(
             outcome="created_need_for_generation",
             need_id=need_id,
             selected_item_id=None,
+            manual_trigger=gate if manual_override else None,
             clock=clock,
         )
-        return _decision(False, None, suppressed[0], triggered, suppressed, intent=intent, need_id=need_id)
+        return _decision(
+            False, None, suppressed[0], triggered, suppressed,
+            intent=intent, need_id=need_id, gate_diagnostics=gate,
+        )
 
     triggered.append(f"{INTERVENTION_ACTION}:queued:{candidate.id}")
-    repository.update_attempt_surprise_actions(attempt_id, triggered_actions=triggered)
+    gate = _gate("queued", triggered_reasons[0], would_suppress)
+    repository.update_attempt_surprise_actions(attempt_id, triggered_actions=triggered, gate_diagnostics=gate)
     _record_followup_decision_features(
         vault,
         repository,
@@ -194,9 +268,13 @@ def evaluate_intervention_followup(
         outcome="queued_diagnostic" if selection.open_facets else "queued_non_diagnostic_review",
         need_id=None,
         selected_item_id=candidate.id,
+        manual_trigger=gate if manual_override else None,
         clock=clock,
     )
-    return _decision(True, candidate.id, triggered_reasons[0], triggered, [], intent=intent)
+    return _decision(
+        True, candidate.id, triggered_reasons[0], triggered, [],
+        intent=intent, gate_diagnostics=gate,
+    )
 
 
 def evaluate_negative_surprise_followup(
@@ -246,6 +324,7 @@ def evaluate_attempt_intervention_followup(
     result: Any,
     available_minutes: int | None = None,
     session_id: str | None = None,
+    manual_override: bool = False,
     clock: Clock | None = None,
 ) -> FollowupDecision:
     """Run the full post-attempt intervention policy for one attempt result.
@@ -299,6 +378,7 @@ def evaluate_attempt_intervention_followup(
         lo_raw_attempt_count=len(
             repository.list_recent_attempts_by_learning_object(result.learning_object_id, limit=1000)
         ),
+        manual_override=manual_override,
         clock=clock,
     )
 
@@ -385,6 +465,7 @@ def _decision(
     *,
     intent: str | None = None,
     need_id: str | None = None,
+    gate_diagnostics: dict[str, Any] | None = None,
 ) -> FollowupDecision:
     return FollowupDecision(
         triggered=triggered,
@@ -394,7 +475,187 @@ def _decision(
         suppressed_actions=suppressed_actions,
         intent=intent,
         need_id=need_id,
+        gate_diagnostics=gate_diagnostics,
     )
+
+
+def _build_gate_diagnostics(
+    *,
+    outcome: str,
+    decisive_reason: str,
+    natural_trigger_reasons: list[str],
+    triggered_reasons: list[str],
+    would_suppress: list[str],
+    manual_override: bool,
+    bayesian_surprise: float,
+    surprise_direction: str,
+    grader_confidence: float | None,
+    max_error_severity: float,
+    probe_unfamiliar_probability: float | None,
+    session_interventions_for_lo: int,
+    available_minutes: int | None,
+    target_facets: list[str],
+    config: Any,
+) -> dict[str, Any]:
+    """Per-attempt record of why the follow-up gate did (or did not) fire.
+
+    Persisted on ``attempt_surprise`` for every evaluation so the feedback screen
+    can name the single decisive signal. The ``natural_trigger_reasons`` /
+    ``would_suppress`` / ``would_auto_fire`` fields preserve the manual-override
+    tuning contract; ``decisive_reason`` + ``decisive_signal`` carry the one
+    signal the UI renders.
+    """
+
+    return {
+        "outcome": outcome,
+        "decisive_reason": decisive_reason,
+        "decisive_signal": _decisive_signal(
+            decisive_reason,
+            bayesian_surprise=bayesian_surprise,
+            surprise_direction=surprise_direction,
+            grader_confidence=grader_confidence,
+            max_error_severity=max_error_severity,
+            probe_unfamiliar_probability=probe_unfamiliar_probability,
+            session_interventions_for_lo=session_interventions_for_lo,
+            available_minutes=available_minutes,
+            config=config,
+        ),
+        "natural_trigger_reasons": natural_trigger_reasons,
+        "triggered_reasons": list(triggered_reasons),
+        "would_suppress": would_suppress,
+        "would_auto_fire": bool(natural_trigger_reasons) and not would_suppress,
+        "manual_override": manual_override,
+        "bayesian_surprise": bayesian_surprise,
+        "surprise_direction": surprise_direction,
+        "tau_followup_nats": config.tau_followup_nats,
+        "grader_confidence": grader_confidence,
+        "max_error_severity": max_error_severity,
+        "target_facets": list(target_facets),
+    }
+
+
+def _decisive_signal(
+    reason: str,
+    *,
+    bayesian_surprise: float,
+    surprise_direction: str,
+    grader_confidence: float | None,
+    max_error_severity: float,
+    probe_unfamiliar_probability: float | None,
+    session_interventions_for_lo: int,
+    available_minutes: int | None,
+    config: Any,
+) -> dict[str, Any] | None:
+    """Describe the single signal that decided this follow-up outcome.
+
+    ``value``/``threshold``/``comparator`` let the UI render one line such as
+    ``surprise 0.02 nats < τ 0.05`` without re-deriving thresholds client-side.
+    ``satisfied`` is whether the signal's own condition held (a trigger that
+    fired, or a suppression gate that blocked).
+    """
+
+    if reason in ("negative_surprise", "no_trigger"):
+        return {
+            "name": "bayesian_surprise",
+            "value": bayesian_surprise,
+            "threshold": config.tau_followup_nats,
+            "comparator": ">",
+            "unit": "nats",
+            "satisfied": surprise_direction == "negative" and bayesian_surprise > config.tau_followup_nats,
+            "surprise_direction": surprise_direction,
+        }
+    if reason == "severe_error_event":
+        return {
+            "name": "max_error_severity",
+            "value": max_error_severity,
+            "threshold": config.tau_severe_error,
+            "comparator": ">=",
+            "unit": "severity",
+            "satisfied": max_error_severity >= config.tau_severe_error,
+        }
+    if reason == "high_unfamiliar_posterior":
+        return {
+            "name": "unfamiliar_posterior",
+            "value": probe_unfamiliar_probability,
+            "threshold": config.tau_unfamiliar_intervention,
+            "comparator": ">=",
+            "unit": "probability",
+            "satisfied": probe_unfamiliar_probability is not None
+            and probe_unfamiliar_probability >= config.tau_unfamiliar_intervention,
+        }
+    if reason == "repeated_same_item_failure":
+        return {
+            "name": "repeated_item_failures",
+            "value": None,
+            "threshold": config.tau_repeated_item_failures,
+            "comparator": ">=",
+            "unit": "count",
+            "satisfied": True,
+        }
+    if reason == "repeated_same_facet_failure":
+        return {
+            "name": "repeated_facet_failures",
+            "value": None,
+            "threshold": config.tau_repeated_facet_failures,
+            "comparator": ">=",
+            "unit": "count",
+            "satisfied": True,
+        }
+    if reason == "no_error_event":
+        return {
+            "name": "error_event_written",
+            "value": False,
+            "threshold": True,
+            "comparator": "==",
+            "unit": None,
+            "satisfied": False,
+        }
+    if reason == "low_grader_confidence":
+        return {
+            "name": "grader_confidence",
+            "value": grader_confidence,
+            "threshold": config.gamma_min,
+            "comparator": "<",
+            "unit": "confidence",
+            "satisfied": True,
+        }
+    if reason == "no_time":
+        return {
+            "name": "available_minutes",
+            "value": available_minutes,
+            "threshold": 0,
+            "comparator": "<=",
+            "unit": "minutes",
+            "satisfied": True,
+        }
+    if reason == "session_cap_reached":
+        return {
+            "name": "session_interventions",
+            "value": session_interventions_for_lo,
+            "threshold": config.max_interventions_per_lo_per_session,
+            "comparator": ">=",
+            "unit": "count",
+            "satisfied": True,
+        }
+    if reason == "no_suitable_item":
+        return {
+            "name": "eligible_items",
+            "value": 0,
+            "threshold": 1,
+            "comparator": ">=",
+            "unit": "items",
+            "satisfied": False,
+        }
+    if reason == "manual_trigger":
+        return {
+            "name": "manual_trigger",
+            "value": None,
+            "threshold": None,
+            "comparator": None,
+            "unit": None,
+            "satisfied": True,
+        }
+    return None
 
 
 def _choose_intent(
@@ -423,6 +684,7 @@ def _choose_intervention_item(
     vault: LoadedVault,
     repository: Repository,
     *,
+    attempt_id: str | None,
     learning_object_id: str,
     exclude_practice_item_id: str,
     target_facets: list[str],
@@ -444,21 +706,58 @@ def _choose_intervention_item(
     dominant_pool = [
         state for state in diagnostic_states if not target or state.facet_id in target
     ] or diagnostic_states
-    dominant_state = max(
+    interim_dominant_state = max(
         dominant_pool,
         key=lambda state: (state.uncertainty * severity, state.uncertainty, state.facet_id),
         default=None,
     )
-    dominant_target_facet = (
-        dominant_state.facet_id
-        if dominant_state is not None
+    interim_dominant_target_facet = (
+        interim_dominant_state.facet_id
+        if interim_dominant_state is not None
         else (sorted(target)[0] if target else None)
     )
+    diagnostic_focus = _build_diagnostic_focus(
+        vault,
+        repository,
+        attempt_id=attempt_id,
+        failed_facets=target_facets,
+        diagnostic_states=diagnostic_states,
+        max_error_severity=max_error_severity,
+        fallback_dominant_target_facet=interim_dominant_target_facet,
+    )
+    dominant_target_facet = diagnostic_focus.get("primary_target_facet")
+    diagnostic_gate_facets = list(diagnostic_focus.get("diagnostic_gate_facets") or [])
+    diagnostic_gate_source = diagnostic_focus.get("diagnostic_gate_source")
+    if not isinstance(dominant_target_facet, str):
+        dominant_target_facet = interim_dominant_target_facet
+    if not diagnostic_gate_facets and dominant_target_facet is not None:
+        diagnostic_gate_facets = [dominant_target_facet]
+    if not diagnostic_gate_facets and target:
+        diagnostic_gate_facets = sorted(target)
+    if not diagnostic_focus:
+        diagnostic_focus = None
+    elif not diagnostic_focus.get("primary_target_facet") and dominant_target_facet is not None:
+        diagnostic_focus = {
+            **diagnostic_focus,
+            "primary_target_facet": dominant_target_facet,
+            "diagnostic_gate_facets": diagnostic_gate_facets,
+            "target_facets": diagnostic_gate_facets,
+            "diagnostic_gate_source": diagnostic_gate_source or "singleton",
+        }
+    gate_reference = set(diagnostic_gate_facets)
     open_facets = sorted(state.facet_id for state in diagnostic_states)
+    if diagnostic_focus is not None:
+        diagnostic_focus = {
+            **diagnostic_focus,
+            "open_facets": open_facets,
+        }
     if not candidates:
         return InterventionSelection(
             candidate=None,
             dominant_target_facet=dominant_target_facet,
+            diagnostic_gate_facets=diagnostic_gate_facets,
+            diagnostic_gate_source=diagnostic_gate_source,
+            diagnostic_focus=diagnostic_focus,
             open_facets=open_facets,
             slate=[],
         )
@@ -468,16 +767,15 @@ def _choose_intervention_item(
     slate: list[dict[str, Any]] = []
     for item in candidates:
         support = candidate_facet_support(item)
-        target_overlap = (
-            _jaccard(support, {dominant_target_facet})
-            if dominant_target_facet is not None
-            else 0.0
-        )
+        target_precision = _target_precision(support, gate_reference)
         quality = repository.practice_item_quality_state(item.id)
         suspicion = quality.bad_item_suspicion if quality is not None else 0.0
         gate_passed = True
         filtered_reason = None
-        if gate_applies and target_overlap < min_overlap:
+        if gate_applies and dominant_target_facet not in support:
+            gate_passed = False
+            filtered_reason = "missing_dominant_facet"
+        if gate_applies and target_precision < min_overlap:
             gate_passed = False
             filtered_reason = "subthreshold_overlap"
         if suspicion >= 0.65:
@@ -522,7 +820,9 @@ def _choose_intervention_item(
                 "candidate_facet_support": sorted(support),
                 "dominant_target_facet": dominant_target_facet,
                 "open_facets": open_facets,
-                "target_overlap": target_overlap,
+                "diagnostic_gate_facets": diagnostic_gate_facets,
+                "diagnostic_gate_source": diagnostic_gate_source,
+                "target_precision": target_precision,
                 "min_target_facet_overlap": min_overlap,
                 "gate_passed": gate_passed,
                 "filtered_reason": filtered_reason,
@@ -557,6 +857,9 @@ def _choose_intervention_item(
     return InterventionSelection(
         candidate=selected,
         dominant_target_facet=dominant_target_facet,
+        diagnostic_gate_facets=diagnostic_gate_facets,
+        diagnostic_gate_source=diagnostic_gate_source,
+        diagnostic_focus=diagnostic_focus,
         open_facets=open_facets,
         slate=slate,
     )
@@ -566,6 +869,175 @@ def _jaccard(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
     return len(left & right) / len(left | right)
+
+
+def _target_precision(candidate_support: set[str], diagnostic_gate_facets: set[str]) -> float:
+    if not candidate_support or not diagnostic_gate_facets:
+        return 0.0
+    return len(candidate_support & diagnostic_gate_facets) / len(candidate_support)
+
+
+def _build_diagnostic_focus(
+    vault: LoadedVault,
+    repository: Repository,
+    *,
+    attempt_id: str | None,
+    failed_facets: list[str],
+    diagnostic_states: list[Any],
+    max_error_severity: float,
+    fallback_dominant_target_facet: str | None,
+) -> dict[str, Any]:
+    scores: dict[str, float] = {}
+    source_scores: dict[str, dict[str, Any]] = {}
+    repair_rationales: list[dict[str, Any]] = []
+    failed = _canonical_target_facets(vault, failed_facets)
+    diagnostic_state_by_facet = {state.facet_id: state for state in diagnostic_states}
+
+    def add_score(facet: str, score: float, source: str, payload: dict[str, Any] | None = None) -> None:
+        canonical = vault.canonical_facet_id(facet)
+        if not canonical:
+            return
+        scores[canonical] = scores.get(canonical, 0.0) + score
+        entry = source_scores.setdefault(canonical, {"score": 0.0, "sources": []})
+        entry["score"] = float(entry["score"]) + score
+        source_payload = {"source": source, "score": score}
+        if payload:
+            source_payload.update(payload)
+        entry["sources"].append(source_payload)
+
+    for facet in failed:
+        add_score(
+            facet,
+            2.0 + max(max_error_severity, 0.0),
+            "failed_facet",
+            {"failed": True},
+        )
+    for state in diagnostic_states:
+        status = getattr(state, "status", None)
+        if status not in {"open", "resolving"} and not _is_known_gap_state(state):
+            continue
+        uncertainty = float(getattr(state, "uncertainty", 0.0) or 0.0)
+        add_score(
+            state.facet_id,
+            1.0 + uncertainty,
+            "facet_uncertainty",
+            {"status": status, "uncertainty": uncertainty},
+        )
+
+    structured_target_seen = False
+    if attempt_id:
+        for event in repository.error_events_for_attempt(attempt_id):
+            repair_plan = event.get("repair_plan")
+            if not isinstance(repair_plan, dict):
+                continue
+            targets = repair_plan.get("target_evidence_families")
+            if not isinstance(targets, list):
+                continue
+            severity = float(event.get("severity") or max_error_severity or 0.0)
+            for raw_facet in targets:
+                structured_target_seen = True
+                add_score(
+                    str(raw_facet),
+                    1.5 + severity,
+                    "error_attribution",
+                    {
+                        "error_event_id": event.get("id"),
+                        "error_type": event.get("error_type"),
+                        "severity": severity,
+                    },
+                )
+        feedback = repository.fetch_attempt_feedback_metadata(attempt_id)
+        if feedback is not None:
+            for suggestion in feedback.get("repair_suggestions", []):
+                if not isinstance(suggestion, dict):
+                    continue
+                raw_targets = suggestion.get("target_evidence_families")
+                targets = (
+                    [vault.canonical_facet_id(str(facet)) for facet in raw_targets]
+                    if isinstance(raw_targets, list)
+                    else []
+                )
+                targets = sorted({facet for facet in targets if facet})
+                rationale = str(suggestion.get("rationale") or "").strip()
+                if targets:
+                    structured_target_seen = True
+                    for facet in targets:
+                        add_score(
+                            facet,
+                            1.25,
+                            "repair_suggestion",
+                            {"practice_mode": suggestion.get("practice_mode"), "rationale": rationale},
+                        )
+                if rationale:
+                    entry: dict[str, Any] = {"rationale": rationale}
+                    practice_mode = suggestion.get("practice_mode")
+                    if practice_mode:
+                        entry["practice_mode"] = str(practice_mode)
+                    if targets:
+                        entry["target_evidence_families"] = targets
+                    repair_rationales.append(entry)
+
+    primary_pool = set(failed) | set(diagnostic_state_by_facet)
+    if primary_pool:
+        primary = max(
+            primary_pool,
+            key=lambda facet: (
+                scores.get(facet, 0.0),
+                float(getattr(diagnostic_state_by_facet.get(facet), "uncertainty", 0.0) or 0.0),
+                facet,
+            ),
+        )
+    elif scores:
+        primary = max(scores, key=lambda facet: (scores[facet], facet))
+    else:
+        primary = fallback_dominant_target_facet
+
+    if primary is not None and primary not in scores:
+        add_score(primary, 0.5, "singleton_fallback", {})
+
+    if structured_target_seen:
+        gate_source = "enriched"
+        base_facets = list(failed)
+        if primary is not None and primary not in base_facets:
+            base_facets.insert(0, primary)
+        max_targets = max(1, int(vault.config.scheduler.followup.max_diagnostic_target_facets))
+        cap = max(max_targets, len(base_facets))
+        extras = [
+            facet
+            for facet in sorted(scores, key=lambda key: (-scores[key], key))
+            if facet not in set(base_facets)
+        ]
+        diagnostic_gate_facets = sorted(
+            dict.fromkeys([*base_facets, *extras[: max(0, cap - len(base_facets))]])
+        )
+    elif failed:
+        gate_source = "failed-set"
+        diagnostic_gate_facets = sorted(failed)
+    elif primary is not None:
+        gate_source = "singleton"
+        diagnostic_gate_facets = [primary]
+    else:
+        gate_source = None
+        diagnostic_gate_facets = []
+
+    if primary is not None and diagnostic_gate_facets and primary not in diagnostic_gate_facets:
+        diagnostic_gate_facets = sorted([primary, *diagnostic_gate_facets])
+
+    return {
+        "primary_target_facet": primary,
+        "target_facets": diagnostic_gate_facets,
+        "diagnostic_gate_facets": diagnostic_gate_facets,
+        "diagnostic_gate_source": gate_source,
+        "failed_facets": sorted(failed),
+        "facet_source_scores": {
+            facet: {
+                "score": float(payload["score"]),
+                "sources": payload["sources"],
+            }
+            for facet, payload in sorted(source_scores.items())
+        },
+        "repair_rationales": repair_rationales,
+    }
 
 
 def _is_known_gap_state(state: Any) -> bool:
@@ -619,6 +1091,7 @@ def _record_followup_decision_features(
     outcome: str,
     need_id: str | None,
     selected_item_id: str | None,
+    manual_trigger: dict[str, Any] | None = None,
     clock: Clock | None,
 ) -> None:
     uncertainties = repository.facet_uncertainty_states(
@@ -654,6 +1127,8 @@ def _record_followup_decision_features(
             "selected_practice_item_id": selected_item_id,
             "candidate_facet_support": selected_row.get("candidate_facet_support") if selected_row else None,
             "dominant_target_facet": selection.dominant_target_facet,
+            "diagnostic_gate_facets": selection.diagnostic_gate_facets,
+            "diagnostic_gate_source": selection.diagnostic_gate_source,
             "per_facet_eig": selected_row.get("facet_eig_by_facet") if selected_row else {},
             "total_facet_eig": selected_row.get("total_facet_eig") if selected_row else 0.0,
         },
@@ -662,6 +1137,8 @@ def _record_followup_decision_features(
             "decision_outcome": outcome,
             "need_id": need_id,
             "generation_need_id": need_id if outcome == "created_need_for_generation" else None,
+            "diagnostic_focus": selection.diagnostic_focus,
+            "manual_trigger": manual_trigger,
         },
         algorithm_version=vault.config.algorithms.algorithm_version,
         clock=clock,

@@ -62,53 +62,53 @@ repair_targets:
   - fatal_recurrence_parallel
   - fatal_no_path_length
 grading_rubric:
-  max_points: 8
+  max_points: 4
   criteria:
     - id: three_criteria
-      points: 1.5
+      points: 0.75
       description: 'Names all three comparison criteria: complexity, parallelism,
         and path length.'
     - id: self_attention_parallel
-      points: 1.0
+      points: 0.5
       description: Explains self-attention’s constant sequential operations 
         across positions.
     - id: self_attention_path
-      points: 1.0
+      points: 0.5
       description: Explains the short path length benefit for long-range 
         dependencies.
     - id: recurrent_sequential
-      points: 1.0
+      points: 0.5
       description: Explains recurrence requires sequential computation by 
         position.
     - id: convolution_path
-      points: 1.0
+      points: 0.5
       description: Explains convolution needs multiple layers or dilation to 
         connect distant positions.
     - id: complexity_tradeoff
-      points: 1.0
+      points: 0.5
       description: Mentions computational cost conditions or kernel/separable 
         convolution tradeoffs.
     - id: long_range_dependency_link
-      points: 1.0
+      points: 0.5
       description: Connects shorter paths to easier learning of long-range 
         dependencies.
     - id: balanced_comparison
-      points: 0.5
+      points: 0.25
       description: Avoids claiming self-attention dominates every setting 
         without tradeoffs.
   fatal_errors:
     - id: fatal_single_criterion
       description: Only discusses one criterion and ignores the multi-criterion 
         comparison.
-      max_grade: 3
+      max_grade: 2
     - id: fatal_recurrence_parallel
       description: Claims recurrent layers parallelize across sequence positions
         in the same way as self-attention.
-      max_grade: 4
+      max_grade: 2
     - id: fatal_no_path_length
       description: Omits path length and long-range dependency reasoning 
         entirely.
-      max_grade: 5
+      max_grade: 3
 provenance:
   origin: canonical_extract
   source_refs:

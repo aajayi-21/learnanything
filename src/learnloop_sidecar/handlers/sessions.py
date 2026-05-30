@@ -85,6 +85,7 @@ def end_session(ctx: SidecarContext, params: SessionIdInput) -> dict[str, Any]:
             "attempts_recorded": counts["attempts_recorded"],
             "items_reviewed": counts["items_reviewed"],
             "followups_queued": _session_followups_queued(repository, params.session_id),
+            "streak": repository.session_day_streak(),
         }
     )
 

@@ -437,6 +437,37 @@ def test_generated_practice_missing_reward_metadata_is_invalid(tmp_path):
     ]
 
 
+def test_generated_practice_rubric_points_cannot_exceed_grading_scale(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    proposal = AuthoringProposal.model_validate(
+        _generated_practice_proposal_payload(
+            {
+                "evidence_facets": ["application"],
+                "evidence_weights": {"application": 1.0},
+                "criterion_facet_weights": {
+                    "setup": {"application": 0.5},
+                    "answer": {"application": 0.5},
+                },
+                "grading_rubric": {
+                    "max_points": 4,
+                    "criteria": [
+                        {"id": "setup", "points": 3, "description": "Sets up the method."},
+                        {"id": "answer", "points": 3, "description": "Gives the final answer."},
+                    ],
+                    "fatal_errors": [],
+                },
+            }
+        )
+    )
+
+    patch_id = persist_authoring_proposal(vault_root, proposal, provider="codex", clock=FrozenClock(NOW))
+    item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
+
+    assert item["validation_status"] == "invalid"
+    assert item["validation_errors"] == ["invalid_grading_rubric:criteria_points_exceed_max_points"]
+
+
 def test_generated_practice_rejects_unknown_metadata_keys(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)
@@ -509,7 +540,7 @@ def test_manual_practice_missing_evidence_weights_is_warning(tmp_path):
     assert item["validation_errors"] == ["metadata_review:missing_evidence_weights"]
 
 
-def test_generated_practice_missing_criterion_facet_weights_is_warning(tmp_path):
+def test_generated_practice_single_facet_backfills_criterion_facet_weights(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)
     proposal = AuthoringProposal.model_validate(
@@ -525,9 +556,29 @@ def test_generated_practice_missing_criterion_facet_weights_is_warning(tmp_path)
     item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
 
     assert item["decision"] == "pending"
+    # A single evidence facet fully determines the criterion->facet map, so it is
+    # backfilled and the review no longer carries the missing_criterion_facet_weights warning.
+    assert item["validation_status"] == "valid"
+    assert item["payload"]["criterion_facet_weights"] == {"correctness": {"application": 1.0}}
+    assert "pi_svd_generated_metadata" not in load_vault(vault_root).practice_items
+
+
+def test_generated_practice_missing_evidence_weights_is_backfilled_uniform(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    proposal = AuthoringProposal.model_validate(
+        _generated_practice_proposal_payload({"evidence_facets": ["application", "recall"]})
+    )
+
+    patch_id = persist_authoring_proposal(vault_root, proposal, provider="codex", clock=FrozenClock(NOW))
+    item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
+
+    # evidence_weights is uniformly normalized over the facets...
+    assert item["payload"]["evidence_weights"] == {"application": 0.5, "recall": 0.5}
+    # ...but with >1 facet the criterion->facet assignment is not derivable, so that
+    # warning still surfaces for human review.
     assert item["validation_status"] == "warning"
     assert item["validation_errors"] == ["metadata_review:missing_criterion_facet_weights"]
-    assert "pi_svd_generated_metadata" not in load_vault(vault_root).practice_items
 
 
 def test_unresolved_source_ref_is_persisted_invalid(tmp_path):

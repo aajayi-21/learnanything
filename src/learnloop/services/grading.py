@@ -203,7 +203,7 @@ def validate_codex_grading_proposal(
                 points_awarded=evidence.points_awarded,
                 evidence=evidence.evidence,
                 notes=evidence.notes,
-                learner_confidence=evidence.learner_confidence,
+                learner_confidence=_canonical_learner_confidence(evidence.learner_confidence),
             )
         )
 
@@ -259,6 +259,19 @@ def validate_codex_grading_proposal(
                 target_criterion_ids=target_criterion_ids,
             )
         )
+    validated_repair_suggestions: list[dict[str, Any]] = []
+    for suggestion in proposal.repair_suggestions:
+        target_evidence_families: list[str] = []
+        for raw_target in suggestion.target_evidence_families:
+            target = vault.canonical_facet_id(raw_target)
+            if target in known_facets:
+                if target not in target_evidence_families:
+                    target_evidence_families.append(target)
+            else:
+                unknown_target_families.add(raw_target)
+        payload = suggestion.model_dump(mode="json")
+        payload["target_evidence_families"] = target_evidence_families
+        validated_repair_suggestions.append(payload)
     manual_review_reason = "codex_manual_review" if proposal.manual_review_recommended else None
     if manual_review_reason is None and proposal.grader_confidence < 0.4:
         manual_review_reason = "low_grader_confidence"
@@ -285,7 +298,7 @@ def validate_codex_grading_proposal(
         grader_confidence=proposal.grader_confidence,
         manual_review_reason=manual_review_reason,
         feedback_md=proposal.feedback_md,
-        repair_suggestions=[suggestion.model_dump(mode="json") for suggestion in proposal.repair_suggestions],
+        repair_suggestions=validated_repair_suggestions,
     )
 
 
@@ -305,6 +318,12 @@ def _resolved_error_severity(vault: LoadedVault, error_type: str, severity: floa
     if taxonomy is not None:
         return taxonomy.severity_default
     return BUILTIN_ERROR_TYPE_DEFAULTS.get(error_type, 0.5)
+
+
+def _canonical_learner_confidence(value: str | None) -> str | None:
+    if value == "unknown":
+        return "absent"
+    return value
 
 
 def _grading_error_taxonomy(vault: LoadedVault) -> dict[str, object]:

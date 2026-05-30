@@ -49,26 +49,26 @@ repair_targets:
   - contextual_meaning
   - fatal_static_embedding_only
 grading_rubric:
-  max_points: 5
+  max_points: 4
   criteria:
     - id: initial_embedding_lookup
-      points: 1.0
+      points: 0.8
       description: States that the initial vector comes from an embedding matrix
         or token embedding lookup.
     - id: initial_context_free
-      points: 1.0
+      points: 0.8
       description: Explains that the initial vector only represents the 
         token/word before surrounding context is incorporated.
     - id: blocks_update_vector
-      points: 1.0
+      points: 0.8
       description: Mentions that transformer blocks update or transform the 
         vector.
     - id: incorporates_surroundings
-      points: 1.0
+      points: 0.8
       description: Mentions that information from surrounding or distant context
         is incorporated.
     - id: richer_specific_meaning
-      points: 1.0
+      points: 0.8
       description: Explains that the resulting vector has richer, more specific 
         contextual meaning.
   fatal_errors:

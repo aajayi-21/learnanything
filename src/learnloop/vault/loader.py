@@ -394,6 +394,7 @@ def add_note(
     body: str,
     *,
     source_type: str = "learner_note",
+    related_los: list[str] | None = None,
     clock: Clock | None = None,
 ) -> Path:
     vault = load_vault(root)
@@ -410,7 +411,7 @@ def add_note(
             "schema_version": 1,
             "id": normalized_note,
             "subjects": [normalized_subject],
-            "related_los": [],
+            "related_los": list(dict.fromkeys(related_los or [])),
             "related_concepts": [],
             "source_type": source_type,
             "created_at": now,

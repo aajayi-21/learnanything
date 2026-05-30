@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from learnloop.clock import Clock, parse_utc, utc_now_iso
+from learnloop.clock import Clock, SystemClock, parse_utc, utc_now_iso
 from learnloop.db.connection import connect
 from learnloop.db.migrate import apply_migrations
 from learnloop.ids import new_ulid
@@ -742,6 +743,7 @@ class Repository:
         *,
         triggered_actions: list[str] | None = None,
         suppressed_actions: list[str] | None = None,
+        gate_diagnostics: Mapping[str, Any] | None = None,
     ) -> bool:
         assignments: list[str] = []
         parameters: list[Any] = []
@@ -751,6 +753,9 @@ class Repository:
         if suppressed_actions is not None:
             assignments.append("suppressed_actions_json = ?")
             parameters.append(_json(suppressed_actions))
+        if gate_diagnostics is not None:
+            assignments.append("gate_diagnostics_json = ?")
+            parameters.append(_json(gate_diagnostics))
         if not assignments:
             return False
         parameters.append(attempt_id)
@@ -1344,7 +1349,8 @@ class Repository:
                     UPDATE intervention_needs
                     SET attempt_id = ?, practice_item_id = ?, trigger_reason = ?,
                         error_types_json = ?, priority = ?, blocked_reason = ?,
-                        candidate_requirements_json = ?, updated_at = ?
+                        candidate_requirements_json = ?, diagnostic_focus_json = ?,
+                        updated_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -1355,6 +1361,7 @@ class Repository:
                         need.get("priority", 0.5),
                         need["blocked_reason"],
                         _json(need.get("candidate_requirements", {})),
+                        _json(need.get("diagnostic_focus")) if need.get("diagnostic_focus") is not None else None,
                         now,
                         need_id,
                     ),
@@ -1367,9 +1374,10 @@ class Repository:
                       id, attempt_id, learning_object_id, practice_item_id,
                       desired_intent, trigger_reason, target_facets_json,
                       error_types_json, priority, status, blocked_reason,
-                      candidate_requirements_json, created_at, updated_at
+                      candidate_requirements_json, diagnostic_focus_json,
+                      created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         need_id,
@@ -1384,6 +1392,7 @@ class Repository:
                         need.get("status", "pending"),
                         need["blocked_reason"],
                         _json(need.get("candidate_requirements", {})),
+                        _json(need.get("diagnostic_focus")) if need.get("diagnostic_focus") is not None else None,
                         need.get("created_at", now),
                         now,
                     ),
@@ -1445,6 +1454,20 @@ class Repository:
             )
             connection.commit()
             return cursor.rowcount > 0
+
+    def intervention_needs_for_diagnostic_proposal(self, patch_id: str) -> list[dict[str, Any]]:
+        prefix = f"diagnostic_proposal_queued:{patch_id}"
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM intervention_needs
+                WHERE status = 'fulfilled'
+                  AND (blocked_reason = ? OR blocked_reason LIKE ?)
+                ORDER BY created_at, id
+                """,
+                (prefix, f"{prefix}:%"),
+            ).fetchall()
+        return [_decode_intervention_need(row) for row in rows]
 
     def probe_states(self) -> dict[str, ProbeState]:
         with self.connection() as connection:
@@ -2038,6 +2061,47 @@ class Repository:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def session_day_streak(self, *, clock: Clock | None = None) -> dict[str, Any]:
+        """Consecutive-day study streak derived from session start timestamps.
+
+        Days are counted in the machine's local timezone. ``current`` is the run
+        of consecutive days ending today (or yesterday, if today has no session
+        yet but the streak is still alive). ``active_today`` reports whether a
+        session was already started today, and ``longest`` is the best run ever.
+        """
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT started_at FROM sessions WHERE started_at IS NOT NULL"
+            ).fetchall()
+
+        days: set[date] = set()
+        for row in rows:
+            started = parse_utc(row["started_at"])
+            if started is not None:
+                days.add(started.astimezone().date())
+
+        if not days:
+            return {"current": 0, "active_today": False, "longest": 0}
+
+        today = (clock or SystemClock()).now().astimezone().date()
+        active_today = today in days
+
+        anchor = today if active_today else today - timedelta(days=1)
+        current = 0
+        cursor = anchor
+        while cursor in days:
+            current += 1
+            cursor -= timedelta(days=1)
+
+        ordered = sorted(days)
+        longest = 1
+        run = 1
+        for previous, day in zip(ordered, ordered[1:]):
+            run = run + 1 if (day - previous).days == 1 else 1
+            longest = max(longest, run)
+
+        return {"current": current, "active_today": active_today, "longest": longest}
+
     def end_open_sessions_except(self, session_id: str, *, clock: Clock | None = None) -> int:
         now = utc_now_iso(clock)
         with self.connection() as connection:
@@ -2285,11 +2349,12 @@ class Repository:
                     INSERT INTO proposed_patch_items(
                       id, proposed_patch_id, client_item_id, item_type, operation,
                       target_entity_type, target_entity_id, payload_json,
-                      audit_json, edited_payload_json, decision, validation_status,
-                      validation_errors_json, applied_change_batch_id,
-                      decided_at, decided_by, created_at, updated_at
+                      source_ref_ids_json, audit_json, edited_payload_json,
+                      decision, validation_status, validation_errors_json,
+                      applied_change_batch_id, decided_at, decided_by,
+                      created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.get("id") or new_ulid(),
@@ -2300,6 +2365,7 @@ class Repository:
                         item.get("target_entity_type"),
                         item.get("target_entity_id"),
                         _json(item["payload"]),
+                        _json(item.get("source_ref_ids", [])),
                         _json(item.get("audit")) if item.get("audit") is not None else None,
                         _json(item.get("edited_payload")) if item.get("edited_payload") is not None else None,
                         item.get("decision", "pending"),
@@ -2903,9 +2969,10 @@ class Repository:
               attempt_id, predicted_score_dist_json, predicted_error_type_dist_json,
               observed_joint_bucket_json, predictive_surprise, bayesian_surprise,
               surprise_direction, fsrs_interval_factor, posterior_delta_json,
-              triggered_actions_json, suppressed_actions_json, algorithm_version, created_at
+              triggered_actions_json, suppressed_actions_json, gate_diagnostics_json,
+              algorithm_version, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 surprise["attempt_id"],
@@ -2919,6 +2986,7 @@ class Repository:
                 _json(surprise.get("posterior_delta")),
                 _json(surprise.get("triggered_actions", [])),
                 _json(surprise.get("suppressed_actions", [])),
+                _json(surprise.get("gate_diagnostics")),
                 surprise["algorithm_version"],
                 surprise["created_at"],
             ),
@@ -3547,6 +3615,7 @@ def _decode_intervention_need(row: sqlite3.Row) -> dict[str, Any]:
     payload["target_facets"] = _loads(payload.pop("target_facets_json"), [])
     payload["error_types"] = _loads(payload.pop("error_types_json"), [])
     payload["candidate_requirements"] = _loads(payload.pop("candidate_requirements_json"), {})
+    payload["diagnostic_focus"] = _loads(payload.pop("diagnostic_focus_json", None), None)
     return payload
 
 
@@ -3608,6 +3677,7 @@ def _decode_surprise(row: sqlite3.Row) -> dict[str, Any]:
     payload["posterior_delta"] = _loads(payload.pop("posterior_delta_json"), None)
     payload["triggered_actions"] = _loads(payload.pop("triggered_actions_json"), [])
     payload["suppressed_actions"] = _loads(payload.pop("suppressed_actions_json"), [])
+    payload["gate_diagnostics"] = _loads(payload.pop("gate_diagnostics_json"), None)
     return payload
 
 
@@ -3677,6 +3747,7 @@ def _decode_proposal_batch(row: sqlite3.Row) -> dict[str, Any]:
 def _decode_proposal_item(row: sqlite3.Row) -> dict[str, Any]:
     payload = dict(row)
     payload["payload"] = _loads(payload.pop("payload_json"), {})
+    payload["source_ref_ids"] = _loads(payload.pop("source_ref_ids_json", None), [])
     payload["audit"] = _loads(payload.pop("audit_json", None), None)
     payload["edited_payload"] = _loads(payload.pop("edited_payload_json"), None)
     payload["validation_errors"] = _loads(payload.pop("validation_errors_json"), [])

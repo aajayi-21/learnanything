@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from learnloop.services.proposals import queue_accepted_diagnostic_followups
 from learnloop.services.scheduler import SchedulerSession, build_due_queue, explain_practice_item
 from learnloop_sidecar.context import SidecarContext
 from learnloop_sidecar.dto import ParamsModel, versioned
@@ -30,6 +31,7 @@ class PracticeItemInput(ParamsModel):
 @method("get_today_queue", QueueInput)
 def get_today_queue(ctx: SidecarContext, params: QueueInput) -> dict[str, Any]:
     vault, repository = ctx.require_vault()
+    queue_accepted_diagnostic_followups(repository)
     queue = build_due_queue(
         vault,
         repository,

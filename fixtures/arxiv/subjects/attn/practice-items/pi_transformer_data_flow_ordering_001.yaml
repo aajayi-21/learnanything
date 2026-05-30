@@ -53,34 +53,34 @@ repair_targets:
   - fatal_softmax_before_unembedding
   - fatal_attention_as_tokenizer
 grading_rubric:
-  max_points: 6
+  max_points: 4
   criteria:
     - id: correct_token_embedding_start
-      points: 1.0
+      points: 0.666667
       description: Places tokenization before embedding vectors.
     - id: correct_block_order
-      points: 1.0
+      points: 0.666667
       description: Places attention before or alongside repeated feed-forward 
         processing as part of transformer blocks.
     - id: correct_output_order
-      points: 1.0
+      points: 0.666667
       description: Places unembedding before softmax distribution.
     - id: token_embedding_functions
-      points: 1.0
+      points: 0.666667
       description: Correctly describes tokenization and embeddings.
     - id: block_functions
-      points: 1.0
+      points: 0.666667
       description: Correctly describes attention as context exchange and 
         feed-forward as parallel per-vector processing.
     - id: output_functions
-      points: 1.0
+      points: 0.666665
       description: Correctly describes unembedding as raw scores/logits and 
         softmax as probabilities.
   fatal_errors:
     - id: fatal_softmax_before_unembedding
       description: Places softmax before the unembedding/raw-score step in a way
         that reverses the source's output process.
-      max_grade: 3
+      max_grade: 2
     - id: fatal_attention_as_tokenizer
       description: Claims attention is what breaks text into tokens.
       max_grade: 2

@@ -50,11 +50,16 @@ def test_facet_diagnostic_schema_is_available(tmp_path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(grading_evidence)")
         }
+        intervention_need_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(intervention_needs)")
+        }
         decision_type_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decision_features'"
         ).fetchone()["sql"]
 
     assert "learner_confidence" in grading_columns
+    assert "diagnostic_focus_json" in intervention_need_columns
     assert "followup" in decision_type_sql
 
 

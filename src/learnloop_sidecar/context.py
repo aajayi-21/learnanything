@@ -59,6 +59,7 @@ class SidecarContext:
                 "config": config_dto(vault),
                 "health": runtime_health(vault, repository),
                 "active_session": active_session,
+                "streak": repository.session_day_streak(),
             }
         )
 

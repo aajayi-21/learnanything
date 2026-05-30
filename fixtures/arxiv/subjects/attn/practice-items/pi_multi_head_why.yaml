@@ -50,23 +50,23 @@ repair_targets:
   - fatal_only_speed
   - fatal_independent_models
 grading_rubric:
-  max_points: 5
+  max_points: 4
   criteria:
     - id: subspaces
-      points: 1.5
+      points: 1.2
       description: Mentions different representation subspaces.
     - id: positions
-      points: 1.0
+      points: 0.8
       description: Mentions attending to different positions.
     - id: averaging_limitation
-      points: 1.0
+      points: 0.8
       description: Explains that a single head can inhibit distinct attention 
         patterns through averaging.
     - id: cost_reasoning
-      points: 1.0
+      points: 0.8
       description: Notes reduced per-head dimensions keep cost similar.
     - id: not_just_parallelism
-      points: 0.5
+      points: 0.4
       description: Does not reduce the answer to hardware parallelism alone.
   fatal_errors:
     - id: fatal_only_speed

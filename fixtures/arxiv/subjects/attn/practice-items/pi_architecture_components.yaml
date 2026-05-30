@@ -57,42 +57,42 @@ repair_targets:
   - fatal_no_decoder_cross_attention
   - fatal_encoder_is_recurrent
 grading_rubric:
-  max_points: 8
+  max_points: 4
   criteria:
     - id: encoder_sublayers
-      points: 1.5
+      points: 0.75
       description: Correctly identifies encoder self-attention and feed-forward 
         sublayers.
     - id: decoder_masked_self_attention
-      points: 1.5
+      points: 0.75
       description: Correctly identifies masked decoder self-attention.
     - id: encoder_decoder_attention
-      points: 1.0
+      points: 0.5
       description: Correctly identifies decoder attention over encoder outputs.
     - id: decoder_ffn
-      points: 1.0
+      points: 0.5
       description: Includes the decoder position-wise feed-forward network.
     - id: residual_connections
-      points: 1.0
+      points: 0.5
       description: Mentions residual connections around sublayers.
     - id: layer_norm
-      points: 1.0
+      points: 0.5
       description: Mentions layer normalization after residual addition.
     - id: dimension_consistency
-      points: 0.5
+      points: 0.25
       description: Mentions shared model dimension enabling residual 
         connections.
     - id: stacked_layers
-      points: 0.5
+      points: 0.25
       description: Mentions that layers are stacked and repeated.
   fatal_errors:
     - id: fatal_no_decoder_cross_attention
       description: Omits encoder-decoder attention from the decoder.
-      max_grade: 5
+      max_grade: 3
     - id: fatal_encoder_is_recurrent
       description: Describes the Transformer encoder as an RNN or convolutional 
         stack rather than attention/feed-forward layers.
-      max_grade: 3
+      max_grade: 2
 provenance:
   origin: canonical_extract
   source_refs:

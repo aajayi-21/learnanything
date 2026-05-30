@@ -5,7 +5,10 @@ from datetime import timedelta
 from learnloop.clock import FrozenClock
 from learnloop.db.repositories import MasteryState, Repository
 from learnloop.services.attempts import AttemptDraft, SelfGradeInput, complete_self_graded_attempt
-from learnloop.services.followups import evaluate_negative_surprise_followup
+from learnloop.services.followups import (
+    evaluate_intervention_followup,
+    evaluate_negative_surprise_followup,
+)
 from learnloop.services.scheduler import build_due_queue
 from learnloop.vault.loader import load_vault
 
@@ -90,6 +93,75 @@ def test_negative_surprise_followup_stops_forcing_after_followup_attempt(tmp_pat
     assert repository.pending_followup_practice_item_ids() == []
     queue = build_due_queue(loaded, repository, clock=later, persist_explanations=False)
     assert not queue or queue[0].components.get("intervention_followup") is None
+
+
+def test_manual_override_forces_followup_when_gate_silent(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    add_followup_item(vault_root)
+    repository = Repository(paths.sqlite_path)
+    loaded, result = _surprising_attempt(vault_root, repository)
+
+    # Inputs that the automatic gate would ignore: positive direction, no
+    # surprise, confident grade, and no error event.
+    gate_inputs = dict(
+        attempt_id=result.attempt_id,
+        learning_object_id=result.learning_object_id,
+        practice_item_id=result.practice_item_id,
+        surprise_direction="positive",
+        bayesian_surprise=0.0,
+        grader_confidence=0.95,
+        error_event_written=False,
+        available_minutes=30,
+    )
+
+    silent = evaluate_intervention_followup(loaded, repository, **gate_inputs)
+    assert silent.triggered is False
+    assert silent.reason == "no_trigger"
+
+    forced = evaluate_intervention_followup(loaded, repository, manual_override=True, **gate_inputs)
+    assert forced.triggered is True
+    assert forced.practice_item_id == "pi_svd_define_002"
+    # The decision reports what the automatic policy would have done, for tuning.
+    assert forced.gate_diagnostics is not None
+    assert forced.gate_diagnostics["would_auto_fire"] is False
+    assert forced.gate_diagnostics["natural_trigger_reasons"] == []
+    assert "no_trigger" in forced.gate_diagnostics["would_suppress"]
+
+    surprise = repository.latest_attempt_surprise(result.attempt_id)
+    assert "intervention_followup:manual_trigger:pi_svd_define_001" in surprise["triggered_actions"]
+    assert "intervention_followup:queued:pi_svd_define_002" in surprise["triggered_actions"]
+
+    queue = build_due_queue(loaded, repository, clock=FrozenClock(NOW), persist_explanations=False)
+    assert queue[0].practice_item_id == "pi_svd_define_002"
+
+
+def test_manual_override_records_need_when_no_suitable_item(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    loaded, result = _surprising_attempt(vault_root, repository)
+
+    forced = evaluate_intervention_followup(
+        loaded,
+        repository,
+        attempt_id=result.attempt_id,
+        learning_object_id=result.learning_object_id,
+        practice_item_id=result.practice_item_id,
+        surprise_direction="positive",
+        bayesian_surprise=0.0,
+        grader_confidence=0.95,
+        error_event_written=False,
+        available_minutes=30,
+        manual_override=True,
+    )
+
+    assert forced.triggered is False
+    assert forced.need_id is not None
+    assert forced.gate_diagnostics is not None
+    need = repository.intervention_need_for_attempt(result.attempt_id)
+    assert need is not None
+    assert need["status"] == "pending"
 
 
 def test_negative_surprise_suppressed_when_no_suitable_item(tmp_path):

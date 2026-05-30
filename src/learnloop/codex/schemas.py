@@ -58,19 +58,19 @@ class LearningObjectPatchPayload(BaseModel):
 
 class RubricCriterionPayload(BaseModel):
     id: str
-    points: float
+    points: float = Field(gt=0.0, le=4.0)
     description: str
 
 
 class RubricFatalErrorPayload(BaseModel):
     id: str
     description: str
-    max_grade: int
+    max_grade: int = Field(ge=0, le=4)
 
 
 class RubricPatchPayload(BaseModel):
     target_practice_item_id: str | None = None
-    max_points: int = 4
+    max_points: int = Field(default=4, ge=1, le=4)
     criteria: list[RubricCriterionPayload]
     fatal_errors: list[RubricFatalErrorPayload] = Field(default_factory=list)
 
@@ -192,7 +192,7 @@ class CriterionEvidence(BaseModel):
     points_awarded: float
     evidence: str
     notes: str | None = None
-    learner_confidence: Literal["confident", "hedged", "unknown"] | None = None
+    learner_confidence: Literal["confident", "hedged", "absent", "unknown"] | None = None
 
 
 class ErrorAttribution(BaseModel):
@@ -208,6 +208,7 @@ class RepairSuggestion(BaseModel):
     practice_mode: str
     learning_object_id: str | None = None
     rationale: str
+    target_evidence_families: list[str] = Field(default_factory=list)
 
 
 class GradingProposal(BaseModel):
