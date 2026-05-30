@@ -390,6 +390,40 @@ export interface AttemptSurpriseDto {
   followupThresholdNats: number | null;
   triggeredActions: string[];
   suppressedActions: string[];
+  // Per-attempt record of why the follow-up gate did (or did not) fire. Null on
+  // legacy attempts recorded before the gate trace was persisted.
+  gateDiagnostics: FollowupGateDiagnosticsDto | null;
+}
+
+// The single signal that decided a follow-up outcome (e.g. surprise vs τ, grader
+// confidence vs γ_min). `value`/`threshold`/`comparator` render one line without
+// re-deriving thresholds client-side; `satisfied` is whether the signal's own
+// condition held.
+export interface FollowupGateSignalDto {
+  name: string | null;
+  value: number | boolean | null;
+  threshold: number | boolean | null;
+  comparator: string | null;
+  unit: string | null;
+  satisfied: boolean;
+  surpriseDirection?: string | null;
+}
+
+export interface FollowupGateDiagnosticsDto {
+  outcome: "queued" | "need_recorded" | "suppressed" | "not_triggered";
+  decisiveReason: string;
+  decisiveSignal: FollowupGateSignalDto | null;
+  naturalTriggerReasons: string[];
+  triggeredReasons: string[];
+  wouldSuppress: string[];
+  wouldAutoFire: boolean;
+  manualOverride: boolean;
+  bayesianSurprise: number | null;
+  surpriseDirection: string | null;
+  tauFollowupNats: number | null;
+  graderConfidence: number | null;
+  maxErrorSeverity: number | null;
+  targetFacets: string[];
 }
 
 export interface RepairSuggestionDto {

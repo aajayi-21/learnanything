@@ -5,6 +5,8 @@ import type {
   CriterionEvidenceRowDto,
   ErrorEventDto,
   FeedbackBundle,
+  FollowupGateDiagnosticsDto,
+  FollowupGateSignalDto,
   PracticeItemDetail,
 } from "../api/dto";
 import { EntityLink, KeyBar, Pill } from "../components/ui";
@@ -272,6 +274,12 @@ function MasteryDelta({ f }: { f: FeedbackBundle }) {
 }
 
 function followupStatus(f: FeedbackBundle, tau: number): string {
+  // Preferred: the backend gate trace names the single decisive signal for this
+  // attempt (why it did or didn't fire). Falls back to the legacy action-string
+  // reconstruction for attempts recorded before the trace was persisted.
+  const gate = f.surprise.gateDiagnostics;
+  if (gate) return describeGate(gate);
+
   const reasons = interventionReasons(f.surprise.triggeredActions ?? []);
   if (f.followupQueued) {
     return reasons.length
@@ -286,6 +294,82 @@ function followupStatus(f: FeedbackBundle, tau: number): string {
     return `blocked: ${formatInterventionAction(suppressed[0])}`;
   }
   return `no intervention trigger; surprise threshold tau ${tau.toFixed(2)}`;
+}
+
+// ── Follow-up gate explanation ────────────────────────────────────────────────
+// Renders the one decisive trigger/threshold/signal from the backend gate trace.
+const GATE_SIGNAL_LABELS: Record<string, string> = {
+  bayesian_surprise: "surprise",
+  max_error_severity: "error severity",
+  unfamiliar_posterior: "unfamiliar posterior",
+  repeated_item_failures: "repeated item failures",
+  repeated_facet_failures: "repeated facet failures",
+  grader_confidence: "grader confidence",
+  available_minutes: "available minutes",
+  session_interventions: "session interventions",
+};
+
+const GATE_COMPARATORS: Record<string, string> = {
+  ">": ">", ">=": "≥", "<": "<", "<=": "≤", "==": "=",
+};
+
+function gateNum(value: number | boolean | null): string | null {
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return null;
+}
+
+function describeSignal(sig: FollowupGateSignalDto): string {
+  const name = sig.name ?? "";
+  // Signals that aren't a clean numeric comparison.
+  if (name === "error_event_written") return "no error event written";
+  if (name === "manual_trigger") return "manually forced";
+  if (name === "eligible_items") return "no eligible diagnostic item";
+
+  const label = GATE_SIGNAL_LABELS[name] ?? name.replace(/_/g, " ");
+  const value = gateNum(sig.value);
+  const cmp = sig.comparator ? GATE_COMPARATORS[sig.comparator] ?? sig.comparator : "";
+  let threshold = gateNum(sig.threshold);
+  // Surprise compares against τ; grader confidence against γ_min.
+  if (threshold != null && name === "bayesian_surprise") threshold = `τ ${threshold}`;
+  else if (threshold != null && name === "grader_confidence") threshold = `γ_min ${threshold}`;
+  const unit = sig.unit === "nats" ? " nats" : "";
+
+  if (value == null && threshold == null) return label;
+  if (value == null) return `${label} ${cmp} ${threshold}`.trim();
+  if (threshold == null) return `${label} ${value}${unit}`.trim();
+  return `${label} ${value}${unit} ${cmp} ${threshold}`.trim();
+}
+
+function describeGate(gate: FollowupGateDiagnosticsDto): string {
+  const sig = gate.decisiveSignal;
+  const signalText = sig ? describeSignal(sig) : gate.decisiveReason.replace(/_/g, " ");
+
+  switch (gate.outcome) {
+    case "queued":
+      if (gate.decisiveReason === "manual_trigger" || gate.manualOverride) {
+        return gate.naturalTriggerReasons.length
+          ? `manually forced (would auto-fire: ${gate.naturalTriggerReasons.join(", ").replace(/_/g, " ")})`
+          : "manually forced — gate was silent";
+      }
+      return `triggered by ${signalText}`;
+    case "need_recorded": {
+      const trigger = gate.triggeredReasons.find((r) => r !== "manual_trigger");
+      const trigText = trigger ? trigger.replace(/_/g, " ") : "trigger";
+      return `${trigText} fired · no suitable item, diagnostic need recorded`;
+    }
+    case "suppressed":
+      return `blocked: ${signalText}`;
+    case "not_triggered":
+    default:
+      // Most informative single line for "nothing fired": surprise vs τ. For a
+      // non-negative surprise, the threshold comparison is moot — say so.
+      if (sig && sig.name === "bayesian_surprise" && gate.surpriseDirection !== "negative") {
+        const v = gateNum(sig.value);
+        return `no trigger · ${gate.surpriseDirection ?? "non-negative"} surprise${v != null ? ` ${v} nats` : ""}`;
+      }
+      return `no trigger · ${signalText}`;
+  }
 }
 
 function interventionReasons(actions: string[]): string[] {
