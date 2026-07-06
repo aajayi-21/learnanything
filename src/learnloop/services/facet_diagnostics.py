@@ -8,7 +8,8 @@ from learnloop.config import LearnLoopConfig
 from learnloop.db.repositories import FacetRecallState, FacetUncertaintyState, MasteryState, Repository
 from learnloop.services.mastery import display_mastery
 from learnloop.services.probes import apply_facet_observation
-from learnloop.services.recall_coverage import clamp, criterion_facet_weights_for_item
+from learnloop.numeric import clamp
+from learnloop.services.recall_coverage import criterion_facet_weights_for_item
 from learnloop.vault.models import LoadedVault, PracticeItem, Rubric
 
 

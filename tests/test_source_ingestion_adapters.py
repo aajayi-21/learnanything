@@ -14,8 +14,10 @@ from learnloop.services.source_ingestion import (
     SourceIngestionError,
     chunk_normalized_source,
     detect_source_kind,
+    fetch_source,
     ingest_canonical_source,
     normalize_source,
+    _extract_pdf_markdown,
     _fetch_youtube_transcript,
 )
 from learnloop.vault.loader import load_vault
@@ -32,8 +34,66 @@ def test_source_kind_detection_handles_special_cases(tmp_path):
     assert detect_source_kind("https://arxiv.org/abs/2401.12345") == "arxiv_html"
     assert detect_source_kind("https://example.edu/page") == "website_page"
     assert detect_source_kind(str(html), learning_object_ids=["lo_svd_definition"]) == "textbook_chapter"
-    with pytest.raises(SourceIngestionError, match="PDF OCR is deferred"):
-        detect_source_kind(str(tmp_path / "paper.pdf"))
+    # A text-based PDF is ingested like a web page (normalized to Markdown).
+    assert detect_source_kind(str(tmp_path / "paper.pdf")) == "website_page"
+
+
+def _make_pdf_bytes(lines: list[str]) -> bytes:
+    """Build a minimal single-page PDF whose text layer holds ``lines``."""
+
+    text = ""
+    y = 700
+    for line in lines:
+        text += f"BT /F1 12 Tf 72 {y} Td ({line}) Tj ET\n"
+        y -= 20
+    stream = text.encode("latin-1")
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = b"%PDF-1.4\n"
+    offsets: list[int] = []
+    for index, obj in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % index + obj + b"\nendobj\n"
+    xref_pos = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF" % (len(objs) + 1, xref_pos)
+    return out
+
+
+def test_pdf_source_is_normalized_to_markdown(tmp_path):
+    pdf_path = tmp_path / "glossary.pdf"
+    pdf_path.write_bytes(
+        _make_pdf_bytes(
+            [
+                "1. A: Which nerve tension test is positive for hand pain overhead?",
+                "A. Ulnar B. Median C. Radial D. Musculocutaneous",
+            ]
+        )
+    )
+
+    assert detect_source_kind(str(pdf_path)) == "website_page"
+    fetched = fetch_source(tmp_path, str(pdf_path), kind="website_page", allow_auto_captions=False)
+    assert fetched.original_uri.endswith("glossary.pdf")
+
+    normalized = normalize_source(fetched, "website_page")
+    assert "Ulnar" in normalized.markdown
+    assert "nerve tension test" in normalized.markdown
+
+    chunks = chunk_normalized_source(normalized)
+    assert any(chunk.chunk_kind == "prose" and chunk.text.strip() for chunk in chunks)
+
+
+def test_pdf_without_text_layer_raises():
+    with pytest.raises(SourceIngestionError):
+        _extract_pdf_markdown(b"%PDF-1.4 not-really-a-pdf")
 
 
 def test_arxiv_html_normalizer_captures_descriptor_fields():

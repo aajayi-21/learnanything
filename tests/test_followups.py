@@ -117,7 +117,9 @@ def test_manual_override_forces_followup_when_gate_silent(tmp_path):
 
     silent = evaluate_intervention_followup(loaded, repository, **gate_inputs)
     assert silent.triggered is False
-    assert silent.reason == "no_trigger"
+    # Score mode (default): a silent gate reports the counterfactual margin;
+    # cascade mode reports "no_trigger".
+    assert silent.reason in ("no_trigger", "gate_score_below_threshold")
 
     forced = evaluate_intervention_followup(loaded, repository, manual_override=True, **gate_inputs)
     assert forced.triggered is True
@@ -126,7 +128,7 @@ def test_manual_override_forces_followup_when_gate_silent(tmp_path):
     assert forced.gate_diagnostics is not None
     assert forced.gate_diagnostics["would_auto_fire"] is False
     assert forced.gate_diagnostics["natural_trigger_reasons"] == []
-    assert "no_trigger" in forced.gate_diagnostics["would_suppress"]
+    assert {"no_trigger", "gate_score_below_threshold"} & set(forced.gate_diagnostics["would_suppress"])
 
     surprise = repository.latest_attempt_surprise(result.attempt_id)
     assert "intervention_followup:manual_trigger:pi_svd_define_001" in surprise["triggered_actions"]
@@ -215,7 +217,7 @@ def test_followup_gate_skips_non_negative_surprise(tmp_path):
     )
 
     assert decision.triggered is False
-    assert decision.reason == "no_trigger"
+    assert decision.reason in ("no_trigger", "gate_score_below_threshold")
     surprise = repository.latest_attempt_surprise(result.attempt_id)
     assert surprise["triggered_actions"] == []
     assert surprise["suppressed_actions"] == []

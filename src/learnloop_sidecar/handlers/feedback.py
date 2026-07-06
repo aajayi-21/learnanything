@@ -28,6 +28,11 @@ class TriggerFollowupInput(ParamsModel):
     attempt_id: str
 
 
+class RateFollowupInput(ParamsModel):
+    attempt_id: str
+    useful: bool
+
+
 @method("get_feedback", AttemptInput)
 def get_feedback(ctx: SidecarContext, params: AttemptInput) -> dict[str, Any]:
     vault, repository = ctx.require_vault()
@@ -156,6 +161,37 @@ def trigger_followup(ctx: SidecarContext, params: TriggerFollowupInput) -> dict[
         rubric_score=attempt.get("rubric_score"),
         correctness=attempt.get("correctness"),
         triggered_actions=decision.triggered_actions,
+    )
+    return feedback_bundle(vault, repository, params.attempt_id)
+
+
+@method("rate_followup", RateFollowupInput)
+def rate_followup(ctx: SidecarContext, params: RateFollowupInput) -> dict[str, Any]:
+    """One-tap "was this follow-up useful?" label from the feedback screen.
+
+    Every rating is a gate-fitter training example: a useful auto-fired
+    follow-up is a true positive, a not-useful one a false positive — the
+    complement of the manual-override false-negative stream.
+    """
+
+    vault, repository = ctx.require_vault()
+    attempt = repository.fetch_practice_attempt(params.attempt_id)
+    if attempt is None:
+        raise SidecarError("not_found", f"Attempt {params.attempt_id} not found.")
+    gate_attempt_id = repository.followup_source_attempt(params.attempt_id)
+    repository.upsert_followup_rating(
+        attempt_id=params.attempt_id,
+        gate_attempt_id=gate_attempt_id,
+        useful=params.useful,
+    )
+    log_event(
+        "followup_rated",
+        session_id=attempt.get("session_id"),
+        attempt_id=params.attempt_id,
+        practice_item_id=attempt["practice_item_id"],
+        learning_object_id=attempt["learning_object_id"],
+        gate_attempt_id=gate_attempt_id,
+        useful=params.useful,
     )
     return feedback_bundle(vault, repository, params.attempt_id)
 

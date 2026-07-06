@@ -20,6 +20,15 @@ impl CommandError {
         }
     }
 
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            code: crate::sidecar::TIMEOUT_ERROR_CODE.to_string(),
+            message: message.into(),
+            retryable: true,
+            details: None,
+        }
+    }
+
     pub fn from_rpc(error: &Value) -> Self {
         let data = error.get("data").and_then(Value::as_object);
         Self {

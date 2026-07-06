@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type { ConceptGraphEdge, ConceptGraphNode, ConceptGraphSnapshot } from "../api/dto";
 import { EntityLink } from "../components/ui";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
+import { masteryTone } from "../app/algoConfig";
 
 const NODE_W = 200;
 const NODE_H = 36;
@@ -28,7 +29,7 @@ function conceptPillColor(type: string): PillColor {
 }
 
 function masteryColor(mastery: number): string {
-  return mastery > 0.6 ? COLOR.green : mastery > 0.35 ? COLOR.amber : COLOR.red;
+  return masteryTone(mastery, COLOR);
 }
 
 type Position = { x: number; y: number };

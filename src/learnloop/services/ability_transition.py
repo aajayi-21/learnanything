@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from learnloop.services.recall_coverage import clamp
+from learnloop.numeric import clamp
 from learnloop.vault.models import PracticeItem
 
 

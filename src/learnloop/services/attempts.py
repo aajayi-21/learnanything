@@ -16,13 +16,22 @@ from learnloop.db.repositories import (
     ActiveErrorEvent,
     FacetRecallState,
     FacetUncertaintyState,
+    ItemParameterState,
     MasteryState,
     PracticeItemQualityState,
     PracticeItemState,
     Repository,
 )
 from learnloop.ids import new_ulid
-from learnloop.services.fsrs import MemoryState, Rating, apply_review, interval_for_retention, rating_from_score
+from learnloop.services.fitted_params import resolve_fsrs_weights
+from learnloop.services.fsrs import (
+    FSRS6_DEFAULT_WEIGHTS,
+    MemoryState,
+    Rating,
+    apply_review,
+    interval_for_retention,
+    rating_from_score,
+)
 from learnloop.services.ability_transition import estimate_ability_transition
 from learnloop.services.grading import (
     GradingValidationError,
@@ -49,9 +58,12 @@ from learnloop.services.mastery import (
     display_mastery,
     initial_mastery_state_for_learning_object,
     item_irt_params,
+    resolve_item_irt_params,
+    update_item_difficulty,
     update_mastery_traced,
 )
 from learnloop.services.probes import record_probe_attempt
+from learnloop.services.evidence import attempt_evidence_mass
 from learnloop.services.proposals import maybe_promote_self_tagged_fatal_error
 from learnloop.services.recall_coverage import (
     build_facet_recall_updates,
@@ -223,6 +235,7 @@ class AttemptPriorState:
     aggregate_facet_recall: dict[str, FacetRecallState | None]
     item_facet_recall: dict[str, FacetRecallState | None]
     facet_uncertainty: dict[str, FacetUncertaintyState | None]
+    item_parameter_state: ItemParameterState | None = None
 
     def facet_recall_state(self, facet_id: str, practice_item_id: str | None = None) -> FacetRecallState | None:
         if practice_item_id is None:
@@ -258,6 +271,7 @@ class AttemptApplication:
     ability_transition: dict[str, Any]
     attempt_debug_payload: dict[str, object]
     result: AttemptResult
+    item_parameter_state: ItemParameterState | None = None
 
 
 class AttemptServiceNotReady(RuntimeError):
@@ -776,6 +790,7 @@ def _persist_attempt_application(
             quality_state=application.quality_state,
             ability_transition=application.ability_transition,
             attempt_debug_payload=application.attempt_debug_payload,
+            item_parameter_state=application.item_parameter_state,
         )
     else:
         repository.record_attempt_outcome(
@@ -790,6 +805,7 @@ def _persist_attempt_application(
             quality_state=application.quality_state,
             ability_transition=application.ability_transition,
             attempt_debug_payload=application.attempt_debug_payload,
+            item_parameter_state=application.item_parameter_state,
         )
 
 
@@ -833,6 +849,11 @@ def load_attempt_prior_state(
             facet: repository.facet_uncertainty_state(learning_object_id, facet)
             for facet in facet_ids
         },
+        item_parameter_state=(
+            repository.item_parameter_state(practice_item_id)
+            if vault.config.mastery.irt.eb_difficulty_enabled
+            else None
+        ),
     )
 
 
@@ -859,6 +880,7 @@ def _compute_resolved_grade_application(
         attempt_type=draft.attempt_type,
         hints_used=draft.hints_used,
         learner_answer_md=draft.learner_answer_md,
+        evidence=vault.config.evidence,
     )
     if prior_state is None:
         prior_state = load_attempt_prior_state(
@@ -872,7 +894,9 @@ def _compute_resolved_grade_application(
     prior_mastery = prior_state.mastery
     grade_attributions = _canonicalized_grade_attributions(vault, grade.error_attributions)
     primary_error_type = _primary_error_type(grade_attributions)
-    item_a, item_b = item_irt_params(item, learning_object, vault.config.mastery)
+    item_a, item_b = resolve_item_irt_params(
+        item, learning_object, vault.config.mastery, prior_state.item_parameter_state
+    )
     expected_correctness, prediction_trace = predicted_correctness_from_prior(
         prior_state.aggregate_facet_recall,
         item,
@@ -895,6 +919,7 @@ def _compute_resolved_grade_application(
         attempt_type=draft.attempt_type,
         hints_used=draft.hints_used,
         grader_confidence=grade.grader_confidence,
+        evidence=vault.config.evidence,
     )
     familiarity = familiarity_discount_from_attempts(
         prior_state.recent_learning_object_attempts,
@@ -987,6 +1012,7 @@ def _compute_resolved_grade_application(
         error_sharpening=error_impact.error_sharpening,
         observation_reliability=reliability.observation_reliability,
         observation_weight_override=error_impact.observation_weight,
+        attempt_evidence_mass=attempt_evidence_mass(draft.attempt_type, vault.config.evidence),
     )
     # IRT (a, b) resolved once from static authored/LLM fields and shared by the
     # mastery EKF and the probability-space surprise (spec §4.3 / §8).
@@ -1004,6 +1030,22 @@ def _compute_resolved_grade_application(
         vault.config,
         covered_fraction=breadth_fraction,
     )
+    # Empirical-Bayes per-item difficulty: alternating conditional update on b
+    # using the learner's fresh posterior mean (dark unless eb_difficulty_enabled).
+    next_item_parameters: ItemParameterState | None = None
+    if vault.config.mastery.irt.eb_difficulty_enabled:
+        _authored_a, authored_b = item_irt_params(item, learning_object, vault.config.mastery)
+        next_item_parameters = update_item_difficulty(
+            prior_state.item_parameter_state,
+            practice_item_id=item.id,
+            authored_b=authored_b,
+            item_a=item_a,
+            learner_mu_posterior=posterior_mastery.logit_mean,
+            observation=mastery_observation,
+            config=vault.config.mastery,
+            algorithm_version=vault.config.algorithms.algorithm_version,
+            updated_at=now_iso,
+        )
     surprise = compute_surprise(
         prior=prior_mastery,
         posterior=posterior_mastery,
@@ -1016,15 +1058,13 @@ def _compute_resolved_grade_application(
     )
 
     previous_state = prior_state.practice_item_state
-    fsrs_rating = _capped_rating(
-        rating_from_score(grade.rubric_score, rubric.max_points),
-        item,
-        draft.hints_used,
-    )
+    fsrs_rating = fsrs_rating_for_attempt(item, grade.rubric_score, rubric.max_points, draft.hints_used)
+    fsrs_weights = resolve_fsrs_weights(repository)
+    fsrs_weights_fitted = fsrs_weights is not FSRS6_DEFAULT_WEIGHTS
     elapsed_days = _elapsed_days(previous_state, observed_at)
     previous_memory = _memory_state(previous_state)
-    next_memory = apply_review(previous_memory, fsrs_rating, elapsed_days)
-    interval_days = interval_for_retention(next_memory.stability) * surprise.fsrs_interval_factor
+    next_memory = apply_review(previous_memory, fsrs_rating, elapsed_days, fsrs_weights)
+    interval_days = interval_for_retention(next_memory.stability, weights=fsrs_weights) * surprise.fsrs_interval_factor
     due_at = (observed_at + timedelta(days=interval_days)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     attempt_record = {
@@ -1156,6 +1196,7 @@ def _compute_resolved_grade_application(
         "facet_uncertainty_updates": facet_uncertainty_updates,
         "facet_uncertainty_trace": facet_uncertainty_trace,
         "ability_transition": ability_transition,
+        "fsrs_weights_fitted": fsrs_weights_fitted,
         "algorithm_version": vault.config.algorithms.algorithm_version,
         "created_at": now_iso,
     }
@@ -1207,6 +1248,7 @@ def _compute_resolved_grade_application(
         ability_transition=ability_transition_event,
         attempt_debug_payload=debug_payload,
         result=result,
+        item_parameter_state=next_item_parameters,
     )
 
 
@@ -1463,6 +1505,16 @@ def _evidence_coverage(item: PracticeItem, criterion_points: dict[str, float]) -
 def _hint_dampening(item: PracticeItem, hints_used: int) -> float:
     value = _hint_policy_value(item.hint_policy.mastery_alpha_dampening_by_hint, hints_used)
     return float(value) if value is not None else 1.0
+
+
+def fsrs_rating_for_attempt(item: PracticeItem, rubric_score: int, max_points: int, hints_used: int) -> Rating:
+    """FSRS rating for a graded attempt: score binning + the item's hint cap.
+
+    Single source of truth shared by the live attempt path and offline fitting
+    (review-log reconstruction must reproduce live semantics exactly).
+    """
+
+    return _capped_rating(rating_from_score(rubric_score, max_points), item, hints_used)
 
 
 def _capped_rating(rating: Rating, item: PracticeItem, hints_used: int) -> Rating:

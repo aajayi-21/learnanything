@@ -204,6 +204,8 @@ def feedback_bundle(vault: LoadedVault, repository: Repository, attempt_id: str)
     surprise = repository.latest_attempt_surprise(attempt_id) or {}
     mastery_after = mastery_dto(repository, attempt["learning_object_id"], vault)
     intervention_need = repository.intervention_need_for_attempt(attempt_id)
+    gate_attempt_id = repository.followup_source_attempt(attempt_id)
+    rating = repository.followup_rating(attempt_id)
     return versioned(
         {
             "attempt_id": attempt_id,
@@ -236,6 +238,12 @@ def feedback_bundle(vault: LoadedVault, repository: Repository, attempt_id: str)
             "feedback_last_shown_at": metadata.get("last_shown_at"),
             "repair_suggestions": metadata.get("repair_suggestions") or [],
             "intervention_need": intervention_need_dto(intervention_need),
+            # Non-null when this attempt is itself a follow-up: the rating
+            # strip renders and rate_followup joins back to the gate decision.
+            "followup_source": ({"gate_attempt_id": gate_attempt_id} if gate_attempt_id is not None else None),
+            "followup_rating": (
+                {"useful": rating["useful"], "rated_at": rating["rated_at"]} if rating is not None else None
+            ),
             "followup_queued": any(
                 isinstance(action, str)
                 and (

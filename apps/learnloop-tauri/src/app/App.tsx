@@ -12,6 +12,7 @@ import { PracticeScreen } from "../screens/PracticeScreen";
 import { ProposalsScreen } from "../screens/ProposalsScreen";
 import { StartScreen } from "../screens/StartScreen";
 import { TodayScreen } from "../screens/TodayScreen";
+import { setAlgoConfig } from "./algoConfig";
 
 type TodayStage = "queue" | "practice" | "feedback";
 
@@ -43,6 +44,7 @@ export function App() {
 
     api.loadVault()
       .then((appSnapshot) => {
+        setAlgoConfig(appSnapshot.config);
         setSnapshot(appSnapshot);
         if (appSnapshot.activeSession) {
           setSession(appSnapshot.activeSession);
@@ -149,6 +151,7 @@ export function App() {
       try {
         await api.selectVault(path);
         const next = await api.loadVault();
+        setAlgoConfig(next.config);
         setSnapshot(next);
         setSession(next.activeSession ?? null);
         setPracticeItemId(null);

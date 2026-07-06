@@ -58,6 +58,18 @@ class MasteryState:
 
 
 @dataclass(frozen=True)
+class ItemParameterState:
+    """Per-item empirical-Bayes difficulty posterior (b in the 2PL link)."""
+
+    practice_item_id: str
+    b_mean: float
+    b_var: float
+    evidence_count: int
+    algorithm_version: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class ActiveErrorEvent:
     id: str
     learning_object_id: str
@@ -737,6 +749,118 @@ class Repository:
                     pending.append({"practice_item_id": practice_item_id, "action_type": action_type})
         return pending
 
+    def followup_source_attempt(self, attempt_id: str) -> str | None:
+        """Gate-decision attempt whose queued follow-up this attempt answered.
+
+        Mirrors ``pending_followup_practice_items``: the newest earlier
+        ``attempt_surprise`` row carrying a queued action for this attempt's
+        practice item, with no intervening attempt on that item between the
+        gate row and this attempt. None when this attempt is not a follow-up.
+        """
+
+        with self.connection() as connection:
+            attempt = connection.execute(
+                "SELECT practice_item_id, created_at FROM practice_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if attempt is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT s.attempt_id, s.triggered_actions_json, s.created_at
+                FROM attempt_surprise s
+                WHERE s.triggered_actions_json IS NOT NULL
+                  AND s.created_at <= ?
+                  AND s.attempt_id != ?
+                ORDER BY s.created_at DESC, s.attempt_id DESC
+                """,
+                (attempt["created_at"], attempt_id),
+            ).fetchall()
+            for row in rows:
+                for action in _loads(row["triggered_actions_json"], []):
+                    parsed = _queued_followup_action(action)
+                    if parsed is None or parsed[1] != attempt["practice_item_id"]:
+                        continue
+                    intervening = connection.execute(
+                        """
+                        SELECT 1 FROM practice_attempts
+                        WHERE practice_item_id = ? AND created_at > ? AND created_at < ? AND id != ?
+                        LIMIT 1
+                        """,
+                        (
+                            attempt["practice_item_id"],
+                            row["created_at"],
+                            attempt["created_at"],
+                            attempt_id,
+                        ),
+                    ).fetchone()
+                    if intervening is None:
+                        return row["attempt_id"]
+        return None
+
+    def upsert_followup_rating(
+        self,
+        *,
+        attempt_id: str,
+        gate_attempt_id: str | None,
+        useful: bool,
+        source: str = "user",
+        clock: Clock | None = None,
+    ) -> None:
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO followup_ratings(attempt_id, gate_attempt_id, useful, source, rated_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                  gate_attempt_id = excluded.gate_attempt_id,
+                  useful = excluded.useful,
+                  source = excluded.source,
+                  updated_at = excluded.updated_at
+                """,
+                (attempt_id, gate_attempt_id, 1 if useful else 0, source, now, now),
+            )
+            connection.commit()
+
+    def followup_rating(self, attempt_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM followup_ratings WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = dict(row)
+        payload["useful"] = bool(payload["useful"])
+        return payload
+
+    def gate_training_rows(self) -> list[dict[str, Any]]:
+        """Every persisted gate evaluation LEFT JOINed to its usefulness rating
+        (via gate_attempt_id) — the gate fitter's raw input, oldest first."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT s.attempt_id, s.gate_diagnostics_json, s.created_at,
+                       r.useful AS rating_useful, r.source AS rating_source
+                FROM attempt_surprise s
+                LEFT JOIN followup_ratings r ON r.gate_attempt_id = s.attempt_id
+                WHERE s.gate_diagnostics_json IS NOT NULL
+                ORDER BY s.created_at ASC, s.attempt_id ASC
+                """
+            ).fetchall()
+        return [
+            {
+                "attempt_id": row["attempt_id"],
+                "created_at": row["created_at"],
+                "gate_diagnostics": _loads(row["gate_diagnostics_json"], None),
+                "rating_useful": None if row["rating_useful"] is None else bool(row["rating_useful"]),
+                "rating_source": row["rating_source"],
+            }
+            for row in rows
+        ]
+
     def update_attempt_surprise_actions(
         self,
         attempt_id: str,
@@ -899,6 +1023,7 @@ class Repository:
         quality_state: Mapping[str, Any] | None = None,
         ability_transition: Mapping[str, Any] | None = None,
         attempt_debug_payload: Mapping[str, Any] | None = None,
+        item_parameter_state: ItemParameterState | None = None,
     ) -> None:
         with self.connection() as connection:
             self._insert_practice_attempt(connection, attempt)
@@ -917,6 +1042,8 @@ class Repository:
                 self._upsert_practice_item_quality_state(connection, quality_state)
             if ability_transition is not None:
                 self._upsert_ability_transition_event(connection, ability_transition)
+            if item_parameter_state is not None:
+                self._upsert_item_parameter_state_record(connection, item_parameter_state)
             if attempt_debug_payload is not None:
                 connection.execute(
                     """
@@ -1007,6 +1134,13 @@ class Repository:
                     f"DELETE FROM practice_item_quality_state WHERE practice_item_id IN ({placeholders})",
                     item_ids,
                 )
+                # Derived EB difficulty posteriors are rebuilt by replay.
+                # fitted_parameters is intentionally NOT cleared here: fitted
+                # sets are inputs to replay, not derived state.
+                connection.execute(
+                    f"DELETE FROM item_parameter_state WHERE practice_item_id IN ({placeholders})",
+                    item_ids,
+                )
             connection.commit()
 
     def replace_attempt_derived_outcome(
@@ -1022,6 +1156,7 @@ class Repository:
         quality_state: Mapping[str, Any] | None = None,
         ability_transition: Mapping[str, Any] | None = None,
         attempt_debug_payload: Mapping[str, Any] | None = None,
+        item_parameter_state: ItemParameterState | None = None,
     ) -> None:
         with self.connection() as connection:
             connection.execute(
@@ -1070,6 +1205,8 @@ class Repository:
                 self._upsert_practice_item_quality_state(connection, quality_state)
             if ability_transition is not None:
                 self._upsert_ability_transition_event(connection, ability_transition)
+            if item_parameter_state is not None:
+                self._upsert_item_parameter_state_record(connection, item_parameter_state)
             if attempt_debug_payload is not None:
                 connection.execute(
                     """
@@ -1312,6 +1449,230 @@ class Repository:
             )
             connection.commit()
         return rebuild_id
+
+    def recent_surprise_signals(
+        self, *, limit: int = 200, exclude_attempt_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Most recent attempt_surprise signal rows for quantile-threshold
+        resolution (newest first)."""
+
+        query = (
+            "SELECT attempt_id, bayesian_surprise, surprise_direction, gate_diagnostics_json "
+            "FROM attempt_surprise"
+        )
+        params: tuple[Any, ...] = ()
+        if exclude_attempt_id is not None:
+            query += " WHERE attempt_id != ?"
+            params = (exclude_attempt_id,)
+        query += " ORDER BY created_at DESC, attempt_id DESC LIMIT ?"
+        params = (*params, limit)
+        with self.connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [
+            {
+                "attempt_id": row["attempt_id"],
+                "bayesian_surprise": row["bayesian_surprise"],
+                "surprise_direction": row["surprise_direction"],
+                "gate_diagnostics": _loads(row["gate_diagnostics_json"], None),
+            }
+            for row in rows
+        ]
+
+    def chosen_candidate_outcomes(self) -> list[dict[str, Any]]:
+        """Slate candidates joined to their realized attempts (`learnloop eval`
+        prediction-calibration input), oldest first."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.id AS candidate_id, c.slate_id, c.practice_item_id, c.learning_object_id,
+                       c.predicted_correctness, c.selection_propensity, c.exploration_flag,
+                       c.selected_mode,
+                       a.id AS attempt_id, a.correctness, a.rubric_score, a.attempt_type, a.created_at
+                FROM scheduler_slate_candidates c
+                JOIN practice_attempts a ON a.id = c.chosen_attempt_id
+                WHERE c.predicted_correctness IS NOT NULL AND a.correctness IS NOT NULL
+                ORDER BY a.created_at ASC, a.id ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def retention_label_rows(self) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM learning_outcome_labels
+                WHERE label_type = 'same_item_retention'
+                ORDER BY created_at ASC, id ASC
+                """
+            ).fetchall()
+        return [_decode_learning_outcome_label(row) for row in rows]
+
+    def item_attempt_history(self) -> list[dict[str, Any]]:
+        """Graded attempts ordered for per-item FSRS replay (`learnloop eval`)."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, practice_item_id, rubric_score, hints_used, attempt_type, created_at
+                FROM practice_attempts
+                WHERE rubric_score IS NOT NULL
+                ORDER BY practice_item_id ASC, created_at ASC, id ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def candidate_propensity_rows(self) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT slate_id, id, selection_propensity, selection_temperature,
+                       exploration_flag, chosen_attempt_id, was_returned
+                FROM scheduler_slate_candidates
+                ORDER BY created_at ASC, id ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def insert_fitted_parameters(
+        self,
+        *,
+        scope: str,
+        params: Mapping[str, Any],
+        algorithm_version: str,
+        training_rows_count: int,
+        training_data_through: str | None = None,
+        metrics: Mapping[str, Any] | None = None,
+        activate: bool = True,
+        clock: Clock | None = None,
+    ) -> str:
+        """Insert a fitted parameter set; when ``activate``, atomically replace
+        the currently active set for the scope (history rows are kept)."""
+
+        fitted_id = new_ulid()
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            if activate:
+                connection.execute(
+                    "UPDATE fitted_parameters SET active = 0, deactivated_at = ? WHERE scope = ? AND active = 1",
+                    (now, scope),
+                )
+            connection.execute(
+                """
+                INSERT INTO fitted_parameters(
+                  id, scope, params_json, fitted_at, algorithm_version,
+                  training_rows_count, training_data_through, metrics_json,
+                  active, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fitted_id,
+                    scope,
+                    _json(dict(params)),
+                    now,
+                    algorithm_version,
+                    training_rows_count,
+                    training_data_through,
+                    _json(dict(metrics)) if metrics is not None else None,
+                    1 if activate else 0,
+                    now,
+                ),
+            )
+            connection.commit()
+        return fitted_id
+
+    def active_fitted_parameters(self, scope: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM fitted_parameters
+                WHERE scope = ? AND active = 1
+                ORDER BY fitted_at DESC, id DESC
+                LIMIT 1
+                """,
+                (scope,),
+            ).fetchone()
+        return _decode_fitted_parameters(row) if row is not None else None
+
+    def list_fitted_parameters(self, scope: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM fitted_parameters"
+        params: tuple[Any, ...] = ()
+        if scope is not None:
+            query += " WHERE scope = ?"
+            params = (scope,)
+        query += " ORDER BY fitted_at DESC, id DESC LIMIT ?"
+        params = (*params, limit)
+        with self.connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [_decode_fitted_parameters(row) for row in rows]
+
+    def deactivate_fitted_parameters(
+        self, scope: str, *, fitted_id: str | None = None, clock: Clock | None = None
+    ) -> int:
+        now = utc_now_iso(clock)
+        query = "UPDATE fitted_parameters SET active = 0, deactivated_at = ? WHERE scope = ? AND active = 1"
+        params: tuple[Any, ...] = (now, scope)
+        if fitted_id is not None:
+            query += " AND id = ?"
+            params = (*params, fitted_id)
+        with self.connection() as connection:
+            cursor = connection.execute(query, params)
+            connection.commit()
+            return cursor.rowcount
+
+    def list_all_attempts(self) -> list[dict[str, Any]]:
+        """Every practice attempt ordered for per-item replay (fitting jobs)."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM practice_attempts ORDER BY practice_item_id ASC, created_at ASC, id ASC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def item_parameter_state(self, practice_item_id: str) -> ItemParameterState | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM item_parameter_state WHERE practice_item_id = ?",
+                (practice_item_id,),
+            ).fetchone()
+        return _decode_item_parameter_state(row) if row is not None else None
+
+    def item_parameter_states(self) -> dict[str, ItemParameterState]:
+        with self.connection() as connection:
+            rows = connection.execute("SELECT * FROM item_parameter_state").fetchall()
+        return {row["practice_item_id"]: _decode_item_parameter_state(row) for row in rows}
+
+    def upsert_item_parameter_state(self, state: ItemParameterState) -> None:
+        with self.connection() as connection:
+            self._upsert_item_parameter_state_record(connection, state)
+            connection.commit()
+
+    def _upsert_item_parameter_state_record(
+        self, connection: sqlite3.Connection, state: ItemParameterState
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO item_parameter_state(
+              practice_item_id, b_mean, b_var, evidence_count, algorithm_version, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(practice_item_id) DO UPDATE SET
+              b_mean = excluded.b_mean,
+              b_var = excluded.b_var,
+              evidence_count = excluded.evidence_count,
+              algorithm_version = excluded.algorithm_version,
+              updated_at = excluded.updated_at
+            """,
+            (
+                state.practice_item_id,
+                state.b_mean,
+                state.b_var,
+                state.evidence_count,
+                state.algorithm_version,
+                state.updated_at,
+            ),
+        )
 
     def latest_derived_state_rebuild(self) -> dict[str, Any] | None:
         with self.connection() as connection:
@@ -3550,6 +3911,25 @@ def _decode_learning_outcome_label(row: sqlite3.Row) -> dict[str, Any]:
     payload = dict(row)
     payload["metadata"] = _loads(payload.pop("metadata_json"), {})
     return payload
+
+
+def _decode_fitted_parameters(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["params"] = _loads(payload.pop("params_json"), {})
+    payload["metrics"] = _loads(payload.pop("metrics_json"), None)
+    payload["active"] = bool(payload["active"])
+    return payload
+
+
+def _decode_item_parameter_state(row: sqlite3.Row) -> ItemParameterState:
+    return ItemParameterState(
+        practice_item_id=row["practice_item_id"],
+        b_mean=row["b_mean"],
+        b_var=row["b_var"],
+        evidence_count=row["evidence_count"],
+        algorithm_version=row["algorithm_version"],
+        updated_at=row["updated_at"],
+    )
 
 
 def _decode_derived_state_rebuild(row: sqlite3.Row) -> dict[str, Any]:

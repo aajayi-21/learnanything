@@ -4,7 +4,23 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+
+// Longest legitimate sidecar call is AI grading (backend request timeout 180s);
+// anything slower means the Python process is hung and the client is replaced.
+const DEFAULT_RESPONSE_TIMEOUT_SECS: u64 = 240;
+pub const TIMEOUT_ERROR_CODE: &str = "sidecar_timeout";
+
+fn response_timeout() -> Duration {
+    std::env::var("LEARNLOOP_SIDECAR_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_RESPONSE_TIMEOUT_SECS))
+}
 
 #[derive(Clone)]
 pub struct SidecarManager {
@@ -19,7 +35,9 @@ struct SidecarState {
 struct SidecarClient {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    // Lines arrive via a dedicated reader thread so call() can time out instead
+    // of blocking forever on a hung sidecar. The channel disconnects on EOF.
+    responses: Receiver<std::io::Result<String>>,
     next_id: u64,
     launcher: String,
 }
@@ -49,7 +67,7 @@ impl SidecarManager {
             .state
             .lock()
             .map_err(|_| CommandError::internal("Sidecar lock was poisoned."))?;
-        if state.vault_path.as_ref() != Some(&vault) {
+        if state.client.is_none() || state.vault_path.as_ref() != Some(&vault) {
             if let Some(mut client) = state.client.take() {
                 let _ = client.call("shutdown", json!({}));
             }
@@ -92,7 +110,16 @@ impl SidecarManager {
             .client
             .as_mut()
             .ok_or_else(|| CommandError::internal("Sidecar was not initialized."))?;
-        client.call(method, params)
+        let result = client.call(method, params);
+        // A timed-out sidecar is presumed hung: kill it and drop the client so the
+        // next call respawns a fresh process against the same vault.
+        if matches!(&result, Err(err) if err.code == TIMEOUT_ERROR_CODE) {
+            if let Some(mut client) = state.client.take() {
+                let _ = client.child.kill();
+                let _ = client.child.wait();
+            }
+        }
+        result
     }
 }
 
@@ -127,7 +154,7 @@ impl SidecarClient {
                     return Ok(Self {
                         child,
                         stdin,
-                        stdout: BufReader::new(stdout),
+                        responses: spawn_reader(stdout),
                         next_id: 1,
                         launcher: spec.label,
                     });
@@ -151,18 +178,31 @@ impl SidecarClient {
         self.stdin.flush().map_err(|err| {
             CommandError::internal(format!("Failed to flush sidecar request: {err}"))
         })?;
+        let deadline = Instant::now() + response_timeout();
         loop {
-            let mut line = String::new();
-            let bytes = self.stdout.read_line(&mut line).map_err(|err| {
-                CommandError::internal(format!("Failed to read sidecar response: {err}"))
-            })?;
-            if bytes == 0 {
-                let status = self.child.try_wait().ok().flatten();
-                return Err(CommandError::internal(format!(
-                    "Sidecar exited before responding. launcher={} status={status:?}",
-                    self.launcher
-                )));
-            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = match self.responses.recv_timeout(remaining) {
+                Ok(Ok(line)) => line,
+                Ok(Err(err)) => {
+                    return Err(CommandError::internal(format!(
+                        "Failed to read sidecar response: {err}"
+                    )))
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(CommandError::timeout(format!(
+                        "Sidecar did not respond to {method} within {}s. launcher={}",
+                        response_timeout().as_secs(),
+                        self.launcher
+                    )))
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let status = self.child.try_wait().ok().flatten();
+                    return Err(CommandError::internal(format!(
+                        "Sidecar exited before responding. launcher={} status={status:?}",
+                        self.launcher
+                    )));
+                }
+            };
             let response: Value = serde_json::from_str(line.trim())
                 .map_err(|err| CommandError::internal(format!("Invalid sidecar JSON: {err}")))?;
             if response.get("id").and_then(Value::as_u64) != Some(id) {
@@ -174,6 +214,29 @@ impl SidecarClient {
             return Ok(response.get("result").cloned().unwrap_or(Value::Null));
         }
     }
+}
+
+fn spawn_reader(stdout: ChildStdout) -> Receiver<std::io::Result<String>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if tx.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
+    rx
 }
 
 fn sidecar_command_specs(repo_root: &Path) -> Vec<SidecarCommandSpec> {

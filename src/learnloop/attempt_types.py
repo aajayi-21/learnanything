@@ -30,17 +30,8 @@ NON_RECORDING_ATTEMPT_TYPES: frozenset[AttemptType] = frozenset({"guided_walkthr
 
 DEFAULT_ATTEMPT_TYPE: AttemptType = "independent_attempt"
 
-ATTEMPT_TYPE_FACTORS: dict[AttemptType, float] = {
-    "independent_attempt": 1.0,
-    "open_text": 1.0,
-    "diagnostic_probe": 1.0,
-    "hinted_attempt": 1.0,
-    "reconstruction_after_walkthrough": 0.5,
-    "dont_know": 0.7,
-    "self_report": 0.3,
-    "guided_walkthrough": 0.0,
-    "skip": 0.0,
-}
+# Per-attempt-type evidence weights now live in config (EvidenceConfig) and are
+# derived via learnloop.services.evidence — see Fable's-take item 3.
 
 _SUPPORTED = set(SUPPORTED_ATTEMPT_TYPES)
 

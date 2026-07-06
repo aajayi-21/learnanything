@@ -33,6 +33,7 @@ fn main() {
             trigger_regrade,
             add_error_event,
             trigger_followup,
+            rate_followup,
             inspect_entity,
             get_concept_graph,
             get_vault_tree,

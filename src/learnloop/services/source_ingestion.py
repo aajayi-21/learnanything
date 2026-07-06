@@ -291,6 +291,7 @@ def ingest_canonical_source(
             },
             rows,
         )
+        _auto_apply_rows(vault.root, patch_id, rows)
         linkage = _establish_goal_linkage(
             vault.root,
             subject,
@@ -300,7 +301,6 @@ def ingest_canonical_source(
             default_priority=vault.config.ingest.default_goal_priority,
             clock=clock,
         )
-        _auto_apply_rows(vault.root, patch_id, rows)
         repository.record_content_events(change_analysis.events)
         repository.complete_agent_run(agent_run_id, status="completed", clock=clock)
     except Exception as exc:
@@ -443,7 +443,8 @@ def detect_source_kind(
     if suffix in {".html", ".htm"}:
         return "website_page"
     if suffix == ".pdf":
-        raise SourceIngestionError("PDF OCR is deferred")
+        # A text-based PDF is normalized to Markdown and ingested like a web page.
+        return "website_page"
     raise SourceIngestionError("unsupported or inaccessible source")
 
 
@@ -465,7 +466,14 @@ def fetch_source(
     if not path.exists() or not path.is_file():
         raise SourceIngestionError("unsupported or inaccessible source")
     if path.suffix.lower() == ".pdf":
-        raise SourceIngestionError("PDF OCR is deferred")
+        markdown = _extract_pdf_markdown(path.read_bytes())
+        return FetchResult(
+            raw_bytes=markdown.encode("utf-8"),
+            content_type="text/plain",
+            original_uri=path.resolve().as_uri(),
+            fetch_uri=path.resolve().as_uri(),
+            retrieved_at=utc_now_iso(clock),
+        )
     if path.suffix.lower() not in {".html", ".htm", ".md", ".txt"}:
         raise SourceIngestionError("unsupported or inaccessible source")
     raw = path.read_bytes()
@@ -1322,7 +1330,7 @@ def _canonical_source_ref_from_id(
     registered: RegisteredSource,
     window: IngestWindow,
 ) -> dict[str, Any]:
-    locator = _time_locator_from_ref_id(ref_id)
+    locator = _time_locator_from_ref_id(ref_id) or _chunk_locator_from_ref_id(ref_id, registered, window)
     path = registered.path
     if locator is None:
         path = f"{registered.path}#unresolved-source-ref:{ref_id}"
@@ -1334,6 +1342,32 @@ def _canonical_source_ref_from_id(
         "path": path,
         "locator": locator,
     }
+
+
+def _chunk_locator_from_ref_id(
+    ref_id: str,
+    registered: RegisteredSource,
+    window: IngestWindow,
+) -> str | None:
+    """Recover a chunk locator from a source-ref id that embeds one.
+
+    Ingestor models frequently key every ``source_ref`` for one source by the note
+    id alone (so the ids are not unique) and then reference a specific span from an
+    item as ``<note_id>:<locator>`` (or reference the bare chunk locator directly).
+    Recover the locator - stripping the note-id prefix when present - and keep it
+    only when it resolves to a real chunk, so those items stay grounded instead of
+    being marked ``unresolved_source_ref``.
+    """
+
+    if _locator_resolves(window.chunks, ref_id):
+        return ref_id
+    for separator in (":", "#"):
+        prefix = f"{registered.note_id}{separator}"
+        if ref_id.startswith(prefix):
+            candidate = ref_id[len(prefix):].strip()
+            if candidate and _locator_resolves(window.chunks, candidate):
+                return candidate
+    return None
 
 
 def _time_locator_from_ref_id(ref_id: str) -> str | None:
@@ -1426,6 +1460,8 @@ def _locator_hashes(chunks: list[SourceChunk]) -> dict[str, str]:
 def _locator_resolves(chunks: list[SourceChunk], locator: str) -> bool:
     if locator in {chunk.locator for chunk in chunks}:
         return True
+    if _child_chunks_for_locator(chunks, locator):
+        return True
     return bool(_caption_chunks_for_time_range(chunks, locator))
 
 
@@ -1435,11 +1471,23 @@ def _locator_hash_for_ref(chunks: list[SourceChunk], locator: str | None) -> str
     for chunk in chunks:
         if chunk.locator == locator:
             return hashlib.sha256(chunk.text.strip().encode("utf-8")).hexdigest()
+    child_chunks = _child_chunks_for_locator(chunks, locator)
+    if child_chunks:
+        text = "\n".join(chunk.text.strip() for chunk in child_chunks)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
     caption_chunks = _caption_chunks_for_time_range(chunks, locator)
     if not caption_chunks:
         return None
     text = "\n".join(chunk.text.strip() for chunk in caption_chunks)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _child_chunks_for_locator(chunks: list[SourceChunk], locator: str) -> list[SourceChunk]:
+    prefix = locator.strip().rstrip("/")
+    if not prefix:
+        return []
+    child_prefix = f"{prefix}/"
+    return [chunk for chunk in chunks if chunk.locator.startswith(child_prefix)]
 
 
 def _caption_chunks_for_time_range(chunks: list[SourceChunk], locator: str) -> list[SourceChunk]:
@@ -1547,10 +1595,10 @@ def _establish_goal_linkage(
     default_priority: float,
     clock: Clock | None,
 ) -> dict[str, Any]:
-    concepts = _proposal_learning_object_concepts(proposal)
-    if not concepts:
-        return {"goal_id": None, "created": False, "updated": False}
     vault = load_vault(root)
+    concepts = _proposal_learning_object_concepts(proposal) & set(vault.concepts)
+    if not concepts:
+        return {"goal_id": goal_id, "created": False, "updated": False}
     paths = VaultPaths(vault.root, vault.config)
     goals_data = read_yaml(paths.goals_path) if paths.goals_path.exists() else {"schema_version": 1, "goals": []}
     goals = goals_data.setdefault("goals", [])
@@ -1691,6 +1739,38 @@ def _youtube_video_id(source: str) -> str | None:
         return query["v"][0]
     match = re.search(r"/(?:embed|shorts)/([^/?#]+)", parsed.path)
     return match.group(1) if match else None
+
+
+def _extract_pdf_markdown(raw_bytes: bytes) -> str:
+    """Extract text from a text-based PDF into normalized Markdown.
+
+    Scanned/image-only PDFs (no embedded text layer) are not supported and raise
+    a clear error rather than producing an empty source.
+    """
+
+    try:
+        import pypdf
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise SourceIngestionError(
+            "pypdf is required for PDF ingestion; install it with 'uv add pypdf'"
+        ) from exc
+
+    import io
+
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+        pages: list[str] = []
+        for page in reader.pages:
+            text = (page.extract_text() or "").strip()
+            if text:
+                pages.append(text)
+    except Exception as exc:
+        raise SourceIngestionError(f"failed to read PDF source: {exc}") from exc
+
+    markdown = _normalize_markdown("\n\n".join(pages))
+    if not markdown.strip():
+        raise SourceIngestionError("PDF contained no extractable text (likely scanned images)")
+    return markdown
 
 
 def _content_type_for_path(path: Path) -> str:

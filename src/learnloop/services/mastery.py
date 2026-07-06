@@ -5,10 +5,11 @@ from datetime import UTC, datetime
 from math import copysign, exp, log
 from typing import TYPE_CHECKING, Any
 
-from learnloop.attempt_types import ATTEMPT_TYPE_FACTORS
 from learnloop.clock import parse_utc
 from learnloop.config import MasteryConfig
-from learnloop.db.repositories import MasteryState
+from learnloop.db.repositories import ItemParameterState, MasteryState
+from learnloop.numeric import clamp
+from learnloop.services.evidence import attempt_evidence_mass
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from learnloop.vault.models import LearningObject, PracticeItem
@@ -35,6 +36,9 @@ class MasteryObservation:
     error_sharpening: float = 1.0
     observation_reliability: float | None = None
     observation_weight_override: float | None = None
+    # Config-resolved evidence mass for attempt_type; None falls back to the
+    # canonical defaults (DEFAULT_EVIDENCE) so test constructors keep working.
+    attempt_evidence_mass: float | None = None
 
 
 @dataclass(frozen=True)
@@ -87,10 +91,6 @@ class MasteryObservationTrace:
     mu_clamped: bool
     p_before: float
     p_after: float
-
-
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
 
 
 def sigmoid(value: float) -> float:
@@ -197,7 +197,11 @@ def observation_weight(observation: MasteryObservation) -> float:
 
     if observation.observation_weight_override is not None:
         return max(0.0, observation.observation_weight_override)
-    attempt_factor = ATTEMPT_TYPE_FACTORS.get(observation.attempt_type, 1.0)
+    attempt_factor = (
+        observation.attempt_evidence_mass
+        if observation.attempt_evidence_mass is not None
+        else attempt_evidence_mass(observation.attempt_type)
+    )
     return (
         clamp(observation.evidence_coverage, 0.0, 1.0)
         * clamp(observation.hint_dampening, 0.0, 1.0)
@@ -243,6 +247,75 @@ def item_irt_params(
         return a, irt.difficulty_default
     b = irt.difficulty_prior_scale * (float(difficulty) - 0.5) * 2.0
     return a, clamp(b, -irt.b_abs_max, irt.b_abs_max)
+
+
+def resolve_item_irt_params(
+    item: "PracticeItem | None",
+    learning_object: "LearningObject | None",
+    config: MasteryConfig,
+    item_state: "ItemParameterState | None" = None,
+) -> tuple[float, float]:
+    """(a, b) with the empirical-Bayes posterior b when enabled, else authored.
+
+    The single seam through which the mastery EKF, surprise, and prediction all
+    read item parameters — so a fitted b moves all three consistently.
+    """
+
+    a, authored_b = item_irt_params(item, learning_object, config)
+    irt = config.irt
+    if not irt.eb_difficulty_enabled or item_state is None:
+        return a, authored_b
+    return a, clamp(item_state.b_mean, -irt.b_abs_max, irt.b_abs_max)
+
+
+def update_item_difficulty(
+    prior: "ItemParameterState | None",
+    *,
+    practice_item_id: str,
+    authored_b: float,
+    item_a: float,
+    learner_mu_posterior: float,
+    observation: MasteryObservation,
+    config: MasteryConfig,
+    algorithm_version: str,
+    updated_at: str,
+) -> "ItemParameterState":
+    """Alternating conditional EKF step on item difficulty b.
+
+    Symmetric to the mu update but holding the learner's posterior mean fixed:
+    dp/db = -a*p(1-p), same reliability-gated measurement noise. Identifiability
+    at N=1 is handled by a strong prior (b_prior_variance), a slowed gain
+    (b_learning_rate_scale) and a per-attempt step clamp — b must drift only
+    when the evidence persistently contradicts the authored difficulty.
+    """
+
+    irt = config.irt
+    b0 = prior.b_mean if prior is not None else authored_b
+    v0 = prior.b_var if prior is not None else irt.b_prior_variance
+    evidence_count = prior.evidence_count if prior is not None else 0
+
+    p_raw = sigmoid(item_a * (learner_mu_posterior - b0))
+    p = clamp(p_raw, irt.p_clip, 1.0 - irt.p_clip)
+    pq = p * (1.0 - p)
+    sensitivity_h = -item_a * pq  # success pushes b DOWN
+    weight = observation_weight(observation)
+    measurement_noise = config.base_observation_variance * pq / max(weight, 0.10)
+    innovation_variance = sensitivity_h * sensitivity_h * v0 + measurement_noise
+    gain = (v0 * sensitivity_h / innovation_variance) if innovation_variance > 0 else 0.0
+    gain *= irt.b_learning_rate_scale
+
+    y = observation.rubric_score / max(observation.max_points, 1)
+    step = clamp(gain * (y - p), -irt.b_max_step, irt.b_max_step)
+    b1 = clamp(b0 + step, -irt.b_abs_max, irt.b_abs_max)
+    v1 = max((1.0 - gain * sensitivity_h) * v0, irt.b_var_min)  # no drift: items don't change
+    return ItemParameterState(
+        practice_item_id=practice_item_id,
+        b_mean=b1,
+        b_var=v1,
+        evidence_count=evidence_count + 1,
+        algorithm_version=algorithm_version,
+        updated_at=updated_at,
+    )
 
 
 def irt_observation(

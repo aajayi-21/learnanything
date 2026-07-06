@@ -97,11 +97,19 @@ def config_dto(vault: LoadedVault) -> dict[str, Any]:
                 "recent_error_weight": config.scheduler.recent_error_weight,
                 "probe_eig_weight": config.scheduler.probe_eig_weight,
                 "short_session_minutes": config.scheduler.short_session_minutes,
+                "followup": {
+                    "tau_followup_nats": config.scheduler.followup.tau_followup_nats,
+                    "gate_mode": config.scheduler.followup.gate_mode,
+                    "gate_score_threshold": config.scheduler.followup.gate_score_threshold,
+                    "threshold_mode": config.scheduler.followup.threshold_mode,
+                },
             },
             "mastery": {
                 "base_observation_variance": config.mastery.base_observation_variance,
                 "sigma2_drift": config.mastery.sigma2_drift,
                 "p_max": config.mastery.p_max,
+                "display_strong_threshold": config.mastery.display_strong_threshold,
+                "display_developing_threshold": config.mastery.display_developing_threshold,
             },
             "probe": {
                 "attempts_target_default": config.probe.attempts_target_default,

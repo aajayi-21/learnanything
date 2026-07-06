@@ -6,8 +6,8 @@ from math import exp, log
 
 from learnloop.db.repositories import ActiveErrorEvent, FacetRecallState, MasteryState, PracticeItemQualityState
 from learnloop.services.ability_transition import estimate_ability_transition
+from learnloop.numeric import clamp
 from learnloop.services.mastery import item_irt_params
-from learnloop.services.recall_coverage import clamp
 from learnloop.vault.models import LearningObject, LoadedVault, PracticeItem
 
 

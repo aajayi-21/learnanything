@@ -8,6 +8,7 @@ from typing import Any
 
 from learnloop.codex.client import GradingContext
 from learnloop.codex.schemas import GradingProposal
+from learnloop.config import EvidenceConfig
 from learnloop.services.recall_coverage import criterion_facet_weights_for_item, resolve_coverage
 from learnloop.vault.models import LoadedVault, PracticeItem, Rubric
 
@@ -134,6 +135,7 @@ def evidence_coverage(
     attempt_type: str = "independent_attempt",
     hints_used: int = 0,
     learner_answer_md: str = "__engaged_answer__",
+    evidence: EvidenceConfig | None = None,
 ) -> float:
     """Compatibility wrapper for score-independent coverage resolution.
 
@@ -149,6 +151,7 @@ def evidence_coverage(
         attempt_type=attempt_type,
         hints_used=hints_used,
         learner_answer_md=learner_answer_md,
+        evidence=evidence,
     ).effective_coverage
 
 

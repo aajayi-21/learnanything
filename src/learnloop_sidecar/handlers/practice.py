@@ -164,6 +164,9 @@ def submit_attempt(ctx: SidecarContext, params: SubmitAttemptInput) -> dict[str,
         raise SidecarError("validation_error", str(exc)) from exc
     _persist_feedback_metadata(repository, result, self_grade)
     _evaluate_followup(vault, repository, params.session_id, result)
+    # Clear the checkpoint in the same call that records the attempt, so a lost
+    # client-side clear can never leave a submitted draft to replay on restart.
+    repository.clear_session_checkpoint(params.session_id)
     _log_attempt_recorded(repository, params.session_id, params.answer_md, result)
     _log_state_update(vault, repository, "submit_attempt", params.session_id, before, result)
     return _attempt_result(result)
@@ -189,6 +192,7 @@ def submit_dont_know(ctx: SidecarContext, params: DontKnowInput) -> dict[str, An
         raise SidecarError("validation_error", str(exc)) from exc
     _persist_feedback_metadata(repository, result, None)
     _evaluate_followup(vault, repository, params.session_id, result)
+    repository.clear_session_checkpoint(params.session_id)
     _log_attempt_recorded(repository, params.session_id, "", result)
     _log_state_update(vault, repository, "submit_dont_know", params.session_id, before, result)
     return _attempt_result(result)
@@ -208,6 +212,7 @@ def skip_practice_item(ctx: SidecarContext, params: SkipInput) -> dict[str, Any]
         ),
     )
     dtos = [scheduled_item_dto(vault, repository, item) for item in queue if item.practice_item_id != params.practice_item_id]
+    repository.clear_session_checkpoint(params.session_id)
     return versioned(
         {
             "generated_at": _nowish(),

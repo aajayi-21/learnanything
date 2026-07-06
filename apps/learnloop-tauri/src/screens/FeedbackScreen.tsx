@@ -10,6 +10,7 @@ import type {
   PracticeItemDetail,
 } from "../api/dto";
 import { EntityLink, KeyBar, Pill } from "../components/ui";
+import { algoConfig, masteryTone } from "../app/algoConfig";
 import { MarkdownMath } from "../render/MarkdownMath";
 
 // ── Palette ──────────────────────────────────────────────────────────────────
@@ -224,10 +225,10 @@ function MasteryDelta({ f }: { f: FeedbackBundle }) {
   const { masteryBefore: before, masteryAfter: after, surprise } = f;
   if (!before || !after) return null;
 
-  const barColor = (m: number) => m > 0.6 ? C.green : m > 0.35 ? C.amber : C.red;
-  // The backend supplies the configured surprise threshold; 0.30 is only a
-  // legacy fallback for older bundles.
-  const tau = surprise.followupThresholdNats ?? 0.30;
+  const barColor = (m: number) => masteryTone(m, C);
+  // The backend supplies the configured surprise threshold per bundle; the
+  // config-level τ covers older bundles that predate the field.
+  const tau = surprise.followupThresholdNats ?? algoConfig().tauFollowupNats;
   const hasSurprise = (surprise.bayesianSurprise ?? 0) > tau;
 
   return (
@@ -307,6 +308,7 @@ const GATE_SIGNAL_LABELS: Record<string, string> = {
   grader_confidence: "grader confidence",
   available_minutes: "available minutes",
   session_interventions: "session interventions",
+  gate_score: "gate score",
 };
 
 const GATE_COMPARATORS: Record<string, string> = {
@@ -333,6 +335,11 @@ function describeSignal(sig: FollowupGateSignalDto): string {
   // Surprise compares against τ; grader confidence against γ_min.
   if (threshold != null && name === "bayesian_surprise") threshold = `τ ${threshold}`;
   else if (threshold != null && name === "grader_confidence") threshold = `γ_min ${threshold}`;
+  // Quantile-resolved thresholds say where the number came from — the
+  // explanation must stay truthful when τ is data-relative, not a constant.
+  if (threshold != null && sig.thresholdSource === "quantile" && sig.thresholdQuantile != null) {
+    threshold = `${threshold} (p${Math.round(sig.thresholdQuantile * 100)} of your history)`;
+  }
   const unit = sig.unit === "nats" ? " nats" : "";
 
   if (value == null && threshold == null) return label;
@@ -344,32 +351,41 @@ function describeSignal(sig: FollowupGateSignalDto): string {
 function describeGate(gate: FollowupGateDiagnosticsDto): string {
   const sig = gate.decisiveSignal;
   const signalText = sig ? describeSignal(sig) : gate.decisiveReason.replace(/_/g, " ");
+  // In score mode, always show the continuous score against its operating
+  // point — the counterfactual margin is the whole point of the redesign.
+  const scoreSuffix =
+    typeof gate.gateScore === "number" && sig?.name !== "gate_score"
+      ? ` · score ${gate.gateScore.toFixed(2)} / ${(gate.gateScoreThreshold ?? algoConfig().gateScoreThreshold).toFixed(2)}`
+      : "";
 
-  switch (gate.outcome) {
-    case "queued":
-      if (gate.decisiveReason === "manual_trigger" || gate.manualOverride) {
-        return gate.naturalTriggerReasons.length
-          ? `manually forced (would auto-fire: ${gate.naturalTriggerReasons.join(", ").replace(/_/g, " ")})`
-          : "manually forced — gate was silent";
+  const base = (() => {
+    switch (gate.outcome) {
+      case "queued":
+        if (gate.decisiveReason === "manual_trigger" || gate.manualOverride) {
+          return gate.naturalTriggerReasons.length
+            ? `manually forced (would auto-fire: ${gate.naturalTriggerReasons.join(", ").replace(/_/g, " ")})`
+            : "manually forced — gate was silent";
+        }
+        return `triggered by ${signalText}`;
+      case "need_recorded": {
+        const trigger = gate.triggeredReasons.find((r) => r !== "manual_trigger");
+        const trigText = trigger ? trigger.replace(/_/g, " ") : "trigger";
+        return `${trigText} fired · no suitable item, diagnostic need recorded`;
       }
-      return `triggered by ${signalText}`;
-    case "need_recorded": {
-      const trigger = gate.triggeredReasons.find((r) => r !== "manual_trigger");
-      const trigText = trigger ? trigger.replace(/_/g, " ") : "trigger";
-      return `${trigText} fired · no suitable item, diagnostic need recorded`;
+      case "suppressed":
+        return `blocked: ${signalText}`;
+      case "not_triggered":
+      default:
+        // Most informative single line for "nothing fired": surprise vs τ. For a
+        // non-negative surprise, the threshold comparison is moot — say so.
+        if (sig && sig.name === "bayesian_surprise" && gate.surpriseDirection !== "negative") {
+          const v = gateNum(sig.value);
+          return `no trigger · ${gate.surpriseDirection ?? "non-negative"} surprise${v != null ? ` ${v} nats` : ""}`;
+        }
+        return `no trigger · ${signalText}`;
     }
-    case "suppressed":
-      return `blocked: ${signalText}`;
-    case "not_triggered":
-    default:
-      // Most informative single line for "nothing fired": surprise vs τ. For a
-      // non-negative surprise, the threshold comparison is moot — say so.
-      if (sig && sig.name === "bayesian_surprise" && gate.surpriseDirection !== "negative") {
-        const v = gateNum(sig.value);
-        return `no trigger · ${gate.surpriseDirection ?? "non-negative"} surprise${v != null ? ` ${v} nats` : ""}`;
-      }
-      return `no trigger · ${signalText}`;
-  }
+  })();
+  return `${base}${scoreSuffix}`;
 }
 
 function interventionReasons(actions: string[]): string[] {
@@ -498,6 +514,22 @@ export function FeedbackScreen({
     }
   };
 
+  // One-tap "was this follow-up useful?" — the label stream that lets
+  // `learnloop fit gate` learn the trigger weights from real usage.
+  const [ratingFollowup, setRatingFollowup] = useState(false);
+  const handleRateFollowup = async (useful: boolean) => {
+    if (!feedback?.followupSource || ratingFollowup) return;
+    setRatingFollowup(true);
+    try {
+      const updated = await api.rateFollowup(feedback.attemptId, useful);
+      setFeedback(updated);
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setRatingFollowup(false);
+    }
+  };
+
   const doAddError = async (errorType: string, severity?: number) => {
     if (!feedback || !errorType.trim()) {
       setAddingError(false);
@@ -580,10 +612,12 @@ export function FeedbackScreen({
       else if (event.key === "a") { event.preventDefault(); setAddingError(true); }
       else if (event.key === "j") { event.preventDefault(); openNoteCapture(); }
       else if (event.key === "o") { event.preventDefault(); onOpenNotes(); }
+      else if (event.key === "u" && feedback?.followupSource) { event.preventDefault(); void handleRateFollowup(true); }
+      else if (event.key === "x" && feedback?.followupSource) { event.preventDefault(); void handleRateFollowup(false); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onNext, onBack, onOpenNotes, feedback, regrading, triggeringFollowup]);
+  }, [onNext, onBack, onOpenNotes, feedback, regrading, triggeringFollowup, ratingFollowup]);
 
   if (!feedback) {
     return (
@@ -597,8 +631,8 @@ export function FeedbackScreen({
 
   const f = feedback;
   const subject = item?.subject ?? item?.subjects?.[0] ?? null;
-  // Surprise threshold from backend config; 0.30 only as a legacy fallback.
-  const tau = f.surprise.followupThresholdNats ?? 0.30;
+  // Surprise threshold from the bundle; config-level τ for legacy bundles.
+  const tau = f.surprise.followupThresholdNats ?? algoConfig().tauFollowupNats;
   const interventionNeed = f.interventionNeed;
 
   return (
@@ -747,6 +781,30 @@ export function FeedbackScreen({
                 {followupStatus(f, tau)}
               </Meta>
             </div>
+            {f.followupSource && (
+              <div style={{ marginTop: 8, fontFamily: MONO, fontSize: 12, color: C.textDim }}>
+                {f.followupRating ? (
+                  <>
+                    rated {f.followupRating.useful ? "useful ✓" : "not useful ✗"}
+                    {"  "}
+                    <Faint>[u] / [x] to change</Faint>
+                  </>
+                ) : (
+                  <>
+                    this attempt was a follow-up · was it useful?{"  "}
+                    <span
+                      style={{ color: C.amberLink, textDecoration: "underline", cursor: "pointer" }}
+                      onClick={() => void handleRateFollowup(true)}
+                    >[u] yes</span>
+                    {"  "}
+                    <span
+                      style={{ color: C.amberLink, textDecoration: "underline", cursor: "pointer" }}
+                      onClick={() => void handleRateFollowup(false)}
+                    >[x] no</span>
+                  </>
+                )}
+              </div>
+            )}
             {interventionNeed && (
               <div style={{ marginTop: 10, fontSize: 12, color: C.textDim, lineHeight: 1.7 }}>
                 <div>

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from math import exp
 
+from learnloop.numeric import clamp
+
 
 class Rating(IntEnum):
     AGAIN = 1
@@ -48,10 +50,6 @@ class MemoryState:
     difficulty: float
     stability: float
     retrievability: float
-
-
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
 
 
 def forgetting_curve(stability: float | None, elapsed_days: float, weights: tuple[float, ...] = FSRS6_DEFAULT_WEIGHTS) -> float:

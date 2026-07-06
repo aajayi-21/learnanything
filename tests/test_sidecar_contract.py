@@ -313,6 +313,78 @@ def test_sidecar_submit_attempt_persists_feedback_bundle(tmp_path):
     assert isinstance(tau, (int, float)) and tau > 0
 
 
+def test_sidecar_load_vault_config_carries_display_thresholds(tmp_path):
+    # The frontend reads mastery display banding and the τ fallback from the
+    # config payload instead of hardcoding algorithm opinions.
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+
+    snapshot = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "load_vault", "params": {}},
+        ]
+    )[1]["result"]
+
+    config = snapshot["config"]
+    assert config["mastery"]["displayStrongThreshold"] == 0.6
+    assert config["mastery"]["displayDevelopingThreshold"] == 0.35
+    assert config["scheduler"]["followup"]["tauFollowupNats"] == 0.05
+
+
+def test_sidecar_submit_attempt_clears_session_checkpoint(tmp_path):
+    # The checkpoint clear happens in the same submit_attempt call that records
+    # the attempt: a lost client-side clear must never leave a submitted draft
+    # behind to replay on restart.
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    seed_due_item(paths)
+
+    responses = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "start_session", "params": {"energy": "medium"}},
+        ]
+    )
+    session_id = responses[1]["result"]["sessionId"]
+
+    _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "update_session_checkpoint",
+                "params": {
+                    "sessionId": session_id,
+                    "currentPracticeItemId": "pi_svd_define_001",
+                    "currentAnswer": "draft in progress",
+                    "hintsUsed": 1,
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "submit_attempt",
+                "params": {
+                    "sessionId": session_id,
+                    "practiceItemId": "pi_svd_define_001",
+                    "answerMd": "SVD is U Sigma V transpose.",
+                    "attemptType": "independent_attempt",
+                    "hintsUsed": 0,
+                    "selfGrade": {
+                        "criterionPoints": {"correctness": 4},
+                        "confidence": 5,
+                    },
+                },
+            },
+        ]
+    )
+
+    repository = Repository(paths.sqlite_path)
+    assert repository.fetch_session_checkpoint(session_id) is None
+
+
 def test_sidecar_submit_attempt_falls_back_to_codex_when_routed_ai_unavailable(tmp_path, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     vault_root = tmp_path / "vault"
@@ -547,6 +619,107 @@ def test_sidecar_uses_full_intervention_followup_policy(tmp_path):
         "severe_error_event",
         "repeated_same_item_failure",
     }
+
+
+def test_sidecar_rate_followup_round_trip(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    add_followup_item(vault_root)
+    seed_due_item(paths)
+
+    started = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "start_session",
+                "params": {"energy": "medium", "availableMinutes": 25},
+            },
+        ]
+    )[1]["result"]
+    session_id = started["sessionId"]
+
+    # Record an attempt, then force a follow-up via the manual trigger (stable
+    # regardless of gate thresholds).
+    first = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "submit_dont_know",
+                "params": {"sessionId": session_id, "practiceItemId": "pi_svd_define_001"},
+            },
+        ]
+    )[1]["result"]
+    gate_attempt_id = first["attemptId"]
+    _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "trigger_followup",
+                "params": {"attemptId": gate_attempt_id},
+            },
+        ]
+    )
+
+    repository = Repository(paths.sqlite_path)
+    surprise = repository.latest_attempt_surprise(gate_attempt_id)
+    queued = [
+        action.split(":", 2)[2]
+        for action in surprise["triggered_actions"]
+        if action.startswith("intervention_followup:queued:")
+    ]
+    assert queued, surprise["triggered_actions"]
+    followup_item = queued[0]
+
+    # Attempt the queued follow-up item, then rate it.
+    followup_attempt = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "submit_dont_know",
+                "params": {"sessionId": session_id, "practiceItemId": followup_item},
+            },
+        ]
+    )[1]["result"]
+    rated = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "rate_followup",
+                "params": {"attemptId": followup_attempt["attemptId"], "useful": True},
+            },
+        ]
+    )[1]["result"]
+
+    assert rated["followupRating"] == {"useful": True, "ratedAt": rated["followupRating"]["ratedAt"]}
+    assert rated["followupSource"] == {"gateAttemptId": gate_attempt_id}
+    stored = repository.followup_rating(followup_attempt["attemptId"])
+    assert stored["useful"] is True
+    assert stored["gate_attempt_id"] == gate_attempt_id
+
+
+def test_sidecar_config_carries_gate_fields(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    loaded = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "load_vault", "params": {}},
+        ]
+    )[1]["result"]
+    followup = loaded["config"]["scheduler"]["followup"]
+    assert followup["gateMode"] in ("cascade", "score")
+    assert followup["gateScoreThreshold"] == 0.5
+    assert followup["thresholdMode"] == "quantile"
 
 
 def test_sidecar_feedback_exposes_probe_intervention_need(tmp_path):

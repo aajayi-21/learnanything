@@ -361,6 +361,14 @@ pub async fn trigger_followup(
 }
 
 #[tauri::command]
+pub async fn rate_followup(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "rate_followup", input).await
+}
+
+#[tauri::command]
 pub async fn run_cli_command(
     input: Value,
     sidecar: State<'_, SidecarManager>,

@@ -8,14 +8,16 @@ from math import exp
 from learnloop.clock import Clock, SystemClock, parse_utc
 from learnloop.config import LearnLoopConfig
 from learnloop.db.repositories import ActiveErrorEvent, PracticeItemState, Repository
-from learnloop.services.fsrs import forgetting_curve
+from learnloop.services.fitted_params import resolve_fsrs_weights
+from learnloop.services.fsrs import FSRS6_DEFAULT_WEIGHTS, forgetting_curve
 from learnloop.services.probes import (
     HypothesisSet,
     current_hypothesis_set,
     probe_eig_component,
     resolve_item_irt,
 )
-from learnloop.services.recall_coverage import clamp, familiarity_discount, resolve_coverage
+from learnloop.numeric import clamp
+from learnloop.services.recall_coverage import familiarity_discount, resolve_coverage
 from learnloop.services.selection_rewards import SchedulerIntent, score_selection_reward
 from learnloop.vault.models import ConceptEdge, Goal, LoadedVault, PracticeItem
 
@@ -61,6 +63,7 @@ def build_due_queue(
         and session.available_minutes <= config.scheduler.short_session_minutes
     )
     readiness_factor = _readiness_factor(session, config)
+    fsrs_weights = resolve_fsrs_weights(repository)
     hypothesis_set_cache: dict[str, HypothesisSet | None] = {}
     pending_followups = repository.pending_followup_practice_items()
     facet_states_by_lo = {
@@ -84,7 +87,7 @@ def build_due_queue(
             continue
 
         components: dict[str, float] = {
-            "forgetting_risk": _forgetting_risk(state, now),
+            "forgetting_risk": _forgetting_risk(state, now, fsrs_weights),
             "active_goal": _active_goal(learning_object.concept, vault.goals, goal_reachable),
             "recent_error": _recent_error(errors_by_lo.get(learning_object.id, []), now),
             "probe_eig": 0.0,
@@ -104,6 +107,7 @@ def build_due_queue(
                     attempt_type="diagnostic_probe",
                     hints_used=0,
                     learner_answer_md="prospective_probe",
+                    evidence=vault.config.evidence,
                 )
                 prospective_familiarity = familiarity_discount(
                     repository,
@@ -502,7 +506,11 @@ def _scheduler_config_snapshot(config: LearnLoopConfig) -> dict[str, object]:
     }
 
 
-def _forgetting_risk(state: PracticeItemState | None, now: datetime) -> float:
+def _forgetting_risk(
+    state: PracticeItemState | None,
+    now: datetime,
+    weights: tuple[float, ...] = FSRS6_DEFAULT_WEIGHTS,
+) -> float:
     if state is None or state.due_at is None:
         return 0.0
     due_at = parse_utc(state.due_at)
@@ -512,7 +520,7 @@ def _forgetting_risk(state: PracticeItemState | None, now: datetime) -> float:
         return 1.0
     last_attempt_at = parse_utc(state.last_attempt_at) or due_at
     elapsed_days = max(0.0, (now - last_attempt_at).total_seconds() / 86400)
-    return 1 - forgetting_curve(state.stability, elapsed_days)
+    return 1 - forgetting_curve(state.stability, elapsed_days, weights)
 
 
 def _active_goal(concept_id: str, goals: list[Goal], reachable_by_goal: dict[str, set[str]]) -> float:

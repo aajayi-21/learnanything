@@ -11,6 +11,7 @@ import type {
 } from "../api/dto";
 import { EmptyPlaceholder, EntityLink } from "../components/ui";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
+import { masteryTone } from "../app/algoConfig";
 import { MarkdownMath } from "../render/MarkdownMath";
 
 const HOTKEYS = "123456789abcdef";
@@ -29,7 +30,7 @@ function modePillColor(mode: string): PillColor {
 }
 
 function masteryColor(mastery: number): string {
-  return mastery > 0.6 ? COLOR.green : mastery > 0.35 ? COLOR.amber : COLOR.red;
+  return masteryTone(mastery, COLOR);
 }
 
 export function TodayScreen({

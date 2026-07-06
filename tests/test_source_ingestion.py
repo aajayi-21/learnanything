@@ -115,6 +115,172 @@ def test_ingest_invalid_returned_locator_blocks_auto_apply(tmp_path):
     assert all(item["validation_errors"][0].startswith("unresolved_source_ref:") for item in items)
 
 
+def test_section_level_source_ref_resolves_to_child_chunks(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    normalized = NormalizedSource(
+        kind="website_page",
+        title="Question Bank",
+        authors=[],
+        canonical_uri="file:///question-bank.md",
+        original_uri="file:///question-bank.md",
+        markdown=(
+            "# Question Bank\n\n"
+            "## Questions\n\n"
+            "### 1.\n\n"
+            "First fact pattern paragraph.\n\n"
+            "What result?\n\n"
+            "- **(A)** First answer.\n"
+            "- **(B)** Second answer.\n"
+        ),
+        retrieved_at=NOW,
+    )
+    chunks = chunk_normalized_source(normalized)
+    registered = register_canonical_source(
+        vault_root,
+        "linear-algebra",
+        normalized,
+        normalized.markdown.encode("utf-8"),
+        source_content_hash(normalized.markdown),
+        clock=FrozenClock(NOW),
+    )
+    proposal = AuthoringProposal.model_validate(
+        {
+            "summary": "Extract a section-level source.",
+            "source_refs": [
+                {
+                    "ref_type": "canonical_source",
+                    "ref_id": "src_q1",
+                    "path": registered.path,
+                    "locator": "question-bank/questions/1",
+                }
+            ],
+            "items": [
+                {
+                    "client_item_id": "lo_question_one",
+                    "item_type": "learning_object",
+                    "operation": "create",
+                    "proposed_entity_id": "lo_question_one",
+                    "source_ref_ids": ["src_q1"],
+                    "rationale": "Extract question one.",
+                    "review_route": "review_required",
+                    "payload": {
+                        "title": "Question one rule",
+                        "subjects": ["linear-algebra"],
+                        "concept_id": "singular_value_decomposition",
+                        "knowledge_type": "definition",
+                        "summary": "Question one protects a section-level grounding case.",
+                    },
+                }
+            ],
+        }
+    )
+
+    validated = _proposal_with_locator_validation(
+        proposal,
+        registered,
+        IngestWindow(chunks=chunks, ordinal=1),
+    )
+
+    assert "#unresolved-locator" not in (validated.source_refs[0].path or "")
+    assert _locator_hash_for_ref(chunks, "question-bank/questions/1") is not None
+    patch_id = persist_authoring_proposal(
+        vault_root,
+        validated,
+        provider="codex",
+        clock=FrozenClock(NOW),
+    )
+    item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
+    assert item["validation_status"] == "valid"
+
+
+def test_composite_note_id_locator_source_ref_resolves(tmp_path):
+    # Ingestor models frequently key every source_ref by the note id alone and then
+    # reference a specific span from an item as "<note_id>:<locator>". Those composite
+    # ids must still resolve to the real chunk instead of blocking the item as invalid.
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    normalized = NormalizedSource(
+        kind="website_page",
+        title="Practice Exam",
+        authors=[],
+        canonical_uri="file:///practice-exam.pdf",
+        original_uri="file:///practice-exam.pdf",
+        markdown=(
+            "First question paragraph about ulnar nerve tension tests.\n\n"
+            "Second question paragraph about the vestibular system.\n"
+        ),
+        retrieved_at=NOW,
+    )
+    chunks = chunk_normalized_source(normalized)
+    registered = register_canonical_source(
+        vault_root,
+        "linear-algebra",
+        normalized,
+        normalized.markdown.encode("utf-8"),
+        source_content_hash(normalized.markdown),
+        clock=FrozenClock(NOW),
+    )
+    note_id = registered.note_id
+    proposal = AuthoringProposal.model_validate(
+        {
+            "summary": "Glossary items grounded via composite note-id:locator refs.",
+            "source_refs": [
+                {
+                    "ref_type": "canonical_source",
+                    "ref_id": note_id,
+                    "path": registered.path,
+                    "locator": "root/p1",
+                },
+                {
+                    "ref_type": "canonical_source",
+                    "ref_id": note_id,
+                    "path": registered.path,
+                    "locator": "root/p2",
+                },
+            ],
+            "items": [
+                {
+                    "client_item_id": "lo_ulnar_rule",
+                    "item_type": "learning_object",
+                    "operation": "create",
+                    "proposed_entity_id": "lo_ulnar_rule",
+                    "source_ref_ids": [f"{note_id}:root/p1"],
+                    "rationale": "Extract the ulnar tension rule.",
+                    "review_route": "review_required",
+                    "payload": {
+                        "title": "Ulnar nerve tension rule",
+                        "subjects": ["linear-algebra"],
+                        "concept_id": "singular_value_decomposition",
+                        "knowledge_type": "definition",
+                        "summary": "Composite note-id:locator grounding must resolve to the chunk.",
+                    },
+                }
+            ],
+        }
+    )
+
+    validated = _proposal_with_locator_validation(
+        proposal,
+        registered,
+        IngestWindow(chunks=chunks, ordinal=1),
+    )
+
+    composite = f"{note_id}:root/p1"
+    composite_ref = next(ref for ref in validated.source_refs if ref.ref_id == composite)
+    assert "#unresolved" not in (composite_ref.path or "")
+    assert composite_ref.locator == "root/p1"
+
+    patch_id = persist_authoring_proposal(
+        vault_root,
+        validated,
+        provider="codex",
+        clock=FrozenClock(NOW),
+    )
+    item = Repository(vault_root / "state.sqlite").proposal_items(patch_id)[0]
+    assert item["validation_status"] == "valid"
+
+
 def test_youtube_time_range_source_refs_can_span_caption_cues(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)
@@ -367,6 +533,36 @@ def test_youtube_time_range_hash_covers_spanned_caption_text() -> None:
     assert changed_hash != first_hash
 
 
+def test_ingest_does_not_link_goal_to_pending_proposed_concept(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    html = _source_file(tmp_path)
+    client = _PendingConceptCanonicalClient()
+
+    result = ingest_canonical_source(
+        vault_root,
+        str(html),
+        client,
+        subject_id="linear-algebra",
+        clock=FrozenClock(NOW),
+    )
+
+    assert result.auto_applied_count == 0
+    assert result.invalid_count == 0
+    assert result.goal_id is None
+    loaded = load_vault(vault_root)
+    assert "concept_ingested_pending" not in loaded.concepts
+    assert all(
+        "concept_ingested_pending" not in goal.concept_anchors
+        for goal in loaded.goals
+    )
+
+    repository = Repository(vault_root / "state.sqlite")
+    items = repository.proposal_items(result.patch_id)
+    assert {item["validation_status"] for item in items} == {"valid"}
+    assert {item["item_type"] for item in items} == {"concept", "learning_object"}
+
+
 def test_ingest_retries_with_stronger_ai_provider_on_validation_failure(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)
@@ -561,6 +757,58 @@ class _FakeCanonicalClient:
 
     def run_grading_proposal(self, context):  # pragma: no cover - unused in these tests
         raise NotImplementedError
+
+
+class _PendingConceptCanonicalClient(_FakeCanonicalClient):
+    def run_canonical_ingest(self, context: CanonicalIngestContext) -> AuthoringProposal:
+        self.calls.append(context)
+        source_ref_id = context.canonical_source["id"]
+        return AuthoringProposal.model_validate(
+            {
+                "summary": "Ingested source with a pending concept.",
+                "source_refs": [
+                    {
+                        "ref_type": "canonical_source",
+                        "ref_id": source_ref_id,
+                        "path": context.canonical_source["path"],
+                        "locator": context.chunks[0].locator,
+                    }
+                ],
+                "items": [
+                    {
+                        "client_item_id": "concept_ingested_pending",
+                        "item_type": "concept",
+                        "operation": "create",
+                        "proposed_entity_id": "concept_ingested_pending",
+                        "source_ref_ids": [source_ref_id],
+                        "rationale": "Extract the source concept.",
+                        "review_route": "review_required",
+                        "payload": {
+                            "title": "Pending ingested concept",
+                            "type": "concept",
+                            "description": "A source concept that must be reviewed before goal linkage.",
+                            "tags": [],
+                        },
+                    },
+                    {
+                        "client_item_id": "lo_pending_concept",
+                        "item_type": "learning_object",
+                        "operation": "create",
+                        "proposed_entity_id": "lo_pending_concept",
+                        "source_ref_ids": [source_ref_id],
+                        "rationale": "Extract a learning object for the proposed concept.",
+                        "review_route": "review_required",
+                        "payload": {
+                            "title": "Pending concept learning object",
+                            "subjects": [context.target_subject],
+                            "concept_id": "concept_ingested_pending",
+                            "knowledge_type": "definition",
+                            "summary": "Learning object tied to a concept awaiting review.",
+                        },
+                    },
+                ],
+            }
+        )
 
 
 def _source_file(tmp_path):

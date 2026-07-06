@@ -80,6 +80,8 @@ export const api = {
     call<FeedbackBundle>("add_error_event", { input: { attemptId, errorType, severity } }),
   triggerFollowup: (attemptId: string) =>
     call<FeedbackBundle>("trigger_followup", { input: { attemptId } }),
+  rateFollowup: (attemptId: string, useful: boolean) =>
+    call<FeedbackBundle>("rate_followup", { input: { attemptId, useful } }),
   inspectEntity: (id: string) => call<InspectorEntity>("inspect_entity", { id }),
   getConceptGraph: () => call<ConceptGraphSnapshot>("get_concept_graph"),
   getVaultTree: () => call<VaultTreeSnapshot>("get_vault_tree"),

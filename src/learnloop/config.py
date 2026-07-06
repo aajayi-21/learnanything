@@ -14,7 +14,38 @@ DEFAULT_CONFIG_TEXT = """schema_version = 1
 sqlite_path = "state.sqlite"
 
 [algorithms]
-algorithm_version = "mvp-0.3"
+algorithm_version = "mvp-0.4"
+
+# Single source of truth for per-attempt-type evidence (Fable's-take item 3).
+# evidence_mass weights ability-belief updates (mastery EKF / reliability);
+# surface_exposure is the fraction of the item's facet surface the attempt
+# certifies as probed (coverage). surface_exposure defaults to evidence_mass;
+# dont_know overrides it because a confident "don't know" fully covers the
+# surface as evidence-of-absence while remaining self-diagnosis, not
+# demonstration.
+[evidence.attempt_types]
+independent_attempt = { evidence_mass = 1.0 }
+open_text = { evidence_mass = 1.0 }
+diagnostic_probe = { evidence_mass = 1.0 }
+hinted_attempt = { evidence_mass = 1.0 }
+reconstruction_after_walkthrough = { evidence_mass = 0.5 }
+dont_know = { evidence_mass = 0.7, surface_exposure = 1.0 }
+self_report = { evidence_mass = 0.3 }
+guided_walkthrough = { evidence_mass = 0.0 }
+skip = { evidence_mass = 0.0 }
+
+# Item-side coverage prior per practice mode: how much of an LO's facet surface
+# an item of this mode can surface when it has no evidence weights or rubric.
+# Not derivable from attempt-type evidence_mass (different question).
+[evidence.item_coverage_by_practice_mode]
+constructed_response = 0.85
+open_text = 0.85
+short_answer = 0.75
+diagnostic_probe = 0.80
+independent_attempt = 0.75
+hinted_attempt = 0.65
+multiple_choice = 0.45
+self_report = 0.25
 
 [scheduler]
 forgetting_risk_weight = 1.0
@@ -39,11 +70,39 @@ epsilon_error_surprise = 0.05
 tau_followup_nats = 0.05
 gamma_min = 0.5
 min_target_facet_overlap = 0.5
+# Gate modernization: thresholds resolve as quantiles of this learner's own
+# signal history; the absolute values above remain the cold-start fallback.
+threshold_mode = "quantile"
+tau_followup_quantile = 0.85
+tau_severe_error_quantile = 0.90
+quantile_min_samples = 30
+quantile_window = 200
+# gate_mode = "score" scores all signals through one logistic (threshold last);
+# "cascade" preserves the legacy hard trigger/suppression chain bit-for-bit.
+gate_mode = "score"
+gate_score_threshold = 0.5
+gate_subscore_steepness = 12.0
+# Predictive facet EIG (logged-but-inert at weight 0.0; see services/predictive_eig.py).
+predictive_eig_weight = 0.0
+predictive_eig_target_cap = 4
+
+# Offline parameter fitting from the learner's own logs (`learnloop fit`).
+# Fitted sets live in the fitted_parameters table; defaults apply when none is active.
+[fitting.fsrs]
+min_reviews = 50
+min_elapsed_days = 0.5
+l2_lambda = 1.0
+max_iterations = 300
+initial_step = 0.05
+min_relative_improvement = 0.01
 
 [mastery]
 base_observation_variance = 1.0
 sigma2_drift = 0.01
 p_max = 4.0
+# Display banding: > strong renders green, > developing renders amber, else red.
+display_strong_threshold = 0.6
+display_developing_threshold = 0.35
 
 # IRT 2PL difficulty-aware mastery update (spec_irt_difficulty.md §4).
 # enabled = false restores the legacy logit-space Kalman update bit-for-bit.
@@ -57,6 +116,13 @@ b_abs_max = 4.0
 p_clip = 1e-4
 mu_abs_max = 5.0
 max_logit_step = 4.0
+# Empirical-Bayes per-item difficulty posterior (dark by default; see
+# MasteryIRTConfig for the identifiability rationale).
+eb_difficulty_enabled = false
+b_prior_variance = 0.25
+b_learning_rate_scale = 0.2
+b_max_step = 0.25
+b_var_min = 0.01
 
 [probe]
 attempts_target_default = 3
@@ -264,7 +330,7 @@ class StorageConfig(BaseModel):
 
 
 class AlgorithmsConfig(BaseModel):
-    algorithm_version: str = "mvp-0.3"
+    algorithm_version: str = "mvp-0.4"
 
 
 class SchedulerSurpriseConfig(BaseModel):
@@ -290,6 +356,28 @@ class SchedulerFollowupConfig(BaseModel):
     cold_start_min_lo_evidence: float = 2.0
     min_target_facet_overlap: float = 0.5
     max_diagnostic_target_facets: int = 2
+    # Data-relative thresholds (gate modernization): "quantile" resolves
+    # tau_followup_nats / tau_severe_error against this learner's own logged
+    # signal distribution; below quantile_min_samples observations the absolute
+    # constants above remain the cold-start fallback.
+    threshold_mode: str = "quantile"  # "quantile" | "absolute"
+    tau_followup_quantile: float = 0.85  # fire on the top 15% of negative surprises
+    tau_severe_error_quantile: float = 0.90
+    quantile_min_samples: int = 30
+    quantile_window: int = 200
+    # Continuous gate score: "score" combines all signals through one logistic
+    # with the threshold applied last (near-misses become loggable gradients);
+    # "cascade" is the legacy hard trigger/suppression chain, kept as a
+    # bit-for-bit escape hatch and regression baseline.
+    gate_mode: str = "score"  # "cascade" | "score"
+    gate_score_threshold: float = 0.5
+    gate_subscore_steepness: float = 12.0
+    # Predictive facet EIG (Adaptive Elicitation): expected reduction in
+    # entropy of predicted answers to held-out target items. Logged on every
+    # follow-up slate; weight 0.0 keeps ranking bit-for-bit unchanged until the
+    # logs justify trusting it (log-before-trust).
+    predictive_eig_weight: float = 0.0
+    predictive_eig_target_cap: int = 4
 
 
 class SchedulerConfig(BaseModel):
@@ -299,7 +387,10 @@ class SchedulerConfig(BaseModel):
     probe_eig_weight: float = 0.25
     short_session_minutes: int = 20
     candidate_log_retention_limit: int = 200
-    selection_exploration_rate: float = 0.0
+    # Matches DEFAULT_CONFIG_TEXT: exploration must stay on even for vaults whose
+    # learnloop.toml predates the key, or logged slates carry degenerate
+    # propensities and off-policy evaluation is dead (architecture_pivot Stage 0).
+    selection_exploration_rate: float = 0.1
     selection_exploration_reward_window: float = 0.15
     surprise: SchedulerSurpriseConfig = Field(default_factory=SchedulerSurpriseConfig)
     followup: SchedulerFollowupConfig = Field(default_factory=SchedulerFollowupConfig)
@@ -317,6 +408,17 @@ class MasteryIRTConfig(BaseModel):
     p_clip: float = 1e-4                     # numerical clamp on p before H/R_y
     mu_abs_max: float = 5.0                  # sanity clamp on logit_mean
     max_logit_step: float = 4.0              # per-attempt cap on |mu_new - mu| (EKF-overshoot guard)
+    # Empirical-Bayes per-item difficulty (Fable's-take item 5). Ships dark:
+    # theta and b are confounded at N=1, and a bad b trajectory corrupts
+    # mastery, surprise, and gating simultaneously — validate via calibration
+    # flags + flag-flip-and-rebuild before defaulting on. The authored value
+    # stays the prior mean; b learns ~5x slower than mu (gain scale) with a
+    # per-attempt step clamp.
+    eb_difficulty_enabled: bool = False
+    b_prior_variance: float = 0.25           # sigma = 0.5 logits around the authored prior
+    b_learning_rate_scale: float = 0.2
+    b_max_step: float = 0.25
+    b_var_min: float = 0.01
 
 
 class ProbeIRTConfig(BaseModel):
@@ -342,6 +444,11 @@ class MasteryConfig(BaseModel):
     base_observation_variance: float = 1.0   # probability-space scale: inverse effective trials in R_y
     sigma2_drift: float = 0.01
     p_max: float = 4.0
+    # Display banding for mastery means: > strong renders green, > developing
+    # renders amber, else red. Owned here (not in the frontend) so the breakpoints
+    # can become fitted values without a UI release.
+    display_strong_threshold: float = 0.6
+    display_developing_threshold: float = 0.35
     irt: MasteryIRTConfig = Field(default_factory=MasteryIRTConfig)
 
 
@@ -557,12 +664,95 @@ class CrossLoPropagationConfig(BaseModel):
     error_gates: dict[str, ErrorGate] = Field(default_factory=dict)
 
 
+class FsrsFittingConfig(BaseModel):
+    """`learnloop fit fsrs` knobs (architecture_pivot.md Stage 1)."""
+
+    min_reviews: int = 50
+    min_elapsed_days: float = 0.5
+    l2_lambda: float = 1.0
+    max_iterations: int = 300
+    initial_step: float = 0.05
+    min_relative_improvement: float = 0.01
+
+
+class FittingConfig(BaseModel):
+    fsrs: FsrsFittingConfig = Field(default_factory=FsrsFittingConfig)
+
+
+class EvidenceMassEntry(BaseModel):
+    """Evidence carried by one attempt type (Fable's-take item 3).
+
+    ``evidence_mass`` weights ability-belief updates (mastery EKF reliability);
+    ``surface_exposure`` is the fraction of the item's facet surface the attempt
+    certifies as probed (coverage). ``surface_exposure = None`` means "same as
+    evidence_mass". They diverge only where diagnosis and demonstration differ:
+    a confident "don't know" fully covers the surface as evidence-of-absence
+    (exposure 1.0) but is self-diagnosis, not demonstration (mass 0.7).
+    """
+
+    evidence_mass: float = 1.0
+    surface_exposure: float | None = None
+
+
+def default_attempt_type_evidence() -> dict[str, EvidenceMassEntry]:
+    return {
+        "independent_attempt": EvidenceMassEntry(evidence_mass=1.0),
+        "open_text": EvidenceMassEntry(evidence_mass=1.0),
+        "diagnostic_probe": EvidenceMassEntry(evidence_mass=1.0),
+        "hinted_attempt": EvidenceMassEntry(evidence_mass=1.0),
+        "reconstruction_after_walkthrough": EvidenceMassEntry(evidence_mass=0.5),
+        "dont_know": EvidenceMassEntry(evidence_mass=0.7, surface_exposure=1.0),
+        "self_report": EvidenceMassEntry(evidence_mass=0.3),
+        "guided_walkthrough": EvidenceMassEntry(evidence_mass=0.0),
+        "skip": EvidenceMassEntry(evidence_mass=0.0),
+    }
+
+
+def default_practice_mode_item_coverage() -> dict[str, float]:
+    return {
+        "constructed_response": 0.85,
+        "open_text": 0.85,
+        "short_answer": 0.75,
+        "diagnostic_probe": 0.80,
+        "independent_attempt": 0.75,
+        "hinted_attempt": 0.65,
+        "multiple_choice": 0.45,
+        "self_report": 0.25,
+    }
+
+
+class EvidenceConfig(BaseModel):
+    """Single source of truth for per-attempt-type evidence carried.
+
+    Replaces the former ``ATTEMPT_TYPE_FACTORS`` (mastery/reliability) and
+    ``ATTEMPT_TYPE_COVERAGE_FACTORS`` (coverage) module tables, which had
+    drifted apart for the same attempt modes.
+    """
+
+    attempt_types: dict[str, EvidenceMassEntry] = Field(default_factory=default_attempt_type_evidence)
+    item_coverage_by_practice_mode: dict[str, float] = Field(
+        default_factory=default_practice_mode_item_coverage
+    )
+    item_coverage_default: float = 0.75
+
+    @model_validator(mode="after")
+    def _merge_defaults(self) -> "EvidenceConfig":
+        # A vault TOML overriding one attempt type must not silently reset the
+        # others to 1.0 (a partial [evidence.attempt_types] replaces the dict).
+        for attempt_type, entry in default_attempt_type_evidence().items():
+            self.attempt_types.setdefault(attempt_type, entry)
+        for mode, coverage in default_practice_mode_item_coverage().items():
+            self.item_coverage_by_practice_mode.setdefault(mode, coverage)
+        return self
+
+
 class LearnLoopConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     schema_version: int = 1
     storage: StorageConfig = Field(default_factory=StorageConfig)
     algorithms: AlgorithmsConfig = Field(default_factory=AlgorithmsConfig)
+    evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     mastery: MasteryConfig = Field(default_factory=MasteryConfig)
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
@@ -574,6 +764,7 @@ class LearnLoopConfig(BaseModel):
     codex: CodexConfig = Field(default_factory=CodexConfig)
     error_impacts: dict[str, ErrorImpact] = Field(default_factory=dict)
     cross_lo_propagation: CrossLoPropagationConfig = Field(default_factory=CrossLoPropagationConfig)
+    fitting: FittingConfig = Field(default_factory=FittingConfig)
 
     @model_validator(mode="before")
     @classmethod

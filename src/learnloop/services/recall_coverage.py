@@ -5,35 +5,16 @@ from dataclasses import dataclass
 from math import exp
 from typing import Any, Iterable, Mapping
 
-from learnloop.attempt_types import ATTEMPT_TYPE_FACTORS
-from learnloop.config import LearnLoopConfig
+from learnloop.config import EvidenceConfig, LearnLoopConfig
 from learnloop.db.repositories import MasteryState, Repository
+from learnloop.numeric import clamp
+from learnloop.services.evidence import (
+    attempt_evidence_mass,
+    attempt_surface_exposure,
+    practice_mode_item_coverage,
+)
 from learnloop.services.mastery import display_mastery
 from learnloop.vault.models import LoadedVault, PracticeItem, Rubric
-
-
-PRACTICE_MODE_COVERAGE_DEFAULTS: dict[str, float] = {
-    "constructed_response": 0.85,
-    "open_text": 0.85,
-    "short_answer": 0.75,
-    "diagnostic_probe": 0.80,
-    "independent_attempt": 0.75,
-    "hinted_attempt": 0.65,
-    "multiple_choice": 0.45,
-    "self_report": 0.25,
-}
-
-ATTEMPT_TYPE_COVERAGE_FACTORS: dict[str, float] = {
-    "dont_know": 1.0,
-    "independent_attempt": 1.0,
-    "open_text": 1.0,
-    "diagnostic_probe": 1.0,
-    "hinted_attempt": 0.90,
-    "reconstruction_after_walkthrough": 0.60,
-    "self_report": 0.30,
-    "guided_walkthrough": 0.0,
-    "skip": 0.0,
-}
 
 
 @dataclass(frozen=True)
@@ -64,10 +45,6 @@ class ErrorImpactResult:
     trace: dict[str, float]
 
 
-def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
-    return max(low, min(high, value))
-
-
 def resolve_coverage(
     item: PracticeItem,
     rubric: Rubric | None,
@@ -75,8 +52,9 @@ def resolve_coverage(
     attempt_type: str,
     hints_used: int,
     learner_answer_md: str,
+    evidence: EvidenceConfig | None = None,
 ) -> CoverageResult:
-    raw_facet_weights, item_coverage, source = _raw_coverage(item, rubric)
+    raw_facet_weights, item_coverage, source = _raw_coverage(item, rubric, evidence)
     normalized = _normalize(raw_facet_weights)
     hint_surface_factor = _hint_policy_product(
         item.hint_policy.coverage_surface_dampening_by_hint,
@@ -84,7 +62,7 @@ def resolve_coverage(
         default=1.0,
     )
     response_engagement_factor = _response_engagement_factor(attempt_type, learner_answer_md)
-    attempt_type_coverage_factor = ATTEMPT_TYPE_COVERAGE_FACTORS.get(attempt_type, 1.0)
+    attempt_type_coverage_factor = attempt_surface_exposure(attempt_type, evidence)
     effective_item_coverage = clamp(
         item_coverage * hint_surface_factor * response_engagement_factor * attempt_type_coverage_factor
     )
@@ -103,6 +81,7 @@ def resolve_coverage(
             "hint_surface_factor": hint_surface_factor,
             "response_engagement_factor": response_engagement_factor,
             "attempt_type_coverage_factor": attempt_type_coverage_factor,
+            "attempt_surface_exposure": attempt_type_coverage_factor,
         },
         "covered_facets": covered_facets,
         "effective_coverage": effective_coverage,
@@ -116,15 +95,23 @@ def resolve_coverage(
     )
 
 
-def resolve_reliability(item: PracticeItem, *, attempt_type: str, hints_used: int, grader_confidence: float) -> ReliabilityResult:
+def resolve_reliability(
+    item: PracticeItem,
+    *,
+    attempt_type: str,
+    hints_used: int,
+    grader_confidence: float,
+    evidence: EvidenceConfig | None = None,
+) -> ReliabilityResult:
     grader_confidence_factor = clamp(grader_confidence)
     hint_mastery_factor = _hint_policy_product(item.hint_policy.mastery_alpha_dampening_by_hint, hints_used, default=1.0)
-    attempt_type_mastery_factor = ATTEMPT_TYPE_FACTORS.get(attempt_type, 1.0)
+    attempt_type_mastery_factor = attempt_evidence_mass(attempt_type, evidence)
     reliability = clamp(grader_confidence_factor * hint_mastery_factor * attempt_type_mastery_factor)
     trace = {
         "grader_confidence_factor": grader_confidence_factor,
         "hint_mastery_factor": hint_mastery_factor,
         "attempt_type_mastery_factor": attempt_type_mastery_factor,
+        "attempt_evidence_mass": attempt_type_mastery_factor,
         "observation_reliability": reliability,
     }
     return ReliabilityResult(observation_reliability=reliability, trace=trace)
@@ -617,7 +604,9 @@ def predicted_correctness_from_prior(
     }
 
 
-def _raw_coverage(item: PracticeItem, rubric: Rubric | None) -> tuple[dict[str, float], float, str]:
+def _raw_coverage(
+    item: PracticeItem, rubric: Rubric | None, evidence: EvidenceConfig | None = None
+) -> tuple[dict[str, float], float, str]:
     if item.evidence_weights:
         raw = {
             facet: max(0.0, float(item.evidence_weights.get(facet, 0.0)))
@@ -641,10 +630,10 @@ def _raw_coverage(item: PracticeItem, rubric: Rubric | None) -> tuple[dict[str, 
                     norm = {facet: 1.0 / len(facets) for facet in facets}
                 for facet, weight in norm.items():
                     raw[facet] += (float(criterion.points) / max_points) * weight
-            return raw, _practice_mode_default(item), "rubric"
-        return {facet: 1.0 / len(facets) for facet in facets}, _practice_mode_default(item), "rubric"
+            return raw, _practice_mode_default(item, evidence), "rubric"
+        return {facet: 1.0 / len(facets) for facet in facets}, _practice_mode_default(item, evidence), "rubric"
     facets = item.evidence_facets or ["whole-item"]
-    return {facet: 1.0 / len(facets) for facet in facets}, _practice_mode_default(item), "practice_mode"
+    return {facet: 1.0 / len(facets) for facet in facets}, _practice_mode_default(item, evidence), "practice_mode"
 
 
 def _error_attributed_facets(error_attributions: Iterable[Any]) -> set[str]:
@@ -735,8 +724,8 @@ def _facet_tokens(value: str) -> set[str]:
     return tokens - {"a", "an", "and", "by", "is", "of", "or", "that", "the", "to"}
 
 
-def _practice_mode_default(item: PracticeItem) -> float:
-    return PRACTICE_MODE_COVERAGE_DEFAULTS.get(item.practice_mode, 0.75)
+def _practice_mode_default(item: PracticeItem, evidence: EvidenceConfig | None = None) -> float:
+    return practice_mode_item_coverage(item.practice_mode, evidence)
 
 
 def _normalize(weights: Mapping[str, float]) -> dict[str, float]:

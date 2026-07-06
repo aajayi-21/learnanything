@@ -339,6 +339,18 @@ export interface FeedbackBundle {
   repairSuggestions: RepairSuggestionDto[];
   interventionNeed: InterventionNeedDto | null;
   followupQueued: boolean;
+  // Non-null when this attempt is itself a follow-up (drives the rating strip).
+  followupSource?: FollowupSourceDto | null;
+  followupRating?: FollowupRatingDto | null;
+}
+
+export interface FollowupSourceDto {
+  gateAttemptId: string;
+}
+
+export interface FollowupRatingDto {
+  useful: boolean;
+  ratedAt: IsoTimestamp;
 }
 
 export interface InterventionNeedDto {
@@ -407,6 +419,21 @@ export interface FollowupGateSignalDto {
   unit: string | null;
   satisfied: boolean;
   surpriseDirection?: string | null;
+  // Quantile-threshold provenance (gate modernization); absent on legacy rows.
+  thresholdSource?: "quantile" | "absolute_fallback" | "absolute" | null;
+  thresholdQuantile?: number | null;
+  thresholdSampleSize?: number | null;
+}
+
+export interface FollowupGateSubscoreDto {
+  rawValue: number | null;
+  subscore: number;
+  weight: number;
+  contribution: number;
+  threshold?: number | null;
+  thresholdSource?: string | null;
+  thresholdQuantile?: number | null;
+  thresholdSampleSize?: number | null;
 }
 
 export interface FollowupGateDiagnosticsDto {
@@ -424,6 +451,24 @@ export interface FollowupGateDiagnosticsDto {
   graderConfidence: number | null;
   maxErrorSeverity: number | null;
   targetFacets: string[];
+  // Gate modernization (all optional — legacy rows keep rendering).
+  gateMode?: "cascade" | "score";
+  gateScore?: number;
+  gateScoreThreshold?: number;
+  gateBias?: number;
+  weightsProvenance?: string;
+  hardGates?: string[];
+  subscores?: Record<string, FollowupGateSubscoreDto>;
+  thresholds?: Record<
+    string,
+    {
+      value: number;
+      source: string;
+      quantile: number | null;
+      sampleSize: number;
+      absoluteFallback: number;
+    }
+  >;
 }
 
 export interface RepairSuggestionDto {

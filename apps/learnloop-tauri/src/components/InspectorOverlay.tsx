@@ -10,6 +10,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api } from "../api/client";
+import { masteryTone } from "../app/algoConfig";
 import type {
   InspectorEntity,
   InspectorSearchResult,
@@ -44,7 +45,7 @@ function modePillColor(mode: string): PillColor {
 }
 
 function masteryColor(mastery: number): string {
-  return mastery > 0.6 ? COLOR.green : mastery > 0.35 ? COLOR.amber : COLOR.red;
+  return masteryTone(mastery, COLOR);
 }
 
 export function InspectorOverlay({
