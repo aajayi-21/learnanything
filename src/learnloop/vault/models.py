@@ -97,6 +97,11 @@ class RubricCriterion(VaultModel):
     id: str
     points: float
     description: str
+    # Two-tier teach-back rubrics: "core" criteria probe one evidence facet
+    # each; "transfer" criteria stress-test solid knowledge (edge cases,
+    # what-ifs) and carry a reduced, symmetric evidence-mass multiplier.
+    # Existing vault files omit the field and default to "core".
+    tier: Literal["core", "transfer"] = "core"
 
 
 class RubricFatalError(VaultModel):

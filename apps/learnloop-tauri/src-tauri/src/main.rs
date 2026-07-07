@@ -53,7 +53,16 @@ fn main() {
             edit_proposal_item,
             refresh_proposal_item_validation,
             delete_proposal_item,
-            run_cli_command
+            run_cli_command,
+            get_facet_mastery,
+            get_knowledge_map,
+            set_grading_provider,
+            ask_tutor_question,
+            rate_tutor_answer,
+            save_tutor_answer_note,
+            get_tutor_transcript,
+            start_teach_back,
+            submit_teach_back_turn
         ])
         .run(tauri::generate_context!())
         .expect("error while running LearnLoop");

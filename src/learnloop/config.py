@@ -31,6 +31,14 @@ hinted_attempt = { evidence_mass = 1.0 }
 reconstruction_after_walkthrough = { evidence_mass = 0.5 }
 dont_know = { evidence_mass = 0.7, surface_exposure = 1.0 }
 self_report = { evidence_mass = 0.3 }
+# Imported past-exam outcome: one exam is one correlated evidence event, so
+# each seeded question carries a fraction of a live independent attempt.
+exam_evidence = { evidence_mass = 0.35 }
+# Teach-back conversation graded as one attempt: high-quality generative
+# evidence, but the opening explanation and follow-up answers are one
+# correlated multi-question event, so it carries less than a full independent
+# attempt per facet.
+teach_back = { evidence_mass = 0.8 }
 guided_walkthrough = { evidence_mass = 0.0 }
 skip = { evidence_mass = 0.0 }
 
@@ -50,6 +58,9 @@ self_report = 0.25
 [scheduler]
 forgetting_risk_weight = 1.0
 active_goal_weight = 0.35
+# Goal facet frontier: fraction of an item's evidence facets that are
+# unexamined/known_gap on a goal-reachable LO, scaled by goal priority.
+goal_frontier_weight = 0.25
 recent_error_weight = 0.50
 probe_eig_weight = 0.25
 short_session_minutes = 20
@@ -85,6 +96,14 @@ gate_subscore_steepness = 12.0
 # Predictive facet EIG (logged-but-inert at weight 0.0; see services/predictive_eig.py).
 predictive_eig_weight = 0.0
 predictive_eig_target_cap = 4
+
+# Automatic misconception resolution ("close the loop"): an active error event
+# is resolved once the learning object accumulates N clean attempts after the
+# event was created. Clean = correctness >= auto_resolve_min_correctness, no
+# error attribution written, and not a dont_know/skip self-diagnosis.
+[misconceptions]
+auto_resolve_clean_attempts = 3
+auto_resolve_min_correctness = 0.85
 
 # Offline parameter fitting from the learner's own logs (`learnloop fit`).
 # Fitted sets live in the fitted_parameters table; defaults apply when none is active.
@@ -148,6 +167,35 @@ w_max = 0.7
 target_degree = 2.0
 promotion_threshold = 3
 
+# Exam seeding (`learnloop ingest-exam` + `learnloop seed-exam-attempts`):
+# imported per-question outcomes become backdated exam_evidence attempts.
+# grader_confidence is the reliability discount persisted on seeded attempts;
+# default_learner_confidence (1-5) is used when an outcome omits confidence.
+[exam_seeding]
+grader_confidence = 0.7
+default_learner_confidence = 3
+
+# Tutor Q&A ("ask"): question limits per context (practice: per item+session,
+# feedback: per attempt, library: per note per day) and the read-side
+# uncertainty bump applied for recent unresolved questions about a facet.
+[tutor_qa]
+max_questions_practice = 3
+max_questions_feedback = 5
+max_questions_library = 8
+apply_uncertainty_effect = true
+uncertainty_evidence_mass = 0.15
+
+# Teach-back conversations: the learner explains, an AI naive student asks up
+# to max_followups questions (one per rubric criterion, uncertainty-ranked with
+# transfer escalation), and the transcript is graded as one attempt.
+# transfer_evidence_multiplier symmetrically discounts the evidence mass of
+# transfer-tier criterion evidence; session_cap bounds teach_back items per
+# built queue.
+[teach_back]
+max_followups = 3
+transfer_evidence_multiplier = 0.5
+session_cap = 1
+
 [ingest]
 window_char_cap = 150000
 min_content_chars = 400
@@ -164,11 +212,17 @@ grading = "codex"
 canonical_ingest = "codex"
 canonical_ingest_retry = ""
 authoring = "codex"
+# Empty = follow ai.active_provider; point at any configured provider to route
+# tutor Q&A elsewhere (a vault decision, not forced-cheap).
+tutor_qa = ""
+# Empty = follow ai.active_provider; teach-back questions + grading routing.
+teach_back = ""
 
 [ai.providers.codex]
 type = "codex_sdk"
 model = "gpt-5.5"
-checkout_path = "../codex"
+# Per-machine; set LEARNLOOP_CODEX_CHECKOUT_PATH in ~/.config/learnloop/settings.env.
+checkout_path = ""
 revision = "<pinned-commit>"
 startup_command = ""
 startup_timeout_seconds = 20
@@ -208,7 +262,8 @@ timeout_seconds = 180
 
 [codex]
 provider = "sdk"
-checkout_path = "../codex"
+# Per-machine; set LEARNLOOP_CODEX_CHECKOUT_PATH in ~/.config/learnloop/settings.env.
+checkout_path = ""
 revision = "<pinned-commit>"
 startup_command = ""
 startup_timeout_seconds = 20
@@ -383,6 +438,9 @@ class SchedulerFollowupConfig(BaseModel):
 class SchedulerConfig(BaseModel):
     forgetting_risk_weight: float = 1.0
     active_goal_weight: float = 0.35
+    # Goal facet frontier: rewards items whose evidence facets are still
+    # unexamined or known gaps on LOs reachable from an active goal.
+    goal_frontier_weight: float = 0.25
     recent_error_weight: float = 0.50
     probe_eig_weight: float = 0.25
     short_session_minutes: int = 20
@@ -553,11 +611,73 @@ class RecallCoverageConfig(BaseModel):
     severity_examples: dict[str, SeverityExampleConfig] = Field(default_factory=default_severity_examples)
 
 
+class MisconceptionsConfig(BaseModel):
+    """Automatic misconception resolution ("close the loop").
+
+    An active error event resolves once its learning object accumulates
+    ``auto_resolve_clean_attempts`` clean attempts after the event's
+    ``created_at``. Clean = correctness >= ``auto_resolve_min_correctness``,
+    no error attribution written, and not a ``dont_know``/``skip``
+    self-diagnosis (see ``count_clean_attempts_since``).
+    """
+
+    auto_resolve_clean_attempts: int = 3
+    auto_resolve_min_correctness: float = 0.85
+
+
 class FacetDiagnosticConfig(BaseModel):
     tau_facet_failed: float = 0.40
     tau_facet_uncertain_variance: float = 0.15
     hedge_uncertainty_floor: float = 0.50
     facet_resolved_threshold: float = 0.10
+
+
+class ExamSeedingConfig(BaseModel):
+    """Exam seeding: imported past-exam outcomes as backdated attempts.
+
+    ``grader_confidence`` is the reliability discount persisted on every seeded
+    ``exam_evidence`` attempt (imported outcomes are self-reported after the
+    fact, so they never carry full grader trust). ``default_learner_confidence``
+    is the 1-5 self-grade confidence recorded when an outcome omits one.
+    """
+
+    grader_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    default_learner_confidence: int = Field(default=3, ge=1, le=5)
+
+
+class TutorQAConfig(BaseModel):
+    """Tutor Q&A ("ask") behavior.
+
+    Question limits are enforced server-side per context: practice is per
+    (practice item, session), feedback is per attempt, library is per note per
+    UTC day. ``apply_uncertainty_effect`` gates the read-side diagnostic bump:
+    recent unresolved questions about a facet raise that facet's displayed
+    uncertainty in ``mastery_diagnostic_view`` by ``uncertainty_evidence_mass``
+    per question (bounded); mastery means are never lowered by asking.
+    """
+
+    max_questions_practice: int = Field(default=3, ge=0)
+    max_questions_feedback: int = Field(default=5, ge=0)
+    max_questions_library: int = Field(default=8, ge=0)
+    apply_uncertainty_effect: bool = True
+    uncertainty_evidence_mass: float = Field(default=0.15, ge=0.0, le=1.0)
+
+
+class TeachBackConfig(BaseModel):
+    """Teach-back conversation behavior.
+
+    ``max_followups`` bounds the number of naive-student questions per
+    conversation (one per selected rubric criterion).
+    ``transfer_evidence_multiplier`` is the symmetric evidence-mass multiplier
+    applied to facet evidence contributed by transfer-tier rubric criteria —
+    both success and failure are discounted equally, and the multiplier is
+    read from config at apply time so replay reproduces it. ``session_cap``
+    is the maximum number of teach_back items in one built practice queue.
+    """
+
+    max_followups: int = Field(default=3, ge=1)
+    transfer_evidence_multiplier: float = Field(default=0.5, ge=0.0, le=1.0)
+    session_cap: int = Field(default=1, ge=0)
 
 
 class IngestConfig(BaseModel):
@@ -569,7 +689,7 @@ class IngestConfig(BaseModel):
 
 class CodexConfig(BaseModel):
     provider: str = "sdk"
-    checkout_path: str = "../codex"
+    checkout_path: str = ""  # per-machine; see LEARNLOOP_CODEX_CHECKOUT_PATH
     revision: str = "<pinned-commit>"
     startup_command: str = ""
     startup_timeout_seconds: int = 20
@@ -586,6 +706,8 @@ class CodexConfig(BaseModel):
     authoring_path: str = "/authoring-proposal"
     canonical_ingest_path: str = "/canonical-ingest"
     grading_path: str = "/grading-proposal"
+    tutor_qa_path: str = "/tutor-qa"
+    teach_back_path: str = "/teach-back"
 
 
 class AIProviderConfig(BaseModel):
@@ -615,6 +737,8 @@ class AIProviderConfig(BaseModel):
     authoring_path: str | None = None
     canonical_ingest_path: str | None = None
     grading_path: str | None = None
+    tutor_qa_path: str | None = None
+    teach_back_path: str | None = None
 
 
 class AIRoutingConfig(BaseModel):
@@ -622,6 +746,10 @@ class AIRoutingConfig(BaseModel):
     canonical_ingest: str | None = None
     canonical_ingest_retry: str | None = None
     authoring: str | None = None
+    tutor_qa: str | None = None
+    # Teach-back naive-student questions + transcript grading. Empty = follow
+    # ai.active_provider (same fallback chain as tutor_qa).
+    teach_back: str | None = None
 
 
 class AIConfig(BaseModel):
@@ -703,6 +831,10 @@ def default_attempt_type_evidence() -> dict[str, EvidenceMassEntry]:
         "reconstruction_after_walkthrough": EvidenceMassEntry(evidence_mass=0.5),
         "dont_know": EvidenceMassEntry(evidence_mass=0.7, surface_exposure=1.0),
         "self_report": EvidenceMassEntry(evidence_mass=0.3),
+        "exam_evidence": EvidenceMassEntry(evidence_mass=0.35),
+        # High-quality generative evidence, but one correlated multi-question
+        # conversation, so less than a full independent attempt per facet.
+        "teach_back": EvidenceMassEntry(evidence_mass=0.8),
         "guided_walkthrough": EvidenceMassEntry(evidence_mass=0.0),
         "skip": EvidenceMassEntry(evidence_mass=0.0),
     }
@@ -758,7 +890,11 @@ class LearnLoopConfig(BaseModel):
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
     recall_coverage: RecallCoverageConfig = Field(default_factory=RecallCoverageConfig)
     facet_diagnostic: FacetDiagnosticConfig = Field(default_factory=FacetDiagnosticConfig)
+    misconceptions: MisconceptionsConfig = Field(default_factory=MisconceptionsConfig)
     practice_generation: PracticeGenerationConfig = Field(default_factory=PracticeGenerationConfig)
+    exam_seeding: ExamSeedingConfig = Field(default_factory=ExamSeedingConfig)
+    tutor_qa: TutorQAConfig = Field(default_factory=TutorQAConfig)
+    teach_back: TeachBackConfig = Field(default_factory=TeachBackConfig)
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     ai: AIConfig = Field(default_factory=AIConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
@@ -843,6 +979,8 @@ def ai_provider_from_codex(config: CodexConfig) -> AIProviderConfig:
         authoring_path=config.authoring_path,
         canonical_ingest_path=config.canonical_ingest_path,
         grading_path=config.grading_path,
+        tutor_qa_path=config.tutor_qa_path,
+        teach_back_path=config.teach_back_path,
     )
 
 
@@ -882,13 +1020,57 @@ class ConfigLoadError(ValueError):
         super().__init__(message)
 
 
+CODEX_CHECKOUT_ENV = "LEARNLOOP_CODEX_CHECKOUT_PATH"
+
+
+def global_settings_path() -> Path:
+    """Location of the machine-global learnloop settings env file.
+
+    This holds per-machine settings that should not live in a vault's committed
+    ``learnloop.toml`` -- most notably the local Codex checkout path. Overridable
+    with ``LEARNLOOP_CONFIG_DIR``; otherwise ``XDG_CONFIG_HOME`` or ``~/.config``.
+    """
+
+    override = os.environ.get("LEARNLOOP_CONFIG_DIR")
+    if override:
+        base = Path(override).expanduser()
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        root = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+        base = root / "learnloop"
+    return base / "settings.env"
+
+
+def _apply_global_overrides(config: LearnLoopConfig) -> LearnLoopConfig:
+    """Overlay machine-global settings (env / global settings file) onto config.
+
+    The Codex checkout path is a per-machine concern, so it is sourced from the
+    ``LEARNLOOP_CODEX_CHECKOUT_PATH`` env var rather than the committed vault
+    config. When set, it wins over any ``checkout_path`` in ``learnloop.toml``.
+    """
+
+    checkout = os.environ.get(CODEX_CHECKOUT_ENV, "").strip()
+    if checkout:
+        resolved = str(Path(checkout).expanduser())
+        config.codex.checkout_path = resolved
+        provider = config.ai.providers.get("codex")
+        if provider is not None:
+            provider.checkout_path = resolved
+    return config
+
+
 def load_config(path: Path) -> LearnLoopConfig:
+    # Precedence: shell env > vault-local .env > machine-global settings.env.
+    # load_dotenv never overwrites keys already in os.environ, so loading the
+    # vault .env first lets it win over the global file for the same key.
     load_dotenv(path.parent / ".env")
+    load_dotenv(global_settings_path())
     try:
         with path.open("rb") as handle:
-            return LearnLoopConfig.model_validate(tomllib.load(handle))
+            config = LearnLoopConfig.model_validate(tomllib.load(handle))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigLoadError(path, _format_toml_error(path, exc)) from exc
+    return _apply_global_overrides(config)
 
 
 def _format_toml_error(path: Path, exc: tomllib.TOMLDecodeError) -> str:

@@ -20,6 +20,12 @@ from learnloop.services.grading import (
 )
 from learnloop.services.error_taxonomy import persist_unknown_error_type_proposals
 from learnloop.services.replay import replay_learning_object
+from learnloop.services.teach_back import (
+    TEACH_BACK_ATTEMPT_TYPE,
+    asked_rubric_score,
+    core_criteria,
+    restrict_grading_context_to_criteria,
+)
 from learnloop.vault.models import LoadedVault
 
 
@@ -132,12 +138,27 @@ def _regrade_attempt(
     item = vault.practice_items[attempt["practice_item_id"]]
     learning_object = vault.learning_objects[attempt["learning_object_id"]]
     rubric = resolved_rubric(vault, item)
+    old_evidence = repository.fetch_grading_evidence(attempt["id"])
     context = build_grading_context(
         vault,
         item,
         attempt_id=attempt["id"],
         learner_answer_md=attempt.get("learner_answer_md") or "",
     )
+    # Teach-back attempts were graded on the ASKED criteria only (the asked
+    # set is exactly the criterion ids carrying persisted evidence rows), so a
+    # regrade must be restricted the same way — the full rubric would penalize
+    # criteria the naive student never asked about and inject unasked-criterion
+    # evidence into the replay log.
+    graded_criteria = None
+    if attempt.get("attempt_type") == TEACH_BACK_ATTEMPT_TYPE:
+        evidence_criterion_ids = {row.criterion_id for row in old_evidence}
+        graded_criteria = [
+            criterion for criterion in rubric.criteria if criterion.id in evidence_criterion_ids
+        ]
+        if not graded_criteria:
+            graded_criteria = core_criteria(rubric)
+        context = restrict_grading_context_to_criteria(context, item, rubric, graded_criteria)
     now = utc_now_iso(clock)
     agent_run_id = repository.insert_agent_run(
         {
@@ -164,12 +185,25 @@ def _regrade_attempt(
         repository.complete_agent_run(agent_run_id, status="failed", error_message=str(exc), clock=clock)
         raise
 
-    old_evidence = repository.fetch_grading_evidence(attempt["id"])
     old_score = int(attempt["rubric_score"] or 0)
+    if graded_criteria is not None:
+        graded_ids = {criterion.id for criterion in graded_criteria}
+        criterion_evidence = [
+            evidence for evidence in validated.criterion_evidence if evidence.criterion_id in graded_ids
+        ]
+        new_score = asked_rubric_score(
+            rubric,
+            graded_criteria,
+            {evidence.criterion_id: evidence.points_awarded for evidence in criterion_evidence},
+            list(validated.fatal_errors),
+        )
+    else:
+        criterion_evidence = list(validated.criterion_evidence)
+        new_score = validated.rubric_score
     first_new_evidence_id = new_ulid()
     new_evidence_rows = []
     criterion_points = {}
-    for index, evidence in enumerate(validated.criterion_evidence):
+    for index, evidence in enumerate(criterion_evidence):
         evidence_id = first_new_evidence_id if index == 0 else new_ulid()
         criterion_points[evidence.criterion_id] = evidence.points_awarded
         new_evidence_rows.append(
@@ -192,7 +226,7 @@ def _regrade_attempt(
         else None
     )
     content_events = []
-    if abs(validated.rubric_score - old_score) >= 2:
+    if abs(new_score - old_score) >= 2:
         content_events.append(
             {
                 "id": new_ulid(),
@@ -202,7 +236,7 @@ def _regrade_attempt(
                 "entity_id": item.id,
                 "origin": grading_source,
                 "review_status": "accepted",
-                "summary": _disagreement_summary(old_evidence, new_evidence_rows, old_score, validated.rubric_score),
+                "summary": _disagreement_summary(old_evidence, new_evidence_rows, old_score, new_score),
                 "created_at": now,
             }
         )
@@ -210,12 +244,15 @@ def _regrade_attempt(
         attempt_id=attempt["id"],
         new_evidence_rows=new_evidence_rows,
         superseded_by_evidence_id=first_new_evidence_id,
+        # Teach-back originals are tier-3 (AI-graded) rows; supersede them too
+        # or the replay log would carry both gradings of the same criteria.
+        supersede_tiers=(1, 3) if graded_criteria is not None else (1,),
         clock=clock,
     )
     repository.update_attempt_grade(
         attempt["id"],
-        rubric_score=validated.rubric_score,
-        correctness=validated.rubric_score / max(rubric.max_points, 1),
+        rubric_score=new_score,
+        correctness=new_score / max(rubric.max_points, 1),
         grader_confidence=validated.grader_confidence,
         manual_review=_manual_review_reason(validated.manual_review_reason, attempt) is not None,
         manual_review_reason=_manual_review_reason(validated.manual_review_reason, attempt),

@@ -67,3 +67,23 @@ def test_authoring_context_stats_report_request_size(tmp_path):
     assert stats["chars"]["output_schema"] > 0
     assert stats["chars"]["prompt_plus_schema"] >= stats["chars"]["output_schema"]
     assert stats["approx_tokens"]["prompt_plus_schema"] > 0
+
+
+def test_authoring_context_carries_focus_concepts_and_facets(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    loaded = load_vault(vault_root)
+
+    context = build_authoring_context(
+        loaded,
+        subjects=["linear-algebra"],
+        focus_concepts=["singular_value_decomposition"],
+        focus_facets=["recall"],
+    )
+
+    assert context.focus_concepts == ["singular_value_decomposition"]
+    assert context.focus_facets == ["recall"]
+    unfocused = build_authoring_context(loaded, subjects=["linear-algebra"])
+    assert unfocused.focus_concepts == []
+    assert unfocused.focus_facets == []
+    assert authoring_context_hash(context) != authoring_context_hash(unfocused)

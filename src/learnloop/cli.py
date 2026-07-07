@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import sys
+import textwrap
 import threading
 import time
 from dataclasses import asdict, is_dataclass
@@ -28,6 +29,12 @@ from learnloop.services.attempts import (
     complete_attempt_with_codex_fallback,
 )
 from learnloop.services.debug_time import DebugAdvanceError, advance_vault_days
+from learnloop.services.exam_seeding import (
+    ExamSeedingError,
+    exam_ingest_instructions,
+    parse_exam_outcomes,
+    seed_exam_attempts,
+)
 from learnloop.services.concepts import ConceptMergeError, merge_concepts
 from learnloop.services.doctor import run_doctor
 from learnloop.services.followups import evaluate_attempt_intervention_followup
@@ -180,6 +187,69 @@ def _split_items(items: str | None) -> list[str] | None:
     if not items:
         return None
     return [item.strip() for item in items.split(",") if item.strip()]
+
+
+def _parse_mode_mix(mode_mix: str | None) -> dict[str, int] | None:
+    """Parse ``--mode-mix`` (e.g. ``teach_back=2,short_answer=3``) into counts.
+
+    Raises ValueError with a learner-facing message on malformed entries,
+    empty modes, duplicate modes, or counts below 1.
+    """
+
+    if not mode_mix:
+        return None
+    parsed: dict[str, int] = {}
+    for entry in mode_mix.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        mode, separator, raw_count = entry.partition("=")
+        mode = mode.strip()
+        if not separator or not mode:
+            raise ValueError(f"Invalid --mode-mix entry '{entry}': expected '<practice_mode>=<count>'.")
+        try:
+            count = int(raw_count.strip())
+        except ValueError:
+            raise ValueError(f"Invalid --mode-mix count for '{mode}': '{raw_count.strip()}' is not an integer.")
+        if count < 1:
+            raise ValueError(f"Invalid --mode-mix count for '{mode}': counts must be >= 1.")
+        if mode in parsed:
+            raise ValueError(f"Duplicate --mode-mix practice mode '{mode}'.")
+        parsed[mode] = count
+    if not parsed:
+        raise ValueError("--mode-mix is empty; expected entries like 'teach_back=2,short_answer=3'.")
+    return parsed
+
+
+def _resolve_focus(
+    loaded,
+    *,
+    focus_concepts: str | None,
+    focus_facets: str | None,
+    from_goal: str | None,
+    json_output: bool,
+) -> tuple[list[str] | None, list[str] | None]:
+    """Merge --focus-concepts/--focus-facets with a goal's concept anchors.
+
+    Exits with code 1 when --from-goal names an unknown or non-active goal.
+    """
+
+    concepts = _split_items(focus_concepts) or []
+    facets = _split_items(focus_facets) or []
+    if from_goal:
+        goal = next((goal for goal in loaded.goals if goal.id == from_goal), None)
+        if goal is None or goal.status != "active":
+            reason = "not found" if goal is None else f"not active (status={goal.status})"
+            message = f"Goal {from_goal} is {reason}."
+            if json_output:
+                typer.echo(_dump({"version": 1, "error": "invalid_goal", "goal_id": from_goal, "message": message}))
+            else:
+                typer.echo(message, err=True)
+            raise typer.Exit(code=1)
+        for anchor in goal.concept_anchors:
+            if anchor not in concepts:
+                concepts.append(anchor)
+    return (concepts or None, facets or None)
 
 
 def _dump(value: object) -> str:
@@ -431,6 +501,89 @@ def ingest(
     json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
     vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
 ) -> None:
+    result = _run_canonical_ingest_command(
+        source,
+        kind=kind,
+        subject=subject,
+        learning_objects=learning_objects,
+        goal=goal,
+        allow_auto_captions=allow_auto_captions,
+        instructions=instructions,
+        ai_provider=ai_provider,
+        json_output=json_output,
+        vault=vault,
+    )
+    if json_output:
+        typer.echo(_dump({"version": 1, "ingest": result.as_dict()}))
+        return
+    _echo_ingest_summary(result)
+
+
+@app.command("ingest-exam")
+def ingest_exam(
+    source: Annotated[str, typer.Argument(help="URL or local past-exam file to ingest.")],
+    kind: Annotated[
+        str,
+        typer.Option("--kind", help="Source kind: auto, website_page, youtube_video, arxiv_html, or textbook_chapter."),
+    ] = "auto",
+    subject: Annotated[str | None, typer.Option("--subject", help="Target subject id.")] = None,
+    goal: Annotated[str | None, typer.Option("--goal", help="Active goal id to link ingested concepts to.")] = None,
+    instructions: Annotated[
+        str | None,
+        typer.Option("--instructions", help="Extra instructions appended to the exam-ingest instructions."),
+    ] = None,
+    ai_provider: Annotated[str | None, typer.Option("--ai-provider", help="AI provider profile to use for ingestion.")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Ingest a past practice exam: one tagged practice item per exam question.
+
+    Runs the standard canonical ingest pipeline with exam-specific instructions
+    (one practice_item per question, tagged exam_q:<n> + exam_question, each
+    with a rubric, evidence facets, and a learning object). After reviewing and
+    accepting the proposal, seed your per-question outcomes with
+    `learnloop seed-exam-attempts --outcomes <file>`.
+    """
+
+    result = _run_canonical_ingest_command(
+        source,
+        kind=kind,
+        subject=subject,
+        learning_objects=None,
+        goal=goal,
+        allow_auto_captions=None,
+        instructions=exam_ingest_instructions(instructions),
+        ai_provider=ai_provider,
+        json_output=json_output,
+        vault=vault,
+        purpose="exam_ingest",
+        spinner_label="Ingesting past exam",
+    )
+    if json_output:
+        typer.echo(_dump({"version": 1, "ingest": result.as_dict()}))
+        return
+    _echo_ingest_summary(result)
+    typer.echo(
+        "Next: review/accept the proposal (learnloop proposals / learnloop accept), "
+        "then run: learnloop seed-exam-attempts --outcomes <outcomes.json>"
+    )
+
+
+def _run_canonical_ingest_command(
+    source: str,
+    *,
+    kind: str,
+    subject: str | None,
+    learning_objects: list[str] | None,
+    goal: str | None,
+    allow_auto_captions: bool | None,
+    instructions: str | None,
+    ai_provider: str | None,
+    json_output: bool,
+    vault: Path | None,
+    purpose: str = "canonical_ingest",
+    spinner_label: str = "Ingesting canonical source",
+):
     vault_root = _root(vault)
     loaded = _load_vault_or_exit(vault_root, json_output=json_output)
     provider_name, runtime, client = _ready_provider_for_task(vault_root, loaded.config, "canonical_ingest", ai_provider)
@@ -450,10 +603,10 @@ def ingest(
             retry_runtime = _runtime_for_provider(vault_root, loaded.config, retry_provider)
             retry_client = _client_for_provider(vault_root, loaded.config, retry_provider) if retry_runtime.ready else None
         with _AsciiSpinner(
-            f"Ingesting canonical source with {provider_name}",
+            f"{spinner_label} with {provider_name}",
             enabled=not json_output,
         ):
-            result = ingest_canonical_source(
+            return ingest_canonical_source(
                 vault_root,
                 source,
                 client,
@@ -468,22 +621,93 @@ def ingest(
                 retry_client=retry_client,
                 retry_model=getattr(retry_client, "model", None) if retry_client is not None else None,
                 retry_provider_revision=getattr(retry_runtime, "actual_revision", None) if retry_runtime is not None else None,
+                purpose=purpose,
             )
+    except typer.Exit:
+        raise
     except Exception as exc:
         if json_output:
             typer.echo(_dump({"version": 1, "error": "ingest_failed", "message": str(exc)}))
         else:
             typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
-    if json_output:
-        typer.echo(_dump({"version": 1, "ingest": result.as_dict()}))
-        return
+
+
+def _echo_ingest_summary(result) -> None:
     reused = "Reused" if result.reused_existing else "Persisted"
     typer.echo(
         f"{reused} proposal {result.patch_id} from {result.source_note_id}: "
         f"auto_applied={result.auto_applied_count} "
         f"review_required={result.review_required_count} invalid={result.invalid_count}"
     )
+
+
+@app.command("seed-exam-attempts")
+def seed_exam_attempts_command(
+    outcomes: Annotated[Path, typer.Option("--outcomes", help="JSON file with per-question exam outcomes.")],
+    exam_date: Annotated[
+        str | None,
+        typer.Option("--exam-date", help="Exam date (YYYY-MM-DD). Overrides the outcomes file's exam_date."),
+    ] = None,
+    subject: Annotated[str | None, typer.Option("--subject", help="Only match exam items in this subject.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Report what would be seeded without writing.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Seed backdated exam_evidence attempts from a past exam's outcomes.
+
+    Matches outcomes against practice items tagged exam_q:<n> (created by
+    `learnloop ingest-exam`), records one discounted attempt per question dated
+    at the exam date, then rebuilds derived state so mastery/FSRS replay in
+    time order.
+    """
+
+    vault_root = _root(vault)
+    loaded = _load_vault_or_exit(vault_root, json_output=json_output)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    sync_vault_state(loaded, repository)
+    try:
+        payload = _load_mapping_file(outcomes, label="outcomes file")
+        parsed = parse_exam_outcomes(payload, exam_date_override=exam_date)
+        result = seed_exam_attempts(
+            loaded,
+            repository,
+            outcomes=parsed,
+            subject=subject,
+            dry_run=dry_run,
+        )
+    except (ExamSeedingError, ValueError, OSError) as exc:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": "exam_seeding_failed", "message": str(exc)}))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(_dump({"version": 1, "exam_seeding": result.as_dict()}))
+        return
+    for entry in result.entries:
+        if entry.status in {"seeded", "would_seed"}:
+            verb = "Seeded" if entry.status == "seeded" else "Would seed"
+            typer.echo(
+                f"{verb} q{entry.question} -> {entry.practice_item_id} "
+                f"(score={entry.score:.2f}, rubric_score={entry.rubric_score})"
+            )
+        elif entry.status == "skipped_existing":
+            typer.echo(f"Skipped q{entry.question} -> {entry.practice_item_id}: {entry.detail}")
+        else:
+            typer.echo(f"Warning q{entry.question} -> {entry.practice_item_id}: {entry.detail}")
+    summary = (
+        f"exam_date={result.exam_date} seeded={result.seeded_count} "
+        f"skipped={result.skipped_existing_count} no_outcome={result.no_outcome_count}"
+    )
+    if dry_run:
+        summary = f"[dry-run] {summary}"
+    elif result.rebuild is not None:
+        summary += (
+            f" rebuilt_learning_objects={result.rebuild.rebuilt_learning_objects}"
+            f" replayed_attempts={result.rebuild.replayed_attempts}"
+        )
+    typer.echo(summary)
 
 
 @app.command()
@@ -622,6 +846,193 @@ def why(
         typer.echo(_dump({key: value for key, value in payload.items() if key != "version"}))
 
 
+_WRAP_WIDTH = 96
+_ATTEMPT_COVERED_FIELDS = {
+    "id",
+    "practice_item_id",
+    "learning_object_id",
+    "subject",
+    "concept",
+    "practice_mode",
+    "attempt_type",
+    "session_id",
+    "created_at",
+    "updated_at",
+    "rubric_score",
+    "correctness",
+    "confidence",
+    "grader_confidence",
+    "error_type",
+    "hints_used",
+    "latency_seconds",
+    "manual_review",
+    "manual_review_reason",
+    "learner_answer_md",
+    "grading_evidence",
+    "surprise",
+}
+
+
+def _wrap_text(text: str, *, indent: str = "  ") -> list[str]:
+    lines: list[str] = []
+    for paragraph in str(text).splitlines():
+        if not paragraph.strip():
+            continue
+        lines.extend(
+            textwrap.wrap(paragraph.strip(), width=_WRAP_WIDTH, initial_indent=indent, subsequent_indent=indent)
+        )
+    return lines
+
+
+def _dim(text: object) -> str:
+    return typer.style(str(text), fg=typer.colors.BRIGHT_BLACK)
+
+
+def _echo_section(title: str) -> None:
+    typer.echo("")
+    typer.secho(f"── {title} " + "─" * max(2, _WRAP_WIDTH - len(title) - 4), fg=typer.colors.YELLOW)
+
+
+def _echo_kv(label: str, value: object) -> None:
+    if value is None or value == "" or value == [] or value == {}:
+        return
+    if isinstance(value, float):
+        value = f"{value:.3f}"
+    typer.echo(f"  {_dim(label + ':')} {value}")
+
+
+def _echo_practice_attempt(attempt_id: str, payload: dict, repository: Repository) -> None:
+    typer.echo(
+        typer.style("practice attempt ", bold=True)
+        + typer.style(str(payload.get("id", attempt_id)), fg=typer.colors.CYAN)
+    )
+    _echo_kv("practice item", payload.get("practice_item_id"))
+    _echo_kv("learning object", payload.get("learning_object_id"))
+    _echo_kv("subject", payload.get("subject"))
+    _echo_kv("concept", payload.get("concept"))
+    _echo_kv("mode", payload.get("practice_mode"))
+    _echo_kv("attempt type", payload.get("attempt_type"))
+    _echo_kv("session", payload.get("session_id"))
+    _echo_kv("created at", payload.get("created_at"))
+    if payload.get("updated_at") and payload.get("updated_at") != payload.get("created_at"):
+        _echo_kv("updated at", payload.get("updated_at"))
+
+    _echo_section("score")
+    _echo_kv("rubric score", payload.get("rubric_score"))
+    _echo_kv("correctness", payload.get("correctness"))
+    _echo_kv("confidence", payload.get("confidence"))
+    _echo_kv("grader confidence", payload.get("grader_confidence"))
+    if payload.get("error_type"):
+        typer.echo(f"  {_dim('error type:')} " + typer.style(str(payload["error_type"]), fg=typer.colors.RED))
+    if payload.get("hints_used"):
+        _echo_kv("hints used", payload.get("hints_used"))
+    _echo_kv("latency seconds", payload.get("latency_seconds"))
+    if payload.get("manual_review"):
+        _echo_kv("manual review", payload.get("manual_review_reason") or "yes")
+
+    answer = payload.get("learner_answer_md")
+    if answer:
+        _echo_section("learner answer")
+        for line in _wrap_text(answer):
+            typer.echo(line)
+
+    evidence_rows = payload.get("grading_evidence") or []
+    if evidence_rows:
+        _echo_section("grading evidence")
+        for row in evidence_rows:
+            row = _plain(row)
+            if not isinstance(row, dict):
+                continue
+            points = row.get("points_awarded")
+            if isinstance(points, (int, float)):
+                earned = points > 0
+                mark = typer.style("✓" if earned else "✗", fg=typer.colors.GREEN if earned else typer.colors.RED)
+                points_label = " " + typer.style(f"points={points:g}", fg=typer.colors.GREEN if earned else typer.colors.RED)
+            else:
+                mark = typer.style("·", fg=typer.colors.BRIGHT_BLACK)
+                points_label = ""
+            confidence = row.get("learner_confidence")
+            confidence_label = f" {_dim(f'learner={confidence}')}" if confidence else ""
+            criterion = typer.style(str(row.get("criterion_id", "?")), fg=typer.colors.CYAN)
+            typer.echo(f"  {mark} {criterion}{points_label}{confidence_label}")
+            for field in ("evidence", "notes"):
+                if row.get(field):
+                    for line in _wrap_text(row[field], indent="      "):
+                        typer.echo(line)
+
+    feedback = repository.fetch_attempt_feedback_metadata(attempt_id)
+    if feedback:
+        parts: list[str] = []
+        if feedback.get("feedback_md"):
+            parts.extend(_wrap_text(feedback["feedback_md"]))
+        if feedback.get("fatal_errors"):
+            parts.append(
+                "  " + typer.style("fatal errors: " + ", ".join(str(item) for item in feedback["fatal_errors"]), fg=typer.colors.RED)
+            )
+        for suggestion in feedback.get("repair_suggestions") or []:
+            if not isinstance(suggestion, dict):
+                parts.extend(_wrap_text(str(suggestion), indent="  - "))
+                continue
+            facets = suggestion.get("target_evidence_families") or []
+            label = suggestion.get("practice_mode") or "repair"
+            facet_label = " " + _dim("(facets: ") + typer.style(", ".join(facets), fg=typer.colors.CYAN) + _dim(")") if facets else ""
+            parts.append("  → " + typer.style(str(label), fg=typer.colors.YELLOW) + facet_label)
+            if suggestion.get("rationale"):
+                parts.extend(_wrap_text(suggestion["rationale"], indent="    "))
+        if parts:
+            _echo_section("feedback")
+            source = feedback.get("grading_source")
+            if source:
+                typer.echo(f"  {_dim('graded by:')} {source}")
+            for line in parts:
+                typer.echo(line)
+
+    surprise = payload.get("surprise")
+    if isinstance(surprise, dict):
+        _echo_section("surprise")
+        _echo_kv("predictive surprise", surprise.get("predictive_surprise"))
+        _echo_kv("bayesian surprise", surprise.get("bayesian_surprise"))
+        _echo_kv("direction", surprise.get("surprise_direction"))
+        predicted = surprise.get("predicted_score_dist")
+        if isinstance(predicted, dict):
+            _echo_kv("expected correctness", predicted.get("expected_correctness"))
+        observed = surprise.get("observed_joint_bucket")
+        if isinstance(observed, dict) and observed:
+            _echo_kv(
+                "observed",
+                " ".join(f"{key}={value}" for key, value in sorted(observed.items())),
+            )
+        triggered = surprise.get("triggered_actions") or []
+        if triggered:
+            _echo_kv("triggered actions", ", ".join(str(action) for action in triggered))
+
+    error_events = repository.error_events_for_attempt(attempt_id)
+    if error_events:
+        _echo_section("error attributions")
+        for event in error_events:
+            is_misc = bool(event.get("is_misconception"))
+            kind = typer.style("misconception", fg=typer.colors.RED) if is_misc else _dim("error")
+            severity = event.get("severity")
+            severity_label = f" severity={severity:.2f}" if isinstance(severity, (int, float)) else ""
+            status = str(event.get("status"))
+            status_styled = typer.style(status, fg=typer.colors.YELLOW if status == "active" else typer.colors.GREEN)
+            error_type = typer.style(str(event.get("error_type")), fg=typer.colors.RED if is_misc else None)
+            typer.echo(f"  {_dim(event.get('id'))} {error_type} ({kind}){severity_label} status={status_styled}")
+
+    extras = {
+        key: value
+        for key, value in payload.items()
+        if key not in _ATTEMPT_COVERED_FIELDS and value not in (None, "", [], {})
+    }
+    if extras:
+        _echo_section("other fields")
+        for key in sorted(extras):
+            value = extras[key]
+            if isinstance(value, (dict, list)):
+                value = jsonlib.dumps(value, sort_keys=True, default=str)
+            typer.echo(f"  {_dim(key + ':')} {value}")
+
+
 @app.command()
 def show(
     identifier: Annotated[str, typer.Argument(help="Entity or SQL id.")],
@@ -684,6 +1095,8 @@ def show(
         raise typer.Exit(code=1)
     if json_output:
         typer.echo(_dump({"version": 1, "type": entity_type, "id": identifier, "record": payload}))
+    elif entity_type == "practice_attempt" and isinstance(payload, dict):
+        _echo_practice_attempt(identifier, payload, repository)
     else:
         typer.echo(_dump(payload if not isinstance(payload, tuple) else {"type": entity_type, "record": payload}))
 
@@ -707,6 +1120,67 @@ def proposals(
                 f"  - {item['id']} {item['item_type']} {item['operation']} "
                 f"decision={item['decision']} validation={item['validation_status']}"
             )
+
+
+@app.command()
+def misconceptions(
+    all_errors: Annotated[bool, typer.Option("--all-errors", help="Include all active error events, not only misconceptions.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """List active error events, defaulting to misconceptions only."""
+
+    loaded = load_vault(_root(vault))
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    events = repository.active_error_events()
+    if not all_errors:
+        events = [event for event in events if event.is_misconception]
+    rows = [
+        {
+            "id": event.id,
+            "error_type": event.error_type,
+            "title": (error_type.title if (error_type := loaded.error_types.get(event.error_type)) else None),
+            "is_misconception": event.is_misconception,
+            "severity": event.severity,
+            "learning_object_id": event.learning_object_id,
+            "created_at": event.created_at,
+        }
+        for event in events
+    ]
+    if json_output:
+        typer.echo(_dump({"version": 1, "misconceptions": rows}))
+        return
+    if not rows:
+        typer.echo("No active misconceptions." if not all_errors else "No active error events.")
+        return
+    for row in rows:
+        kind = "misconception" if row["is_misconception"] else "error"
+        typer.echo(
+            f"{row['id']} {row['error_type']} ({kind}) severity={row['severity']:.2f} "
+            f"lo={row['learning_object_id']} created={row['created_at']}"
+        )
+        if row["title"]:
+            typer.echo(f"  - {row['title']}")
+
+
+@app.command("resolve-error")
+def resolve_error(
+    event_id: Annotated[str, typer.Argument(help="Error event SQL id.")],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Mark an active error event as resolved."""
+
+    repository = _repository(_root(vault))
+    resolved = repository.resolve_error_event(event_id)
+    if json_output:
+        typer.echo(_dump({"version": 1, "event_id": event_id, "resolved": resolved}))
+    elif resolved:
+        typer.echo(f"Resolved error event {event_id}.")
+    else:
+        typer.echo(f"Error event {event_id} not found or already resolved.", err=True)
+    if not resolved:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -772,6 +1246,9 @@ def propose(
     subjects: Annotated[str | None, typer.Option("--subjects", help="Comma-separated subject ids for AI context.")] = None,
     notes: Annotated[str | None, typer.Option("--notes", help="Comma-separated note ids for AI context.")] = None,
     instructions: Annotated[str | None, typer.Option("--instructions", help="Extra authoring instructions.")] = None,
+    focus_concepts: Annotated[str | None, typer.Option("--focus-concepts", help="Comma-separated concept ids to concentrate the proposal on.")] = None,
+    focus_facets: Annotated[str | None, typer.Option("--focus-facets", help="Comma-separated evidence facet ids to concentrate the proposal on.")] = None,
+    from_goal: Annotated[str | None, typer.Option("--from-goal", help="Active goal id whose concept anchors seed the focus concepts.")] = None,
     context_stats: Annotated[bool, typer.Option("--context-stats", help="Print authoring context size without running an AI provider.")] = False,
     ai_provider: Annotated[str | None, typer.Option("--ai-provider", help="AI provider profile to use for authoring.")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
@@ -787,11 +1264,20 @@ def propose(
                 typer.echo(message, err=True)
             raise typer.Exit(code=1)
         loaded = load_vault(vault_root)
+        resolved_focus_concepts, resolved_focus_facets = _resolve_focus(
+            loaded,
+            focus_concepts=focus_concepts,
+            focus_facets=focus_facets,
+            from_goal=from_goal,
+            json_output=json_output,
+        )
         context = build_authoring_context(
             loaded,
             subjects=_split_items(subjects),
             note_ids=_split_items(notes),
             instructions=instructions,
+            focus_concepts=resolved_focus_concepts,
+            focus_facets=resolved_focus_facets,
         )
         stats = authoring_context_stats(context)
         if json_output:
@@ -818,6 +1304,13 @@ def propose(
         return
     if file is None:
         loaded = load_vault(vault_root)
+        resolved_focus_concepts, resolved_focus_facets = _resolve_focus(
+            loaded,
+            focus_concepts=focus_concepts,
+            focus_facets=focus_facets,
+            from_goal=from_goal,
+            json_output=json_output,
+        )
         provider_name, runtime, client = _ready_provider_for_task(vault_root, loaded.config, "authoring", ai_provider)
         if not runtime.ready:
             runtime_label = "Codex runtime" if provider_name == "codex" else "AI provider"
@@ -834,6 +1327,8 @@ def propose(
                 subjects=_split_items(subjects),
                 note_ids=_split_items(notes),
                 instructions=instructions,
+                focus_concepts=resolved_focus_concepts,
+                focus_facets=resolved_focus_facets,
                 model=getattr(client, "model", None),
                 codex_revision=getattr(runtime, "actual_revision", None),
             )
@@ -870,6 +1365,11 @@ def generate_practice(
     target_items_per_lo: Annotated[int, typer.Option("--target-items-per-lo", min=1, help="Desired active Practice Item count per completed-probe LO.")] = 5,
     max_new_per_lo: Annotated[int, typer.Option("--max-new-per-lo", min=1, help="Maximum new Practice Items to ask for per LO.")] = 3,
     max_los: Annotated[int | None, typer.Option("--max-los", min=1, help="Maximum completed-probe LOs to target.")] = None,
+    focus_concepts: Annotated[str | None, typer.Option("--focus-concepts", help="Comma-separated concept ids; restrict targets to LOs on these concepts.")] = None,
+    focus_facets: Annotated[str | None, typer.Option("--focus-facets", help="Comma-separated evidence facet ids for new items to target.")] = None,
+    from_goal: Annotated[str | None, typer.Option("--from-goal", help="Active goal id whose concept anchors seed the focus concepts.")] = None,
+    los: Annotated[str | None, typer.Option("--los", help="Comma-separated learning-object ids to target; bypasses the item-count deficit gate but keeps the completed-probe gate.")] = None,
+    mode_mix: Annotated[str | None, typer.Option("--mode-mix", help="Hard per-LO practice-mode counts, e.g. 'teach_back=2,short_answer=3'.")] = None,
     instructions: Annotated[str | None, typer.Option("--instructions", help="Extra generation instructions.")] = None,
     ai_provider: Annotated[str | None, typer.Option("--ai-provider", help="AI provider profile to use for practice generation.")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show targets without calling Codex.")] = False,
@@ -878,9 +1378,25 @@ def generate_practice(
 ) -> None:
     vault_root = _root(vault)
     subject_ids = _split_items(subjects)
+    try:
+        parsed_mode_mix = _parse_mode_mix(mode_mix)
+    except ValueError as exc:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": "invalid_mode_mix", "message": str(exc)}))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    learning_object_ids = _split_items(los)
     loaded = load_vault(vault_root)
     repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
     sync_vault_state(loaded, repository)
+    resolved_focus_concepts, resolved_focus_facets = _resolve_focus(
+        loaded,
+        focus_concepts=focus_concepts,
+        focus_facets=focus_facets,
+        from_goal=from_goal,
+        json_output=json_output,
+    )
     try:
         plan = build_practice_expansion_plan(
             loaded,
@@ -889,6 +1405,9 @@ def generate_practice(
             target_items_per_lo=target_items_per_lo,
             max_new_per_lo=max_new_per_lo,
             max_los=max_los,
+            focus_concepts=resolved_focus_concepts,
+            learning_object_ids=learning_object_ids,
+            mode_mix=parsed_mode_mix,
         )
     except PracticeExpansionError as exc:
         if json_output:
@@ -926,8 +1445,12 @@ def generate_practice(
             target_items_per_lo=target_items_per_lo,
             max_new_per_lo=max_new_per_lo,
             max_los=max_los,
+            focus_concepts=resolved_focus_concepts,
+            focus_facets=resolved_focus_facets,
             extra_instructions=instructions,
             codex_revision=getattr(runtime, "actual_revision", None),
+            learning_object_ids=learning_object_ids,
+            mode_mix=parsed_mode_mix,
         )
     except Exception as exc:
         if json_output:
@@ -935,10 +1458,42 @@ def generate_practice(
         else:
             typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
+    if result.mode_mix_violations:
+        if json_output:
+            typer.echo(
+                _dump(
+                    {
+                        "version": 1,
+                        "error": "mode_mix_violation",
+                        "proposal_id": result.patch_id,
+                        "mode_mix_violations": result.mode_mix_violations,
+                        "mode_mix_warnings": result.mode_mix_warnings,
+                        "plan": result.plan.as_dict(),
+                    }
+                )
+            )
+        else:
+            typer.echo(f"Persisted practice-generation proposal {result.patch_id}, but the mode mix was not honored:", err=True)
+            for violation in result.mode_mix_violations:
+                typer.secho(f"- {violation}", fg=typer.colors.RED, err=True)
+            for warning in result.mode_mix_warnings:
+                typer.secho(f"- warning: {warning}", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=1)
     if json_output:
-        typer.echo(_dump({"version": 1, "proposal_id": result.patch_id, "plan": result.plan.as_dict()}))
+        typer.echo(
+            _dump(
+                {
+                    "version": 1,
+                    "proposal_id": result.patch_id,
+                    "plan": result.plan.as_dict(),
+                    "mode_mix_warnings": result.mode_mix_warnings,
+                }
+            )
+        )
     else:
         typer.echo(f"Persisted practice-generation proposal {result.patch_id}.")
+        for warning in result.mode_mix_warnings:
+            typer.secho(f"Mode-mix warning: {warning}", fg=typer.colors.YELLOW, err=True)
         _echo_practice_generation_plan(result.plan)
 
 
@@ -1568,3 +2123,197 @@ def fit_deactivate_command(
         typer.echo(_dump({"version": 1, "deactivated": count, "scope": scope}))
         return
     typer.echo(f"Deactivated {count} fitted set(s) for scope {scope}; defaults now apply.")
+
+
+sim_app = typer.Typer(
+    no_args_is_help=True,
+    help="Synthetic-student simulation harness and config sensitivity sweeps.",
+)
+app.add_typer(sim_app, name="sim")
+
+
+def _parse_sim_sets(sets: list[str] | None) -> dict[str, Any]:
+    from learnloop.sim.runner import coerce_override_value
+
+    overrides: dict[str, Any] = {}
+    for raw in sets or []:
+        if "=" not in raw:
+            raise typer.BadParameter(f"--set expects param.path=value, got {raw!r}")
+        path, value = raw.split("=", 1)
+        overrides[path.strip()] = coerce_override_value(value)
+    return overrides
+
+
+def _sim_run_root(source_root: Path, *, fresh_copy: bool, reset_state: bool) -> Path:
+    import tempfile
+
+    from learnloop.sim.runner import prepare_run_vault
+
+    if not fresh_copy:
+        return source_root
+    run_parent = Path(tempfile.mkdtemp(prefix="learnloop-sim-"))
+    return prepare_run_vault(source_root, run_parent / "vault", reset_state=reset_state)
+
+
+def _write_or_echo_report(payload: dict, *, json_output: bool, output: Path | None) -> None:
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(_dump(payload), encoding="utf-8")
+        typer.echo(f"Wrote report to {output}")
+    elif json_output:
+        typer.echo(_dump(payload))
+
+
+@sim_app.command("run")
+def sim_run_command(
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root (never written by default).")] = None,
+    profile: Annotated[str, typer.Option("--profile", help="Built-in profile name or profile YAML path.")] = "intermediate_with_misconception",
+    days: Annotated[int, typer.Option("--days", help="Simulated days.")] = 60,
+    items_per_day: Annotated[int, typer.Option("--items-per-day", help="Attempts per simulated day.")] = 6,
+    seed: Annotated[int, typer.Option("--seed", help="Student RNG seed.")] = 42,
+    fresh_copy: Annotated[bool, typer.Option("--fresh-copy/--in-place", help="Copy the vault to a tmp run dir (default) or simulate in place.")] = True,
+    reset_state: Annotated[bool, typer.Option("--reset-state/--keep-state", help="Drop derived SQLite state in the run copy (default: reset).")] = True,
+    sets: Annotated[list[str] | None, typer.Option("--set", help="Config override param.path=value (repeatable).")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the full JSON report.")] = False,
+    output: Annotated[Path | None, typer.Option("--output", "-o", help="Write the full JSON report to a file.")] = None,
+) -> None:
+    """Simulate a synthetic student through the real scheduling/belief pipeline."""
+
+    from learnloop.sim.profiles import ProfileError, load_profile
+    from learnloop.sim.runner import SimulationError, run_simulation
+
+    source_root = _root(vault)
+    try:
+        student_profile = load_profile(profile)
+        run_root = _sim_run_root(source_root, fresh_copy=fresh_copy, reset_state=reset_state)
+        report = run_simulation(
+            run_root,
+            student_profile,
+            days=days,
+            items_per_day=items_per_day,
+            seed=seed,
+            config_overrides=_parse_sim_sets(sets),
+        )
+    except (ProfileError, SimulationError, ConfigLoadError) as exc:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": "sim_failed", "message": str(exc)}))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    payload = report.as_dict()
+    _write_or_echo_report(payload, json_output=json_output, output=output)
+    if json_output and output is None:
+        return
+    metrics = report.metrics
+    belief = metrics.get("belief_vs_truth", {})
+    calibration = metrics.get("calibration", {})
+    counts = metrics.get("counts", {})
+    typer.echo(f"Run dir: {run_root}")
+    typer.echo(
+        f"Simulated {days} days x {items_per_day} items as {student_profile.name} (seed {seed}): "
+        f"{counts.get('attempts', 0)} attempts."
+    )
+    typer.echo(
+        f"Belief vs truth: MAE={belief.get('mae')} "
+        f"(day1 {belief.get('daily_mae_first')} -> final {belief.get('daily_mae_last')}), "
+        f"sign agreement {belief.get('sign_agreement_rate')}"
+    )
+    typer.echo(
+        f"Calibration: brier={calibration.get('brier')} log_loss={calibration.get('log_loss')} "
+        f"n={calibration.get('n')}"
+    )
+    typer.echo(
+        f"Counts: followups={counts.get('followups_triggered')} "
+        f"dont_know={counts.get('dont_know_attempts')} "
+        f"error_events={counts.get('error_events_created')} "
+        f"resolved={counts.get('error_events_resolved')}"
+    )
+    for planted in metrics.get("misconceptions", {}).get("planted", []):
+        verdict = "DETECTED" if planted.get("detected") else "NOT DETECTED"
+        typer.echo(
+            f"Misconception {planted['error_type']} on {planted['facet_id']}: {verdict} "
+            f"(first error event day {planted.get('first_error_event_day')}, "
+            f"known_gap day {planted.get('first_known_gap_day')}, "
+            f"{planted.get('error_events')} events, "
+            f"{planted.get('error_events_resolved')} resolved)"
+        )
+    false_positives = metrics.get("misconceptions", {}).get("false_positive_misconception_types", [])
+    if false_positives:
+        typer.echo(f"False-positive misconception types: {', '.join(false_positives)}")
+
+
+@sim_app.command("sweep")
+def sim_sweep_command(
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root (never written; each run uses a fresh copy).")] = None,
+    spec: Annotated[Path | None, typer.Option("--spec", help="Sweep spec YAML (defaults to the packaged default_sweep.yaml).")] = None,
+    profile: Annotated[str, typer.Option("--profile", help="Built-in profile name or profile YAML path.")] = "intermediate_with_misconception",
+    days: Annotated[int, typer.Option("--days", help="Simulated days per run.")] = 30,
+    items_per_day: Annotated[int, typer.Option("--items-per-day", help="Attempts per simulated day.")] = 6,
+    seed: Annotated[int, typer.Option("--seed", help="Student RNG seed (shared by all runs).")] = 42,
+    reset_state: Annotated[bool, typer.Option("--reset-state/--keep-state", help="Drop derived SQLite state in each run copy (default: reset).")] = True,
+    sets: Annotated[list[str] | None, typer.Option("--set", help="Baseline config override param.path=value (repeatable).")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the full JSON report.")] = False,
+    output: Annotated[Path | None, typer.Option("--output", "-o", help="Write the full JSON report to a file.")] = None,
+) -> None:
+    """Sweep config parameters and report which ones change scheduling decisions."""
+
+    import tempfile
+
+    from learnloop.sim.profiles import ProfileError, load_profile
+    from learnloop.sim.runner import SimulationError
+    from learnloop.sim.sweep import SweepSpecError, load_sweep_spec, run_sweep
+
+    source_root = _root(vault)
+    try:
+        student_profile = load_profile(profile)
+        entries = load_sweep_spec(spec)
+        work_dir = Path(tempfile.mkdtemp(prefix="learnloop-sweep-"))
+        report = run_sweep(
+            source_root,
+            student_profile,
+            sweep_spec=entries,
+            days=days,
+            items_per_day=items_per_day,
+            seed=seed,
+            work_dir=work_dir,
+            reset_state=reset_state,
+            base_overrides=_parse_sim_sets(sets),
+        )
+    except (ProfileError, SimulationError, SweepSpecError, ConfigLoadError) as exc:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": "sweep_failed", "message": str(exc)}))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    payload = report.as_dict()
+    _write_or_echo_report(payload, json_output=json_output, output=output)
+    if json_output and output is None:
+        return
+    typer.echo(f"Sweep work dir: {work_dir}")
+    typer.echo(
+        f"Baseline: {student_profile.name}, {days} days x {items_per_day} items, seed {seed}."
+    )
+    header = f"{'param=value':<62} {'topK':>6} {'tau':>6} {'dFllw':>6} {'dErr':>6} {'dMAE':>9}  verdict"
+    typer.echo(header)
+    typer.echo("-" * len(header))
+    for result in report.results:
+        if result.get("verdict") == "error":
+            typer.echo(f"{result['param_path']}={result['value']}: ERROR {result['error']}")
+            continue
+        label = f"{result['param_path']}={result['value']}"
+        counts = result["count_deltas"]
+        metric_deltas = result["metric_deltas"]
+        topk = result.get("mean_topk_overlap")
+        tau = result.get("mean_kendall_tau")
+        mae = metric_deltas.get("belief_mae")
+        typer.echo(
+            f"{label:<62} "
+            f"{topk if topk is not None else '-':>6} "
+            f"{tau if tau is not None else '-':>6} "
+            f"{counts.get('followups_triggered', 0):>6} "
+            f"{counts.get('error_events_created', 0):>6} "
+            f"{mae if mae is not None else '-':>9}  "
+            f"{result['verdict']}"
+        )

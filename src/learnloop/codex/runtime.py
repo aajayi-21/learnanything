@@ -76,8 +76,19 @@ def check_codex_runtime(
     healthcheck: CodexHealthChecker | None = None,
     startup: CodexStartupRunner | None = None,
 ) -> CodexRuntimeReport:
-    checkout_path = _resolve_checkout_path(vault_root, config.checkout_path)
     configured_revision = config.revision
+    if not (config.checkout_path or "").strip():
+        return CodexRuntimeReport(
+            status="codex_missing",
+            checkout_path="",
+            configured_revision=configured_revision,
+            message=(
+                "Codex checkout path is not configured. Set "
+                "LEARNLOOP_CODEX_CHECKOUT_PATH in your global learnloop settings "
+                "(~/.config/learnloop/settings.env)."
+            ),
+        )
+    checkout_path = _resolve_checkout_path(vault_root, config.checkout_path)
     if not checkout_path.exists():
         return CodexRuntimeReport(
             status="codex_missing",

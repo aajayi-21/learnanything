@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import log
 from pathlib import Path
 from typing import Any
@@ -9,6 +9,7 @@ from learnloop.ai.client import AIProviderClient
 from learnloop.db.repositories import Repository
 from learnloop.services.mastery import display_mastery
 from learnloop.services.proposals import generate_authoring_proposal
+from learnloop.services.teach_back import TEACH_BACK_PRACTICE_MODE
 from learnloop.services.state_sync import sync_vault_state
 from learnloop.vault.loader import load_vault
 from learnloop.vault.models import LoadedVault
@@ -62,9 +63,19 @@ class PracticeExpansionPlan:
 class PracticeExpansionResult:
     patch_id: str
     plan: PracticeExpansionPlan
+    # --mode-mix compliance of the persisted proposal. Violations are hard
+    # (requested teach_back count not honored for a targeted LO); warnings are
+    # soft mismatches on other practice modes.
+    mode_mix_violations: list[str] = field(default_factory=list)
+    mode_mix_warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"patch_id": self.patch_id, "plan": self.plan.as_dict()}
+        return {
+            "patch_id": self.patch_id,
+            "plan": self.plan.as_dict(),
+            "mode_mix_violations": list(self.mode_mix_violations),
+            "mode_mix_warnings": list(self.mode_mix_warnings),
+        }
 
 
 class PracticeExpansionError(ValueError):
@@ -152,27 +163,48 @@ def build_practice_expansion_plan(
     target_items_per_lo: int = 5,
     max_new_per_lo: int = 3,
     max_los: int | None = None,
+    focus_concepts: list[str] | None = None,
+    learning_object_ids: list[str] | None = None,
+    mode_mix: dict[str, int] | None = None,
 ) -> PracticeExpansionPlan:
     if target_items_per_lo <= 0:
         raise PracticeExpansionError("target_items_per_lo must be positive")
     if max_new_per_lo <= 0:
         raise PracticeExpansionError("max_new_per_lo must be positive")
+    _validate_mode_mix(mode_mix)
+    named_lo_ids = list(dict.fromkeys(learning_object_ids or []))
+    _validate_named_learning_objects(vault, repository, named_lo_ids)
     subject_filter = set(subjects or [])
+    concept_filter = set(focus_concepts or [])
     item_counts = _active_practice_item_counts(vault, repository)
     irt = vault.config.mastery.irt
+    mode_mix_items = sum(mode_mix.values()) if mode_mix else None
     targets: list[PracticeExpansionTarget] = []
     for learning_object in sorted(vault.learning_objects.values(), key=lambda lo: lo.id):
+        if named_lo_ids and learning_object.id not in named_lo_ids:
+            continue
         if learning_object.status != "active":
             continue
         if subject_filter and not (subject_filter & set(learning_object.subjects)):
+            continue
+        if concept_filter and learning_object.concept not in concept_filter:
             continue
         probe_state = repository.probe_state(learning_object.id)
         if probe_state is None or probe_state.status != "complete":
             continue
         existing_count = item_counts.get(learning_object.id, 0)
         needed = target_items_per_lo - existing_count
-        if needed <= 0:
+        named = learning_object.id in named_lo_ids
+        if needed <= 0 and not named:
             continue
+        if mode_mix_items is not None:
+            # --mode-mix is a hard per-LO constraint; it overrides the deficit sizing.
+            requested = mode_mix_items
+        elif needed > 0:
+            requested = min(needed, max_new_per_lo)
+        else:
+            # Named LO past its deficit target: still request at least one item.
+            requested = 1
         mastery = repository.mastery_state(learning_object.id)
         mastery_mean = display_mastery(mastery).mastery_mean if mastery is not None else None
         targets.append(
@@ -182,7 +214,7 @@ def build_practice_expansion_plan(
                 subjects=list(learning_object.subjects),
                 concept=learning_object.concept,
                 existing_practice_items=existing_count,
-                requested_new_items=min(needed, max_new_per_lo),
+                requested_new_items=requested,
                 probe_attempts_completed=probe_state.probe_attempts_completed,
                 probe_attempts_target=probe_state.probe_attempts_target,
                 mastery_mean=mastery_mean,
@@ -325,8 +357,12 @@ def generate_post_probe_practice_proposal(
     target_items_per_lo: int = 5,
     max_new_per_lo: int = 3,
     max_los: int | None = None,
+    focus_concepts: list[str] | None = None,
+    focus_facets: list[str] | None = None,
     extra_instructions: str | None = None,
     codex_revision: str | None = None,
+    learning_object_ids: list[str] | None = None,
+    mode_mix: dict[str, int] | None = None,
 ) -> PracticeExpansionResult:
     vault = load_vault(root)
     repository = Repository(VaultPaths(vault.root, vault.config).sqlite_path)
@@ -338,6 +374,9 @@ def generate_post_probe_practice_proposal(
         target_items_per_lo=target_items_per_lo,
         max_new_per_lo=max_new_per_lo,
         max_los=max_los,
+        focus_concepts=focus_concepts,
+        learning_object_ids=learning_object_ids,
+        mode_mix=mode_mix,
     )
     if not plan.targets:
         raise PracticeExpansionError("No completed probe Learning Objects need more Practice Items.")
@@ -345,10 +384,100 @@ def generate_post_probe_practice_proposal(
         root,
         codex_client,
         subjects=_target_subjects(plan, subjects),
-        instructions=_practice_expansion_instructions(plan, extra_instructions=extra_instructions),
+        instructions=_practice_expansion_instructions(
+            plan,
+            extra_instructions=extra_instructions,
+            focus_facets=focus_facets,
+            mode_mix=mode_mix,
+        ),
+        focus_concepts=focus_concepts,
+        focus_facets=focus_facets,
         codex_revision=codex_revision,
     )
-    return PracticeExpansionResult(patch_id=patch_id, plan=plan)
+    violations: list[str] = []
+    warnings: list[str] = []
+    if mode_mix:
+        violations, warnings = _mode_mix_compliance(plan, mode_mix, repository.proposal_items(patch_id))
+    return PracticeExpansionResult(
+        patch_id=patch_id,
+        plan=plan,
+        mode_mix_violations=violations,
+        mode_mix_warnings=warnings,
+    )
+
+
+def _validate_mode_mix(mode_mix: dict[str, int] | None) -> None:
+    if not mode_mix:
+        return
+    for mode, count in mode_mix.items():
+        if not isinstance(mode, str) or not mode.strip():
+            raise PracticeExpansionError("mode_mix practice modes must be non-empty strings")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise PracticeExpansionError(f"mode_mix count for '{mode}' must be an integer >= 1")
+
+
+def _validate_named_learning_objects(
+    vault: LoadedVault,
+    repository: Repository,
+    learning_object_ids: list[str],
+) -> None:
+    """Named --los targets must exist, be active, and have a completed probe.
+
+    Naming an LO bypasses only the item-count deficit gate; the completed-probe
+    gate stays (evidence-not-mastery: generation targets follow probe evidence).
+    """
+
+    for lo_id in learning_object_ids:
+        learning_object = vault.learning_objects.get(lo_id)
+        if learning_object is None:
+            raise PracticeExpansionError(f"Unknown learning object id: {lo_id}")
+        if learning_object.status != "active":
+            raise PracticeExpansionError(f"Learning object {lo_id} is not active (status={learning_object.status}).")
+        probe_state = repository.probe_state(lo_id)
+        if probe_state is None or probe_state.status != "complete":
+            raise PracticeExpansionError(
+                f"Learning object {lo_id} has no completed probe phase; finish its probes before generating practice."
+            )
+
+
+def _mode_mix_compliance(
+    plan: PracticeExpansionPlan,
+    mode_mix: dict[str, int],
+    proposal_items: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Check the persisted proposal against the requested per-LO mode counts.
+
+    The teach_back count is a hard requirement (violations); other modes only
+    soft-warn on mismatch, since the reviewer can still accept a useful batch.
+    """
+
+    counts: dict[tuple[str, str], int] = {}
+    for item in proposal_items:
+        if item.get("item_type") != "practice_item" or item.get("operation") != "create":
+            continue
+        payload = item.get("edited_payload") if item.get("edited_payload") is not None else item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        lo_id = payload.get("learning_object_id")
+        mode = payload.get("practice_mode")
+        if not lo_id or not mode:
+            continue
+        counts[(str(lo_id), str(mode))] = counts.get((str(lo_id), str(mode)), 0) + 1
+    violations: list[str] = []
+    warnings: list[str] = []
+    for target in plan.targets:
+        for mode, requested in sorted(mode_mix.items()):
+            actual = counts.get((target.learning_object_id, mode), 0)
+            if actual == requested:
+                continue
+            message = (
+                f"{target.learning_object_id}: requested {requested} '{mode}' item(s), proposal has {actual}"
+            )
+            if mode == TEACH_BACK_PRACTICE_MODE:
+                violations.append(message)
+            else:
+                warnings.append(message)
+    return violations, warnings
 
 
 def _active_practice_item_counts(vault: LoadedVault, repository: Repository) -> dict[str, int]:
@@ -368,10 +497,28 @@ def _target_subjects(plan: PracticeExpansionPlan, subjects: list[str] | None) ->
     return sorted({subject for target in plan.targets for subject in target.subjects})
 
 
+_TEACH_BACK_GENERATION_GUIDANCE = (
+    "teach_back item format: the learner teaches the concept to an AI that plays a curious naive student; "
+    "the learner writes an opening explanation and then answers the student's follow-up questions. "
+    "Write the item prompt as a teaching brief addressed to the learner, e.g. "
+    "\"Explain the singular value decomposition to a student who has never seen it.\" "
+    "Every teach_back item MUST set practice_mode='teach_back', attempt_types_allowed=['teach_back'], "
+    "and carry its OWN grading_rubric (never rely on a default rubric). "
+    "The rubric is two-tiered via the criterion `tier` field: include exactly one tier='core' criterion "
+    "per facet in the item's evidence_facets (each core criterion probes that one facet), plus 2-3 "
+    "tier='transfer' criteria that stress-test edge cases, what-if scenarios, or transfer to new situations "
+    "(each transfer criterion also mapped to the facet(s) it stresses). "
+    "criterion_facet_weights MUST map every rubric criterion (core and transfer) to its facet(s), "
+    "evidence_facets/evidence_weights must be set, and criterion points must sum to max_points (4 or less)."
+)
+
+
 def _practice_expansion_instructions(
     plan: PracticeExpansionPlan,
     *,
     extra_instructions: str | None,
+    focus_facets: list[str] | None = None,
+    mode_mix: dict[str, int] | None = None,
 ) -> str:
     lines = [
         "Generate additional LearnLoop Practice Items after completed probe phases.",
@@ -384,6 +531,19 @@ def _practice_expansion_instructions(
         "For each target, create exactly requested_new_items Practice Items.",
         f"Targets: {[target.as_dict() for target in plan.targets]}",
     ]
+    if mode_mix:
+        mix = ", ".join(f"{count} item(s) with practice_mode='{mode}'" for mode, count in sorted(mode_mix.items()))
+        lines.append(
+            "Hard practice-mode mix constraint: for EACH target learning_object_id above, "
+            f"produce exactly {mix}. Do not substitute other practice modes for these counts."
+        )
+        if TEACH_BACK_PRACTICE_MODE in mode_mix:
+            lines.append(_TEACH_BACK_GENERATION_GUIDANCE)
+    if focus_facets:
+        lines.append(
+            "Focus facets: prioritize items whose evidence_facets target these facet ids, "
+            f"and weight them accordingly in evidence_weights: {sorted(focus_facets)}."
+        )
     if extra_instructions:
         lines.append(f"Additional instructions: {extra_instructions}")
     return "\n".join(lines)

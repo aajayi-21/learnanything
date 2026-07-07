@@ -15,6 +15,7 @@ from learnloop.services.attempts import (
     complete_self_graded_attempt,
 )
 from learnloop.services.followups import evaluate_attempt_intervention_followup
+from learnloop.services.tutor_qa import hint_equivalents_for_submission
 from learnloop.services.probes import probe_posterior
 from learnloop.services.scheduler import SchedulerSession, build_due_queue
 from learnloop_sidecar.context import SidecarContext
@@ -24,6 +25,7 @@ from learnloop_sidecar.handlers.ai_providers import ready_grading_provider
 from learnloop_sidecar.handlers.queue import PracticeItemInput, _sections
 from learnloop_sidecar.handlers.serializers import practice_item_detail, scheduled_item_dto
 from learnloop_sidecar.handlers.sessions import SessionCheckpointInput, patch_checkpoint
+from learnloop_sidecar.handlers.teach_back import filter_unready_teach_back_items
 from learnloop_sidecar.logging import debug_enabled, log_event
 from learnloop_sidecar.registry import method
 
@@ -98,16 +100,25 @@ def submit_attempt(ctx: SidecarContext, params: SubmitAttemptInput) -> dict[str,
     vault, repository = ctx.require_vault()
     _require_open_session(repository, params.session_id)
     before = _latent_snapshot(vault, repository, params.practice_item_id)
+    # Substantive tutor questions asked mid-attempt count as hints: fold them
+    # into hints_used so the existing hint dampening / FSRS rating caps apply.
+    question_hints = hint_equivalents_for_submission(
+        repository, params.practice_item_id, params.session_id
+    )
+    hints_used = params.hints_used + question_hints
+    item = vault.practice_items.get(params.practice_item_id)
+    if item is not None and item.hint_policy.max_useful_hints > 0:
+        hints_used = min(hints_used, item.hint_policy.max_useful_hints)
     draft = AttemptDraft(
         practice_item_id=params.practice_item_id,
         learner_answer_md=params.answer_md,
         attempt_type=params.attempt_type,
-        hints_used=params.hints_used,
+        hints_used=hints_used,
         latency_seconds=params.latency_seconds,
         session_id=params.session_id,
     )
     self_grade = _self_grade(params.self_grade)
-    provider_name, runtime, client = ready_grading_provider(vault)
+    provider_name, runtime, client = ready_grading_provider(vault, override=ctx.grading_provider_override)
     unavailable_label = "AI grading"
     try:
         if self_grade is None:
@@ -210,6 +221,9 @@ def skip_practice_item(ctx: SidecarContext, params: SkipInput) -> dict[str, Any]
             available_minutes=session.get("available_minutes"),
             energy=session.get("energy"),
         ),
+    )
+    queue = filter_unready_teach_back_items(
+        vault, queue, grading_provider_override=ctx.grading_provider_override
     )
     dtos = [scheduled_item_dto(vault, repository, item) for item in queue if item.practice_item_id != params.practice_item_id]
     repository.clear_session_checkpoint(params.session_id)

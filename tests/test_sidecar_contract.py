@@ -1405,7 +1405,7 @@ def _configure_ai_fallback_to_codex(vault_root, checkout, base_url: str) -> None
     text = config_path.read_text(encoding="utf-8")
     text = text.replace('type = "codex_sdk"', 'type = "http_adapter"', 1)
     text = text.replace('provider = "sdk"', 'provider = "http"')
-    text = text.replace('checkout_path = "../codex"', f'checkout_path = "{checkout.as_posix()}"')
+    text = text.replace('checkout_path = ""', f'checkout_path = "{checkout.as_posix()}"')
     text = text.replace('revision = "<pinned-commit>"', 'revision = "abc123"')
     text = text.replace('base_url = "http://127.0.0.1:8765"', f'base_url = "{base_url}"')
     text = text.replace('fallback_provider = ""', 'fallback_provider = "codex"')
@@ -1418,7 +1418,7 @@ def _configure_ai_codex_only(vault_root, checkout, base_url: str) -> None:
     text = config_path.read_text(encoding="utf-8")
     ai_prefix, legacy_codex = text.split("\n[codex]\n", 1)
     ai_prefix = ai_prefix.replace('type = "codex_sdk"', 'type = "http_adapter"', 1)
-    ai_prefix = ai_prefix.replace('checkout_path = "../codex"', f'checkout_path = "{checkout.as_posix()}"', 1)
+    ai_prefix = ai_prefix.replace('checkout_path = ""', f'checkout_path = "{checkout.as_posix()}"', 1)
     ai_prefix = ai_prefix.replace('revision = "<pinned-commit>"', 'revision = "abc123"', 1)
     ai_prefix = ai_prefix.replace('base_url = "http://127.0.0.1:8765"', f'base_url = "{base_url}"', 1)
     config_path.write_text(f"{ai_prefix}\n[codex]\n{legacy_codex}", encoding="utf-8")
@@ -1482,6 +1482,279 @@ class _GradingServer:
                 self.wfile.write(raw)
 
         return Handler
+
+
+def test_sidecar_get_facet_mastery_shape_on_fixture_vault(tmp_path):
+    # Radar-chart rollup over the read-only linear_algebra fixture (copied to a
+    # temp dir so loading never mutates the tracked fixture files).
+    vault_root = tmp_path / "vault"
+    shutil.copytree(FIXTURE_VAULT, vault_root)
+
+    result = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "get_facet_mastery"},
+        ]
+    )[1]["result"]
+
+    assert result["version"] == 1
+    facets = result["facets"]
+    assert facets, "fixture vault should expose at least one evidence facet"
+    facet_ids = [facet["facetId"] for facet in facets]
+    assert facet_ids == sorted(facet_ids)
+    assert result["counts"]["facets"] == len(facets)
+    assert result["counts"]["learningObjects"] >= 1
+    assert result["counts"]["practiceItems"] >= 1
+
+    loaded = load_vault(vault_root)
+    item_facets = {facet for item in loaded.practice_items.values() for facet in item.evidence_facets}
+    assert item_facets <= set(facet_ids)  # every evidenced facet appears as an axis
+
+    seen_items: set[str] = set()
+    seen_los: set[str] = set()
+    for facet in facets:
+        assert set(facet) == {"facetId", "mastery", "uncertainty", "stateCounts", "learningObjects", "practiceItems", "questionCount"}
+        assert 0.0 <= facet["mastery"] <= 1.0
+        assert facet["uncertainty"] >= 0.0
+        assert set(facet["stateCounts"]) == {"solid", "uncertain", "knownGap", "unexamined"}
+        assert sum(facet["stateCounts"].values()) == len(facet["learningObjects"])
+        for lo in facet["learningObjects"]:
+            assert set(lo) == {"id", "title", "state", "facetMastery"}
+            assert lo["id"] in loaded.learning_objects
+            assert 0.0 <= lo["facetMastery"] <= 1.0
+            seen_los.add(lo["id"])
+        for item in facet["practiceItems"]:
+            assert set(item) == {"id", "title", "learningObjectId", "weight", "difficulty", "isProbe", "queued"}
+            assert item["id"] in loaded.practice_items
+            assert len(item["title"]) <= 80
+            assert item["weight"] is None or isinstance(item["weight"], (int, float))
+            assert item["difficulty"] is None or 0.0 <= item["difficulty"] <= 1.0
+            assert isinstance(item["isProbe"], bool)
+            assert isinstance(item["queued"], bool)
+            if item["isProbe"]:
+                assert item["queued"]  # probes surface via the due queue
+            seen_items.add(item["id"])
+    assert result["counts"]["learningObjects"] == len(seen_los)
+    assert result["counts"]["practiceItems"] == len(seen_items)
+
+
+def test_sidecar_get_knowledge_map_shape_on_fixture_vault(tmp_path):
+    # 2D similarity map over the read-only fixture (copied so loading never
+    # mutates the tracked fixture files).
+    vault_root = tmp_path / "vault"
+    shutil.copytree(FIXTURE_VAULT, vault_root)
+
+    result = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "get_knowledge_map"},
+        ]
+    )[1]["result"]
+
+    loaded = load_vault(vault_root)
+    assert result["version"] == 1
+    assert isinstance(result["stress"], float) and result["stress"] >= 0.0
+    points = result["points"]
+    assert [point["id"] for point in points] == sorted(loaded.practice_items)
+    assert result["counts"]["items"] == len(points)
+    assert result["counts"]["learningObjects"] == len({p["learningObjectId"] for p in points})
+    assert result["counts"]["concepts"] == len({p["conceptId"] for p in points if p["conceptId"] is not None})
+    assert result["counts"]["facets"] >= 1
+
+    for point in points:
+        assert set(point) == {
+            "id",
+            "title",
+            "learningObjectId",
+            "conceptId",
+            "x",
+            "y",
+            "mastery",
+            "variance",
+            "predictedCorrect",
+            "isProbe",
+            "queued",
+            "difficulty",
+            "facets",
+        }
+        assert -1.0 <= point["x"] <= 1.0
+        assert -1.0 <= point["y"] <= 1.0
+        assert point["mastery"] is None or 0.0 <= point["mastery"] <= 1.0
+        assert point["predictedCorrect"] is None or 0.0 <= point["predictedCorrect"] <= 1.0
+        assert point["difficulty"] is None or 0.0 <= point["difficulty"] <= 1.0
+        assert isinstance(point["isProbe"], bool)
+        assert isinstance(point["queued"], bool)
+        item = loaded.practice_items[point["id"]]
+        assert point["learningObjectId"] == item.learning_object_id
+        assert 1 <= len(point["facets"]) <= 3 or not item.evidence_facets
+        assert set(point["facets"]) <= set(item.evidence_facets)
+
+
+def test_sidecar_get_knowledge_map_deterministic_and_geometric(tmp_path):
+    vault_root = tmp_path / "vault"
+    shutil.copytree(FIXTURE_VAULT, vault_root)
+
+    def fetch() -> dict:
+        return _rpc(
+            [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+                {"jsonrpc": "2.0", "id": 2, "method": "get_knowledge_map"},
+            ]
+        )[1]["result"]
+
+    first = fetch()
+    second = fetch()
+    # Determinism across independent sidecar runs: identical coordinates,
+    # identical stress — no random init, no sign flips.
+    assert first == second
+
+    loaded = load_vault(vault_root)
+    by_id = {point["id"]: point for point in first["points"]}
+    lo_concept = {lo_id: lo.concept for lo_id, lo in loaded.learning_objects.items()}
+
+    def dist(a: str, b: str) -> float:
+        pa, pb = by_id[a], by_id[b]
+        return ((pa["x"] - pb["x"]) ** 2 + (pa["y"] - pb["y"]) ** 2) ** 0.5
+
+    items = sorted(loaded.practice_items.values(), key=lambda item: item.id)
+    same_lo_pair = next(
+        (a.id, b.id)
+        for i, a in enumerate(items)
+        for b in items[i + 1 :]
+        if a.learning_object_id == b.learning_object_id
+    )
+    disjoint_pair = next(
+        (a.id, b.id)
+        for i, a in enumerate(items)
+        for b in items[i + 1 :]
+        if lo_concept[a.learning_object_id] != lo_concept[b.learning_object_id]
+        and not (set(a.evidence_facets) & set(b.evidence_facets))
+    )
+    # Sanity geometry: items testing the same LO must land closer together than
+    # items with disjoint facet vocabularies in different concepts.
+    assert dist(*same_lo_pair) < dist(*disjoint_pair)
+
+
+def test_sidecar_set_grading_provider_switch_and_health(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+
+    responses = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "get_runtime_health"},
+            {"jsonrpc": "2.0", "id": 3, "method": "set_grading_provider", "params": {"provider": "deepseek_flash"}},
+            {"jsonrpc": "2.0", "id": 4, "method": "get_runtime_health"},
+        ]
+    )
+
+    baseline = responses[1]["result"]["ai"]
+    assert baseline["manualGrading"] is False
+    assert baseline["gradingProviderOverride"] is None
+    # Dropdown options ship with the health dto: configured providers + codex + manual.
+    assert {"codex", "deepseek_flash", "deepseek_pro", "manual"} <= set(baseline["availableGradingProviders"])
+    assert baseline["availableGradingProviders"][-1] == "manual"
+
+    switched = responses[2]["result"]
+    assert switched["activeProvider"] == "deepseek_flash"
+    assert switched["manualGrading"] is False
+    assert isinstance(switched["ready"], bool)
+    assert switched["availableProviders"] == baseline["availableGradingProviders"]
+
+    health = responses[3]["result"]["ai"]
+    assert health["activeProvider"] == "deepseek_flash"
+    assert health["gradingProviderOverride"] == "deepseek_flash"
+    assert health["manualGrading"] is False
+
+
+def test_sidecar_set_grading_provider_manual_forces_self_grade_fallback(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    seed_due_item(paths)
+
+    session_id = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "start_session", "params": {"energy": "medium"}},
+        ]
+    )[1]["result"]["sessionId"]
+
+    responses = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "set_grading_provider", "params": {"provider": "manual"}},
+            {"jsonrpc": "2.0", "id": 3, "method": "get_runtime_health"},
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "submit_attempt",
+                "params": {
+                    "sessionId": session_id,
+                    "practiceItemId": "pi_svd_define_001",
+                    "answerMd": "SVD is U Sigma V transpose.",
+                    "attemptType": "independent_attempt",
+                    "hintsUsed": 0,
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "submit_attempt",
+                "params": {
+                    "sessionId": session_id,
+                    "practiceItemId": "pi_svd_define_001",
+                    "answerMd": "SVD is U Sigma V transpose.",
+                    "attemptType": "independent_attempt",
+                    "hintsUsed": 0,
+                    "selfGrade": {"criterionPoints": {"correctness": 4}, "confidence": 5},
+                },
+            },
+        ]
+    )
+
+    manual = responses[1]["result"]
+    assert manual == {
+        "version": 1,
+        "activeProvider": "manual",
+        "manualGrading": True,
+        "ready": True,
+        "availableProviders": manual["availableProviders"],
+    }
+    assert "manual" in manual["availableProviders"]
+
+    health = responses[2]["result"]["ai"]
+    assert health["activeProvider"] == "manual"
+    assert health["manualGrading"] is True
+    assert health["ready"] is True
+    assert health["status"] == "manual"
+    assert health["gradingProviderOverride"] == "manual"
+
+    # Without a self-grade the sidecar demands the manual fallback...
+    assert responses[3]["error"]["data"]["code"] == "grading_fallback_required"
+    # ...and with one, the attempt records as self-graded.
+    assert responses[4]["result"]["gradingSource"] == "self"
+
+
+def test_sidecar_set_grading_provider_rejects_unknown_provider(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+
+    response = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "set_grading_provider", "params": {"provider": "gpt99"}},
+            {"jsonrpc": "2.0", "id": 3, "method": "get_runtime_health"},
+        ]
+    )
+
+    error = response[1]["error"]
+    assert error["data"]["code"] == "invalid_provider"
+    assert "gpt99" in error["message"]
+    for option in ("codex", "deepseek_flash", "deepseek_pro", "manual"):
+        assert option in error["message"]
+    assert "manual" in error["data"]["details"]["available_providers"]
+    # A rejected switch leaves the override untouched.
+    assert response[2]["result"]["ai"]["gradingProviderOverride"] is None
 
 
 def _rpc(messages: list[dict]) -> list[dict]:

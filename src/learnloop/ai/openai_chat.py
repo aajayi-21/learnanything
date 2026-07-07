@@ -12,11 +12,15 @@ from learnloop.codex.client import (
     CanonicalIngestContext,
     CodexUnavailable,
     GradingContext,
+    TeachBackQuestionContext,
+    TutorQAContext,
     _authoring_prompt,
     _canonical_ingest_prompt,
     _grading_prompt,
+    _teach_back_question_prompt,
+    _tutor_qa_prompt,
 )
-from learnloop.codex.schemas import AuthoringProposal, GradingProposal
+from learnloop.codex.schemas import AuthoringProposal, GradingProposal, TeachBackQuestion, TutorAnswer
 
 
 class OpenAIChatProviderClient:
@@ -48,6 +52,12 @@ class OpenAIChatProviderClient:
 
     def run_grading_proposal(self, context: GradingContext) -> GradingProposal:
         return self._run_json_model(_grading_prompt(context), GradingProposal)
+
+    def run_tutor_qa(self, context: TutorQAContext) -> TutorAnswer:
+        return self._run_json_model(_tutor_qa_prompt(context), TutorAnswer)
+
+    def run_teach_back_question(self, context: TeachBackQuestionContext) -> TeachBackQuestion:
+        return self._run_json_model(_teach_back_question_prompt(context), TeachBackQuestion)
 
     def _run_json_model(self, prompt: str, model_type: type[BaseModel]) -> Any:
         text = self._chat(prompt)

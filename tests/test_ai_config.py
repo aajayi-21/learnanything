@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import os
+
 from learnloop.ai.codex_sdk import codex_config_from_ai_profile
-from learnloop.config import AIProviderConfig, LearnLoopConfig, load_config
+from learnloop.config import (
+    CODEX_CHECKOUT_ENV,
+    AIProviderConfig,
+    LearnLoopConfig,
+    load_config,
+)
 from learnloop.vault.loader import init_vault
 
 
@@ -36,6 +43,63 @@ def test_in_memory_defaults_match_persisted_algorithm_and_codex_profile(tmp_path
         assert config.codex.reasoning_effort == "medium"
         assert config.ai.providers["codex"].model == "gpt-5.5"
         assert config.ai.providers["codex"].reasoning_effort == "medium"
+
+
+def test_default_config_ships_blank_codex_checkout_path(tmp_path):
+    # The Codex checkout is a per-machine concern, sourced from global settings
+    # rather than the committed vault config, so the template must not hardcode it.
+    init_vault(tmp_path)
+
+    config = load_config(tmp_path / "learnloop.toml")
+
+    assert config.codex.checkout_path == ""
+    assert config.ai.providers["codex"].checkout_path in (None, "")
+
+
+def test_codex_checkout_path_env_override_applies_to_codex_and_ai_provider(tmp_path, monkeypatch):
+    init_vault(tmp_path)
+    checkout = tmp_path / "codex-checkout"
+    checkout.mkdir()
+    monkeypatch.setenv(CODEX_CHECKOUT_ENV, str(checkout))
+
+    config = load_config(tmp_path / "learnloop.toml")
+
+    assert config.codex.checkout_path == str(checkout)
+    assert config.ai.providers["codex"].checkout_path == str(checkout)
+
+
+def test_codex_checkout_path_loaded_from_global_settings_file(tmp_path, monkeypatch):
+    init_vault(tmp_path)
+    checkout = tmp_path / "codex-checkout"
+    checkout.mkdir()
+    settings_dir = tmp_path / "global-config"
+    settings_dir.mkdir()
+    (settings_dir / "settings.env").write_text(
+        f"{CODEX_CHECKOUT_ENV}={checkout}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LEARNLOOP_CONFIG_DIR", str(settings_dir))
+    # load_dotenv writes straight into os.environ; ensure a clean slate and undo it.
+    monkeypatch.delenv(CODEX_CHECKOUT_ENV, raising=False)
+    try:
+        config = load_config(tmp_path / "learnloop.toml")
+        assert config.codex.checkout_path == str(checkout)
+    finally:
+        os.environ.pop(CODEX_CHECKOUT_ENV, None)
+
+
+def test_shell_env_wins_over_global_settings_file(tmp_path, monkeypatch):
+    init_vault(tmp_path)
+    settings_dir = tmp_path / "global-config"
+    settings_dir.mkdir()
+    (settings_dir / "settings.env").write_text(
+        f"{CODEX_CHECKOUT_ENV}={tmp_path / 'from-file'}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LEARNLOOP_CONFIG_DIR", str(settings_dir))
+    monkeypatch.setenv(CODEX_CHECKOUT_ENV, str(tmp_path / "from-shell"))
+
+    config = load_config(tmp_path / "learnloop.toml")
+
+    assert config.codex.checkout_path == str(tmp_path / "from-shell")
 
 
 def test_sparse_codex_ai_profile_uses_current_codex_defaults():

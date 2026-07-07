@@ -80,6 +80,7 @@ from learnloop.services.recall_coverage import (
     resolve_coverage,
     resolve_error_impact,
     resolve_reliability,
+    scale_coverage_for_graded_criteria,
 )
 from learnloop.services.surprise import compute_surprise
 from learnloop.vault.hashes import practice_item_hash
@@ -690,7 +691,7 @@ def _with_fallback(result: AttemptResult, reason: str, *, agent_run_id: str | No
     return replace(result, grading_source="self", fallback_reason=reason, agent_run_id=agent_run_id)
 
 
-def _resolve_attempt_target(vault: LoadedVault, draft: AttemptDraft):
+def _resolve_attempt_target(vault: LoadedVault, draft: AttemptDraft, *, replay: bool = False):
     unsupported = unsupported_attempt_types([draft.attempt_type])
     if unsupported:
         supported = ", ".join(SUPPORTED_ATTEMPT_TYPES)
@@ -707,9 +708,20 @@ def _resolve_attempt_target(vault: LoadedVault, draft: AttemptDraft):
     # don't know an item regardless of its configured attempt_types_allowed. It
     # is graded deterministically (all criteria zeroed) rather than via Codex, so
     # it never depends on the item's allowed content attempt types.
+    # "exam_evidence" is likewise exempt: it is an import path (exam seeding),
+    # not a learner-chosen mode, and replay must be able to re-apply seeded
+    # attempts on items that only list live attempt types.
+    # "teach_back" is implied by the item's practice mode: the conversation
+    # service records it on teach_back items regardless of the authored
+    # attempt_types_allowed list. At replay time the exemption is unconditional
+    # on the attempt_type — an attempt that was valid when recorded must always
+    # replay, even after the item was edited to another practice mode.
+    exempt_attempt_types = {"dont_know", "exam_evidence"}
+    if draft.attempt_type == "teach_back" and (replay or item.practice_mode == "teach_back"):
+        exempt_attempt_types.add("teach_back")
     if (
         item.attempt_types_allowed
-        and draft.attempt_type != "dont_know"
+        and draft.attempt_type not in exempt_attempt_types
         and draft.attempt_type not in item.attempt_types_allowed
     ):
         raise AttemptValidationError(f"{draft.attempt_type} is not allowed for {item.id}")
@@ -741,6 +753,7 @@ def apply_attempt(
 
     application = compute_attempt_application(vault, repository, attempt, clock=clock)
     _persist_attempt_application(repository, application, replace_existing=attempt.replace_existing)
+    _auto_resolve_clean_error_events(vault, repository, application, clock=clock)
     if attempt.record_probe_update:
         record_probe_attempt(vault, repository, application.result.learning_object_id, clock=clock)
     return application.result
@@ -769,6 +782,7 @@ def compute_attempt_application(
         clock=clock,
         error_event_ids_override=attempt.error_event_ids_override,
         prior_state=prior_state,
+        replay=attempt.replace_existing,
     )
 
 
@@ -807,6 +821,51 @@ def _persist_attempt_application(
             attempt_debug_payload=application.attempt_debug_payload,
             item_parameter_state=application.item_parameter_state,
         )
+
+
+def _auto_resolve_clean_error_events(
+    vault: LoadedVault,
+    repository: Repository,
+    application: AttemptApplication,
+    *,
+    clock: Clock | None = None,
+) -> list[str]:
+    """Close the loop on stale error events (config ``[misconceptions]``).
+
+    A "clean" attempt is one whose graded correctness is at or above
+    ``auto_resolve_min_correctness``, that wrote no error events (equivalently
+    ``error_type IS NULL`` on the attempt row), and that is not a
+    ``dont_know``/``skip`` self-diagnosis. When an attempt completes clean, any
+    active error event on the same learning object that has accumulated
+    ``auto_resolve_clean_attempts`` clean attempts since its ``created_at`` is
+    resolved. The hook runs inside ``apply_attempt`` after persistence, so live
+    recording and deterministic replay (which resets error events to active and
+    re-applies attempts in ``created_at`` order) reproduce the same resolutions.
+    """
+
+    config = vault.config.misconceptions
+    if config.auto_resolve_clean_attempts <= 0:
+        return []
+    record = application.attempt_record
+    if record.get("attempt_type") in ("dont_know", "skip"):
+        return []
+    if application.error_events:
+        return []
+    if float(record.get("correctness") or 0.0) < config.auto_resolve_min_correctness:
+        return []
+    resolved: list[str] = []
+    for event in repository.active_errors_by_learning_object(record["learning_object_id"]):
+        clean_count = repository.count_clean_attempts_since(
+            record["learning_object_id"],
+            since=event.created_at,
+            until=record["created_at"],
+            min_correctness=config.auto_resolve_min_correctness,
+        )
+        if clean_count >= config.auto_resolve_clean_attempts and repository.resolve_error_event(
+            event.id, clock=clock
+        ):
+            resolved.append(event.id)
+    return resolved
 
 
 def load_attempt_prior_state(
@@ -867,8 +926,9 @@ def _compute_resolved_grade_application(
     clock: Clock | None = None,
     error_event_ids_override: list[str] | None = None,
     prior_state: AttemptPriorState | None = None,
+    replay: bool = False,
 ) -> AttemptApplication:
-    item, learning_object, rubric = _resolve_attempt_target(vault, draft)
+    item, learning_object, rubric = _resolve_attempt_target(vault, draft, replay=replay)
     observed_at = (clock or SystemClock()).now().astimezone(UTC)
     now_iso = utc_now_iso(clock)
     correctness = grade.rubric_score / max(rubric.max_points, 1)
@@ -882,6 +942,19 @@ def _compute_resolved_grade_application(
         learner_answer_md=draft.learner_answer_md,
         evidence=vault.config.evidence,
     )
+    # Asked-criteria evidence scaling: ungraded criteria certify no facet mass
+    # (teach_back partial grading) and transfer-tier criterion evidence carries
+    # the config multiplier. Both are symmetric mass effects, config-read at
+    # apply time, so replay reproduces them. No-op for grades covering every
+    # criterion of a core-only rubric (all existing modes).
+    if draft.attempt_type != "dont_know":
+        coverage = scale_coverage_for_graded_criteria(
+            coverage,
+            item,
+            rubric,
+            criterion_points=grade.criterion_points,
+            transfer_evidence_multiplier=vault.config.teach_back.transfer_evidence_multiplier,
+        )
     if prior_state is None:
         prior_state = load_attempt_prior_state(
             vault,

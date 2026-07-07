@@ -5,8 +5,11 @@ import type {
   CliCommandResult,
   CommandError,
   ConceptGraphSnapshot,
+  FacetMasterySnapshot,
   FeedbackBundle,
+  GradingProviderResult,
   InspectorEntity,
+  KnowledgeMapSnapshot,
   PracticeItemDetail,
   ProposalsSnapshot,
   QueueInput,
@@ -22,7 +25,16 @@ import type {
   VaultFileContent,
   VaultSummary,
   VaultTreeSnapshot,
-  SubmitAttemptInput
+  SubmitAttemptInput,
+  AskTutorQuestionInput,
+  TutorAnswerDto,
+  TutorTranscriptInput,
+  TutorTranscriptSnapshot,
+  TutorSaveNoteResult,
+  StartTeachBackInput,
+  StartTeachBackResult,
+  SubmitTeachBackTurnInput,
+  TeachBackTurnResult
 } from "./dto";
 
 async function call<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -36,6 +48,16 @@ async function call<T>(command: string, args: Record<string, unknown> = {}): Pro
 function normalizeError(error: unknown): CommandError {
   if (error && typeof error === "object" && "code" in error && "message" in error) {
     return error as CommandError;
+  }
+  // Tauri rejects with "Command <name> not found" when the running Rust binary
+  // predates a newly added #[tauri::command] (e.g. dev app not restarted after
+  // a Rust rebuild). Surface an actionable message instead of the raw string.
+  if (typeof error === "string" && /^Command \S+ not found/.test(error)) {
+    return {
+      code: "stale_app_binary",
+      message: `${error}. The running app is older than the frontend — restart the app (npm run dev) to load the new backend commands.`,
+      retryable: false
+    };
   }
   return {
     code: "internal",
@@ -136,5 +158,23 @@ export const api = {
             : [])
         ]
       }
-    })
+    }),
+  getFacetMastery: () => call<FacetMasterySnapshot>("get_facet_mastery"),
+  getKnowledgeMap: () => call<KnowledgeMapSnapshot>("get_knowledge_map"),
+  setGradingProvider: (provider: string) =>
+    call<GradingProviderResult>("set_grading_provider", { provider }),
+  askTutorQuestion: (input: AskTutorQuestionInput) =>
+    call<TutorAnswerDto>("ask_tutor_question", { input }),
+  rateTutorAnswer: (eventId: string, useful: boolean) =>
+    call<{ ok: boolean }>("rate_tutor_answer", { input: { eventId, useful } }),
+  saveTutorAnswerNote: (eventId: string, subjectId?: string) =>
+    call<TutorSaveNoteResult>("save_tutor_answer_note", {
+      input: { eventId, ...(subjectId ? { subjectId } : {}) }
+    }),
+  getTutorTranscript: (input: TutorTranscriptInput) =>
+    call<TutorTranscriptSnapshot>("get_tutor_transcript", { input }),
+  startTeachBack: (input: StartTeachBackInput) =>
+    call<StartTeachBackResult>("start_teach_back", { input }),
+  submitTeachBackTurn: (input: SubmitTeachBackTurnInput) =>
+    call<TeachBackTurnResult>("submit_teach_back_turn", { input })
 };

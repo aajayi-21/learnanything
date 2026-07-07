@@ -4,6 +4,8 @@ import type { ConceptGraphEdge, ConceptGraphNode, ConceptGraphSnapshot } from ".
 import { EntityLink } from "../components/ui";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
 import { masteryTone } from "../app/algoConfig";
+import { FacetRadarView } from "./FacetRadarScreen";
+import { KnowledgeMapView } from "./KnowledgeMapScreen";
 
 const NODE_W = 200;
 const NODE_H = 36;
@@ -118,7 +120,10 @@ function edgePath(source: Position, target: Position): string {
   return `M ${sx} ${sy} L ${mid} ${sy} L ${mid} ${ty} L ${tx} ${ty}`;
 }
 
+type GraphView = "map" | "facets" | "knowledge";
+
 export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) => void; onError: (message: string) => void }) {
+  const [view, setView] = useState<GraphView>("map");
   const [snapshot, setSnapshot] = useState<ConceptGraphSnapshot | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
@@ -147,6 +152,7 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
   );
 
   useEffect(() => {
+    if (view !== "map") return;
     const onKey = (event: KeyboardEvent) => {
       const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea") return;
@@ -158,10 +164,66 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [order, selected]);
+  }, [order, selected, view]);
+
+  const viewToggle = (
+    <div
+      style={{
+        display: "flex",
+        gap: 4,
+        padding: "8px 14px",
+        borderBottom: `1px solid ${COLOR.border}`,
+        background: COLOR.bg,
+        flexShrink: 0,
+        fontFamily: FONT_MONO,
+        fontSize: 12
+      }}
+    >
+      {(["map", "facets", "knowledge"] as const).map((id) => (
+        <button
+          key={id}
+          type="button"
+          onClick={() => setView(id)}
+          style={{
+            background: view === id ? "#241d12" : "transparent",
+            border: `1px solid ${view === id ? COLOR.amber : COLOR.border}`,
+            color: view === id ? COLOR.amber : COLOR.textDim,
+            font: "inherit",
+            padding: "3px 12px",
+            cursor: "pointer"
+          }}
+        >
+          {id === "map" ? "concept map" : id === "facets" ? "facet radar" : "knowledge map"}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (view === "facets") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+        {viewToggle}
+        <FacetRadarView onInspect={onInspect} onError={onError} />
+      </div>
+    );
+  }
+
+  if (view === "knowledge") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+        {viewToggle}
+        <KnowledgeMapView onInspect={onInspect} onError={onError} />
+      </div>
+    );
+  }
 
   if (!snapshot) {
-    return <div style={{ padding: 30, color: COLOR.textFaint, fontSize: 13 }}>loading concept graph…</div>;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+        {viewToggle}
+        <div style={{ padding: 30, color: COLOR.textFaint, fontSize: 13 }}>loading concept graph…</div>
+      </div>
+    );
   }
 
   const conceptById = new Map(snapshot.concepts.map((concept) => [concept.id, concept] as const));
@@ -169,9 +231,37 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      {viewToggle}
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* Canvas */}
         <div style={{ flex: 1, position: "relative", overflow: "hidden", background: COLOR.bg }}>
+          {/* Grid lines — full canvas backdrop, independent of graph content size */}
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              backgroundImage: [
+                `linear-gradient(to right, ${COLOR.border} 1px, transparent 1px)`,
+                `linear-gradient(to bottom, ${COLOR.border} 1px, transparent 1px)`,
+              ].join(", "),
+              backgroundSize: "24px 24px",
+              opacity: 0.22,
+              pointerEvents: "none",
+              zIndex: 0
+            }}
+          />
+          {/* Dots at intersections */}
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              backgroundImage: `radial-gradient(circle at 0 0, ${COLOR.border} 1.5px, transparent 1.5px)`,
+              backgroundSize: "24px 24px",
+              opacity: 0.5,
+              pointerEvents: "none",
+              zIndex: 0
+            }}
+          />
           {/* Scrollable content layer */}
           <div style={{ position: "absolute", inset: 0, overflow: "auto", padding: 24 }}>
 

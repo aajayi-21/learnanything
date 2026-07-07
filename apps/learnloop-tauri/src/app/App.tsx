@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { AppSnapshot, SessionEndSummary, SessionSnapshot } from "../api/dto";
+import { AskOverlay, type AskTarget } from "../components/AskOverlay";
 import { CommandPalette } from "../components/CommandPalette";
 import { InspectorOverlay } from "../components/InspectorOverlay";
 import { SessionFinishHud } from "../components/SessionFinishHud";
@@ -30,7 +31,16 @@ export function App() {
   const [palettePracticeItemIds, setPalettePracticeItemIds] = useState<string[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [finishSummary, setFinishSummary] = useState<SessionEndSummary | null>(null);
+  const [askTarget, setAskTarget] = useState<AskTarget | null>(null);
+  const [libraryNoteId, setLibraryNoteId] = useState<string | null>(null);
   const startupStartedRef = useRef(false);
+  // Whether the practice screen is currently a teach-back conversation. Only
+  // PracticeScreen knows the item's mode; it reports it up so the
+  // command-palette ask path can refuse to open the tutor mid-transcript.
+  const teachBackActiveRef = useRef(false);
+  const onTeachBackActive = useCallback((active: boolean) => {
+    teachBackActiveRef.current = active;
+  }, []);
 
   const onError = useCallback((message: string) => setToast(message), []);
   const onPaletteEntities = useCallback((ids: { inspectIds: string[]; practiceItemIds: string[] }) => {
@@ -92,11 +102,50 @@ export function App() {
 
   const restored = useMemo(() => {
     const checkpoint = session?.checkpoint;
-    if (!checkpoint || checkpoint.currentPracticeItemId !== practiceItemId) return { answer: "", hints: 0 };
-    return { answer: checkpoint.currentAnswer ?? "", hints: checkpoint.hintsUsed };
+    if (!checkpoint || checkpoint.currentPracticeItemId !== practiceItemId) {
+      return { answer: "", hints: 0, teachBack: null };
+    }
+    return {
+      answer: checkpoint.currentAnswer ?? "",
+      hints: checkpoint.hintsUsed,
+      teachBack: checkpoint.teachBack ?? null
+    };
   }, [session, practiceItemId]);
-  const gradingReady = snapshot?.health.ai?.ready ?? snapshot?.health.codex.ready ?? false;
+  const manualGrading = snapshot?.health.ai?.manualGrading ?? false;
+  // In manual mode the sidecar reports ready=true (it's an intentional choice,
+  // not an outage) — but practice screens must still start in self-grade mode.
+  const gradingReady = (snapshot?.health.ai?.ready ?? snapshot?.health.codex.ready ?? false) && !manualGrading;
   const gradingProvider = snapshot?.health.ai?.activeProvider ?? "codex";
+  const availableProviders = snapshot?.health.ai?.availableGradingProviders ?? [];
+
+  const changeGradingProvider = useCallback(
+    async (provider: string) => {
+      try {
+        const result = await api.setGradingProvider(provider);
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                health: {
+                  ...current.health,
+                  ai: {
+                    ...current.health.ai,
+                    activeProvider: result.activeProvider,
+                    ready: result.ready,
+                    manualGrading: result.manualGrading,
+                    availableGradingProviders: result.availableProviders
+                  }
+                }
+              }
+            : current
+        );
+        setToast(`grading → ${result.manualGrading ? "manual (self-grade)" : result.activeProvider}`);
+      } catch (error) {
+        onError((error as Error).message);
+      }
+    },
+    [onError]
+  );
 
   function beginSession(next: SessionSnapshot) {
     setSession(next);
@@ -139,6 +188,34 @@ export function App() {
     setTab(next);
     if (next !== "today") setTodayStage("queue");
   }
+
+  // Open the ask overlay for the current context if one is determinable
+  // (command palette entry). Screens with richer context (practice timer)
+  // call setAskTarget directly via onAsk.
+  const askCurrentContext = useCallback((): boolean => {
+    if (tab === "today" && todayStage === "practice" && practiceItemId && session) {
+      if (teachBackActiveRef.current) {
+        // The tutor could leak answers into the graded transcript.
+        setToast("ask-tutor is disabled during a teach-back conversation.");
+        return false;
+      }
+      setAskTarget({
+        context: "practice",
+        practiceItemId,
+        sessionId: session.sessionId
+      });
+      return true;
+    }
+    if (tab === "today" && todayStage === "feedback" && attemptId) {
+      setAskTarget({ context: "feedback", attemptId, sessionId: session?.sessionId });
+      return true;
+    }
+    if (tab === "library" && libraryNoteId) {
+      setAskTarget({ context: "library", noteId: libraryNoteId });
+      return true;
+    }
+    return false;
+  }, [tab, todayStage, practiceItemId, attemptId, session, libraryNoteId]);
 
   // Handoff from the Proposals screen: open the proposal's payload in the Library editor.
   function gotoLibraryProposal(patchId: string, itemId: string) {
@@ -183,10 +260,13 @@ export function App() {
             gradingProvider={gradingProvider}
             restoredAnswer={restored.answer}
             restoredHints={restored.hints}
+            restoredTeachBack={restored.teachBack}
             onFeedback={openFeedback}
             onBack={() => setTodayStage("queue")}
             onCheckpointCleared={clearLocalCheckpoint}
+            onTeachBackActive={onTeachBackActive}
             onInspect={setInspectorId}
+            onAsk={setAskTarget}
             onError={onError}
           />
         );
@@ -199,6 +279,7 @@ export function App() {
             onBack={() => setTodayStage("queue")}
             onOpenNotes={() => gotoTab("library")}
             onInspect={setInspectorId}
+            onAsk={setAskTarget}
             onError={onError}
           />
         );
@@ -221,7 +302,15 @@ export function App() {
       return <GraphScreen onInspect={setInspectorId} onError={onError} />;
     }
     if (tab === "library") {
-      return <LibraryScreen onError={onError} focus={libraryFocus} onFocusConsumed={() => setLibraryFocus(null)} />;
+      return (
+        <LibraryScreen
+          onError={onError}
+          focus={libraryFocus}
+          onFocusConsumed={() => setLibraryFocus(null)}
+          onAsk={setAskTarget}
+          onNoteSelected={setLibraryNoteId}
+        />
+      );
     }
     if (tab === "proposals") {
       return (
@@ -244,6 +333,9 @@ export function App() {
         onTab={gotoTab}
         aiReady={gradingReady}
         aiLabel={gradingProvider}
+        aiManual={manualGrading}
+        aiProviders={availableProviders}
+        onSelectAiProvider={changeGradingProvider}
         vaultRoot={snapshot?.vault?.root}
         onSelectVault={changeVault}
       >
@@ -256,6 +348,7 @@ export function App() {
         onInspect={setInspectorId}
         onError={onError}
       />
+      <AskOverlay target={askTarget} onClose={() => setAskTarget(null)} onToast={setToast} />
       <SessionFinishHud summary={finishSummary} onDismiss={() => setFinishSummary(null)} />
       <CommandPalette
         open={paletteOpen}
@@ -267,6 +360,7 @@ export function App() {
         onGoto={gotoTab}
         onOpenPractice={openPractice}
         onInspect={setInspectorId}
+        onAsk={askCurrentContext}
         onError={onError}
       />
     </>

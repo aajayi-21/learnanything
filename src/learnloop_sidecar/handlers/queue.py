@@ -13,6 +13,7 @@ from learnloop_sidecar.handlers.serializers import (
     scheduled_item_dto,
     scheduler_explanation_dto,
 )
+from learnloop_sidecar.handlers.teach_back import filter_unready_teach_back_items
 from learnloop_sidecar.logging import log_event
 from learnloop_sidecar.registry import method
 
@@ -41,6 +42,11 @@ def get_today_queue(ctx: SidecarContext, params: QueueInput) -> dict[str, Any]:
             energy=params.energy,
         ),
         limit=params.limit,
+    )
+    # Handler-level (never persisted): teach_back items dead-end without their
+    # AI provider, so they are dropped from the offered queue while it is down.
+    queue = filter_unready_teach_back_items(
+        vault, queue, grading_provider_override=ctx.grading_provider_override
     )
     dtos = [scheduled_item_dto(vault, repository, item) for item in queue]
     slate = repository.latest_scheduler_slate_by_session(params.session_id) if params.session_id else None

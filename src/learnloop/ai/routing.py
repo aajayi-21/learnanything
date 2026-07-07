@@ -6,7 +6,7 @@ from typing import Literal
 
 from learnloop.config import LearnLoopConfig
 
-AITask = Literal["grading", "canonical_ingest", "canonical_ingest_retry", "authoring"]
+AITask = Literal["grading", "canonical_ingest", "canonical_ingest_retry", "authoring", "tutor_qa", "teach_back"]
 
 
 @dataclass(frozen=True)

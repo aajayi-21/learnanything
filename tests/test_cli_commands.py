@@ -140,3 +140,68 @@ def _proposal_payload() -> dict:
             }
         ],
     }
+
+
+def test_misconceptions_lists_and_resolves_active_error_events(tmp_path):
+    from learnloop.db.repositories import Repository
+
+    from tests.helpers import NOW_ISO
+
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    v = ["--vault", str(vault_root)]
+
+    empty = runner.invoke(app, ["misconceptions", *v])
+    assert empty.exit_code == 0, empty.output
+    assert "No active misconceptions." in empty.output
+
+    repository = Repository(paths.sqlite_path)
+    repository.insert_error_event(
+        {
+            "id": "ee_misconception_1",
+            "learning_object_id": "lo_svd_definition",
+            "error_type": "conceptual_slip",
+            "severity": 0.7,
+            "is_misconception": True,
+            "created_at": NOW_ISO,
+        }
+    )
+    repository.insert_error_event(
+        {
+            "id": "ee_plain_error_1",
+            "learning_object_id": "lo_svd_definition",
+            "error_type": "recall_failure",
+            "severity": 0.4,
+            "is_misconception": False,
+            "created_at": NOW_ISO,
+        }
+    )
+
+    default = runner.invoke(app, ["misconceptions", "--json", *v])
+    assert default.exit_code == 0, default.output
+    rows = json.loads(default.output)["misconceptions"]
+    assert [row["id"] for row in rows] == ["ee_misconception_1"]
+    assert rows[0]["title"] == "Conceptual slip"
+    assert rows[0]["is_misconception"] is True
+
+    all_errors = runner.invoke(app, ["misconceptions", "--all-errors", "--json", *v])
+    ids = {row["id"] for row in json.loads(all_errors.output)["misconceptions"]}
+    assert ids == {"ee_misconception_1", "ee_plain_error_1"}
+
+    human = runner.invoke(app, ["misconceptions", *v])
+    assert "ee_misconception_1" in human.output
+    assert "(misconception)" in human.output
+    assert "Conceptual slip" in human.output
+
+    resolve = runner.invoke(app, ["resolve-error", "ee_misconception_1", *v])
+    assert resolve.exit_code == 0, resolve.output
+    assert "Resolved error event ee_misconception_1." in resolve.output
+
+    after = runner.invoke(app, ["misconceptions", "--json", *v])
+    assert json.loads(after.output)["misconceptions"] == []
+
+    again = runner.invoke(app, ["resolve-error", "ee_misconception_1", *v])
+    assert again.exit_code == 1
+    missing_json = runner.invoke(app, ["resolve-error", "ee_missing", "--json", *v])
+    assert missing_json.exit_code == 1
+    assert json.loads(missing_json.output)["resolved"] is False

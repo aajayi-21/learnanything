@@ -1,3 +1,5 @@
 AUTHORING_PROMPT_VERSION = "mvp-0.2-authoring-difficulty"
 CANONICAL_INGEST_PROMPT_VERSION = "mvp-0.2-canonical-ingest-difficulty"
 GRADING_PROMPT_VERSION = "mvp-0.3-grading-canonical-errors"
+TUTOR_QA_PROMPT_VERSION = "mvp-0.4-tutor-qa"
+TEACH_BACK_PROMPT_VERSION = "mvp-0.4-teach-back"

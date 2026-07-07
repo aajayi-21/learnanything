@@ -375,3 +375,69 @@ pub async fn run_cli_command(
 ) -> Result<Value, CommandError> {
     blocking_sidecar_call(sidecar, "run_cli_command", input).await
 }
+
+#[tauri::command]
+pub async fn get_facet_mastery(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_facet_mastery", json!({})).await
+}
+
+#[tauri::command]
+pub async fn get_knowledge_map(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_knowledge_map", json!({})).await
+}
+
+#[tauri::command]
+pub async fn set_grading_provider(
+    provider: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "set_grading_provider", json!({ "provider": provider })).await
+}
+
+#[tauri::command]
+pub async fn ask_tutor_question(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "ask_tutor_question", input).await
+}
+
+#[tauri::command]
+pub async fn rate_tutor_answer(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "rate_tutor_answer", input).await
+}
+
+#[tauri::command]
+pub async fn save_tutor_answer_note(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "save_tutor_answer_note", input).await
+}
+
+#[tauri::command]
+pub async fn get_tutor_transcript(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_tutor_transcript", input).await
+}
+
+#[tauri::command]
+pub async fn start_teach_back(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "start_teach_back", input).await
+}
+
+#[tauri::command]
+pub async fn submit_teach_back_turn(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "submit_teach_back_turn", input).await
+}

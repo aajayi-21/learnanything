@@ -158,7 +158,9 @@ function ScoreBlock({ f }: { f: FeedbackBundle }) {
 }
 
 // ── CriterionRow ──────────────────────────────────────────────────────────────
-function CriterionRow({ row }: { row: CriterionEvidenceRowDto }) {
+// `showTier` lights up when the rubric actually distinguishes core/transfer
+// tiers (teach-back items) — plain rubrics stay visually unchanged.
+function CriterionRow({ row, showTier = false }: { row: CriterionEvidenceRowDto; showTier?: boolean }) {
   const ok = row.pointsAwarded === row.pointsPossible;
   const partial = row.pointsAwarded > 0 && row.pointsAwarded < row.pointsPossible;
   const mark = ok ? "✓" : partial ? "◐" : "✗";
@@ -172,7 +174,12 @@ function CriterionRow({ row }: { row: CriterionEvidenceRowDto }) {
     }}>
       <div style={{ color: tone, textAlign: "center", fontWeight: 700 }}>{mark}</div>
       <div>
-        <div style={{ color: C.text }}>{row.criterionDescription}</div>
+        <div style={{ color: C.text, display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+          <span>{row.criterionDescription}</span>
+          {showTier && row.tier ? (
+            <Pill tone={row.tier === "transfer" ? "pink" : "slate"}>{row.tier}</Pill>
+          ) : null}
+        </div>
         {row.evidence && (
           <div className="markdown" style={{ marginTop: 3, color: C.textDim, fontSize: 12, lineHeight: 1.55 }}>
             <MarkdownMath value={row.evidence} />
@@ -415,6 +422,7 @@ export function FeedbackScreen({
   onBack,
   onOpenNotes,
   onInspect,
+  onAsk,
   onError,
 }: {
   attemptId: string;
@@ -422,6 +430,7 @@ export function FeedbackScreen({
   onBack: () => void;
   onOpenNotes: () => void;
   onInspect: (id: string) => void;
+  onAsk: (target: { context: "feedback"; attemptId: string; practiceItemId?: string }) => void;
   onError: (message: string) => void;
 }) {
   const [feedback, setFeedback] = useState<FeedbackBundle | null>(null);
@@ -612,12 +621,16 @@ export function FeedbackScreen({
       else if (event.key === "a") { event.preventDefault(); setAddingError(true); }
       else if (event.key === "j") { event.preventDefault(); openNoteCapture(); }
       else if (event.key === "o") { event.preventDefault(); onOpenNotes(); }
+      else if (event.key === "?") {
+        event.preventDefault();
+        onAsk({ context: "feedback", attemptId, practiceItemId: feedback?.practiceItemId });
+      }
       else if (event.key === "u" && feedback?.followupSource) { event.preventDefault(); void handleRateFollowup(true); }
       else if (event.key === "x" && feedback?.followupSource) { event.preventDefault(); void handleRateFollowup(false); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onNext, onBack, onOpenNotes, feedback, regrading, triggeringFollowup, ratingFollowup]);
+  }, [onNext, onBack, onOpenNotes, onAsk, attemptId, feedback, regrading, triggeringFollowup, ratingFollowup]);
 
   if (!feedback) {
     return (
@@ -669,6 +682,13 @@ export function FeedbackScreen({
           </div>
         )}
 
+        {(f.questionHintEquivalents ?? 0) > 0 && (
+          <div style={{ marginBottom: 14, fontSize: 12, color: C.textDim, fontFamily: MONO }}>
+            {f.questionHintEquivalents} tutor question{(f.questionHintEquivalents ?? 0) === 1 ? "" : "s"} counted as hint
+            {(f.questionHintEquivalents ?? 0) === 1 ? "" : "s"} on this attempt
+          </div>
+        )}
+
         <FbHeader first>Feedback</FbHeader>
 
         {/* ── main card ── */}
@@ -708,7 +728,11 @@ export function FeedbackScreen({
               Rubric · criterion evidence
             </div>
             {f.criterionEvidence.map((row) => (
-              <CriterionRow key={row.criterionId} row={row} />
+              <CriterionRow
+                key={row.criterionId}
+                row={row}
+                showTier={f.criterionEvidence.some((r) => r.tier === "transfer")}
+              />
             ))}
             <div style={{ borderTop: `1px solid ${C.border}` }} />
           </div>
@@ -1036,6 +1060,7 @@ export function FeedbackScreen({
           { key: "a", label: "add error" },
           { key: "j", label: "add note" },
           { key: "o", label: "open notes" },
+          { key: "?", label: "ask tutor" },
           { key: "esc / b", label: "back to queue" },
           { key: "^p", label: "palette" },
         ]}

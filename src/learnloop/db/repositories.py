@@ -452,6 +452,40 @@ class Repository:
             ).fetchall()
         return [_grading_evidence(row) for row in rows]
 
+    def find_attempt_id_by_evidence_agent_run(
+        self,
+        *,
+        practice_item_id: str,
+        agent_run_id: str,
+        attempt_type: str | None = None,
+    ) -> str | None:
+        """Latest attempt on an item whose grading evidence carries ``agent_run_id``.
+
+        Used as the teach-back finish idempotency lookup: the conversation id is
+        persisted as the evidence rows' ``agent_run_id``, so a retried finish can
+        recover the already-recorded attempt instead of grading it twice.
+        """
+
+        type_filter = "" if attempt_type is None else " AND a.attempt_type = ?"
+        parameters: list[Any] = [practice_item_id, agent_run_id]
+        if attempt_type is not None:
+            parameters.append(attempt_type)
+        with self.connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT a.id FROM practice_attempts a
+                WHERE a.practice_item_id = ?
+                  AND EXISTS (
+                    SELECT 1 FROM grading_evidence e
+                    WHERE e.attempt_id = a.id AND e.agent_run_id = ?
+                  ){type_filter}
+                ORDER BY a.created_at DESC, a.id DESC
+                LIMIT 1
+                """,
+                parameters,
+            ).fetchone()
+        return row["id"] if row is not None else None
+
     def supersede_self_grade_rows(
         self,
         attempt_id: str,
@@ -653,6 +687,40 @@ class Repository:
         with self.connection() as connection:
             self._insert_error_event(connection, event)
             connection.commit()
+
+    def count_clean_attempts_since(
+        self,
+        learning_object_id: str,
+        *,
+        since: str,
+        until: str,
+        min_correctness: float,
+    ) -> int:
+        """Count "clean" attempts on a learning object in ``(since, until]``.
+
+        Clean = graded correctness at or above ``min_correctness``, no error
+        attribution recorded on the attempt row (``error_type IS NULL`` is
+        equivalent to "wrote no error events"), and not a ``dont_know``/``skip``
+        self-diagnosis. Bounding by ``until`` (the triggering attempt's
+        ``created_at``) keeps the count reproducible under replay, where future
+        attempts still exist in ``practice_attempts``.
+        """
+
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS clean_count
+                FROM practice_attempts
+                WHERE learning_object_id = ?
+                  AND created_at > ?
+                  AND created_at <= ?
+                  AND correctness >= ?
+                  AND error_type IS NULL
+                  AND attempt_type NOT IN ('dont_know', 'skip')
+                """,
+                (learning_object_id, since, until, min_correctness),
+            ).fetchone()
+        return int(row["clean_count"])
 
     def resolve_error_event(self, event_id: str, *, clock: Clock | None = None) -> bool:
         now = utc_now_iso(clock)
@@ -860,6 +928,159 @@ class Repository:
             }
             for row in rows
         ]
+
+    # ── Tutor Q&A question events ─────────────────────────────────────────
+
+    def insert_question_event(self, event: Mapping[str, Any], *, clock: Clock | None = None) -> str:
+        event_id = str(event.get("id") or new_ulid())
+        now = event.get("created_at") or utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO question_events(
+                  id, context, note_id, practice_item_id, attempt_id, session_id,
+                  question_md, answer_md, question_type, facets_json,
+                  hint_equivalent, leak_suspected, rating, seconds_into_attempt,
+                  provider, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    event["context"],
+                    event.get("note_id"),
+                    event.get("practice_item_id"),
+                    event.get("attempt_id"),
+                    event.get("session_id"),
+                    event["question_md"],
+                    event.get("answer_md"),
+                    event.get("question_type"),
+                    _json(sorted({str(facet) for facet in event.get("facets", [])})),
+                    1 if event.get("hint_equivalent") else 0,
+                    1 if event.get("leak_suspected") else 0,
+                    event.get("rating"),
+                    event.get("seconds_into_attempt"),
+                    event.get("provider"),
+                    now,
+                ),
+            )
+            connection.commit()
+        return event_id
+
+    def question_events(
+        self,
+        *,
+        context: str | None = None,
+        note_id: str | None = None,
+        practice_item_id: str | None = None,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM question_events"
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        for column, value in (
+            ("context", context),
+            ("note_id", note_id),
+            ("practice_item_id", practice_item_id),
+            ("attempt_id", attempt_id),
+            ("session_id", session_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                parameters.append(value)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            parameters.append(since)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at, id"
+        with self.connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [_decode_question_event(row) for row in rows]
+
+    def count_question_events(
+        self,
+        *,
+        context: str | None = None,
+        note_id: str | None = None,
+        practice_item_id: str | None = None,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        since: str | None = None,
+    ) -> int:
+        return len(
+            self.question_events(
+                context=context,
+                note_id=note_id,
+                practice_item_id=practice_item_id,
+                attempt_id=attempt_id,
+                session_id=session_id,
+                since=since,
+            )
+        )
+
+    def question_event(self, event_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM question_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        return _decode_question_event(row) if row is not None else None
+
+    def set_question_event_rating(self, event_id: str, *, useful: bool) -> bool:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE question_events SET rating = ? WHERE id = ?",
+                (1 if useful else 0, event_id),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
+
+    def count_hint_equivalent_question_events(
+        self,
+        practice_item_id: str,
+        session_id: str | None,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> int:
+        """Substantive mid-attempt questions in the hint-equivalence window.
+
+        Practice-context questions on this (item, session) newer than ``since``
+        (typically the previous attempt on the item) and, when ``until`` is
+        given, at or before it (for reconstructing the count post hoc)."""
+
+        query = (
+            "SELECT COUNT(*) AS n FROM question_events "
+            "WHERE context = 'practice' AND hint_equivalent = 1 AND practice_item_id = ?"
+        )
+        parameters: list[Any] = [practice_item_id]
+        if session_id is not None:
+            query += " AND session_id = ?"
+            parameters.append(session_id)
+        if since is not None:
+            query += " AND created_at > ?"
+            parameters.append(since)
+        if until is not None:
+            query += " AND created_at <= ?"
+            parameters.append(until)
+        with self.connection() as connection:
+            row = connection.execute(query, parameters).fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def question_counts_by_facet(self) -> dict[str, int]:
+        """Total question_events touching each classified facet."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT facets_json FROM question_events WHERE facets_json IS NOT NULL"
+            ).fetchall()
+        counts: dict[str, int] = {}
+        for row in rows:
+            for facet in _loads(row["facets_json"], []):
+                counts[str(facet)] = counts.get(str(facet), 0) + 1
+        return counts
 
     def update_attempt_surprise_actions(
         self,
@@ -1077,19 +1298,26 @@ class Repository:
         attempt_id: str,
         new_evidence_rows: Iterable[Mapping[str, Any]],
         superseded_by_evidence_id: str,
+        supersede_tiers: tuple[int, ...] = (1,),
         clock: Clock | None = None,
     ) -> None:
         now = utc_now_iso(clock)
+        new_evidence_ids: list[str] = []
         with self.connection() as connection:
             for row in new_evidence_rows:
                 self._insert_grading_evidence(connection, attempt_id, row)
+                new_evidence_ids.append(str(row["id"]))
+            tier_placeholders = ",".join("?" for _ in supersede_tiers)
+            id_placeholders = ",".join("?" for _ in new_evidence_ids) or "''"
             connection.execute(
-                """
+                f"""
                 UPDATE grading_evidence
                 SET superseded_at = ?, superseded_by_evidence_id = ?
-                WHERE attempt_id = ? AND grader_tier = 1 AND superseded_at IS NULL
+                WHERE attempt_id = ? AND superseded_at IS NULL
+                  AND grader_tier IN ({tier_placeholders})
+                  AND id NOT IN ({id_placeholders})
                 """,
-                (now, superseded_by_evidence_id, attempt_id),
+                (now, superseded_by_evidence_id, attempt_id, *supersede_tiers, *new_evidence_ids),
             )
             connection.commit()
 
@@ -1812,6 +2040,38 @@ class Repository:
             cursor = connection.execute(
                 f"UPDATE intervention_needs SET {', '.join(assignments)} WHERE id = ?",
                 parameters,
+            )
+            connection.commit()
+            return cursor.rowcount > 0
+
+    def append_intervention_need_target_facets(
+        self,
+        need_id: str,
+        facets: list[str],
+        *,
+        clock: Clock | None = None,
+    ) -> bool:
+        """Union extra facets into an existing need's target_facets in place.
+
+        A direct UPDATE (not upsert): changing target_facets would change the
+        upsert dedup key and spawn a duplicate pending need."""
+
+        if not facets:
+            return False
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT target_facets_json FROM intervention_needs WHERE id = ?",
+                (need_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            existing = {str(facet) for facet in _loads(row["target_facets_json"], [])}
+            merged = sorted(existing | {str(facet) for facet in facets})
+            if merged == sorted(existing):
+                return False
+            cursor = connection.execute(
+                "UPDATE intervention_needs SET target_facets_json = ?, updated_at = ? WHERE id = ?",
+                (_json(merged), utc_now_iso(clock), need_id),
             )
             connection.commit()
             return cursor.rowcount > 0
@@ -3952,6 +4212,14 @@ def _probe_state_record(row: sqlite3.Row) -> ProbeStateRecord:
         algorithm_version=row["algorithm_version"],
         updated_at=row["updated_at"],
     )
+
+
+def _decode_question_event(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["facets"] = _loads(payload.pop("facets_json"), [])
+    payload["hint_equivalent"] = bool(payload["hint_equivalent"])
+    payload["leak_suspected"] = bool(payload["leak_suspected"])
+    return payload
 
 
 def _decode_observation_template(row: sqlite3.Row) -> dict[str, Any]:

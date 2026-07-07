@@ -8,6 +8,7 @@ from learnloop.db.repositories import GradingEvidenceRecord, Repository
 from learnloop.services.grading import resolved_rubric
 from learnloop.services.mastery import display_mastery, sigmoid
 from learnloop.services.scheduler import ScheduledItem, explain_practice_item
+from learnloop.services.tutor_qa import hint_equivalents_for_attempt
 from learnloop.vault.models import ErrorType, LearningObject, LoadedVault, PracticeItem, Rubric
 from learnloop_sidecar.context import mastery_dto
 from learnloop_sidecar.dto import to_camel, versioned
@@ -252,6 +253,9 @@ def feedback_bundle(vault: LoadedVault, repository: Repository, attempt_id: str)
                 )
                 for action in surprise.get("triggered_actions", [])
             ),
+            # Tutor questions that counted as hints on this attempt ("N
+            # questions counted as hints" in the feedback UI).
+            "question_hint_equivalents": hint_equivalents_for_attempt(repository, attempt),
         }
     )
 
@@ -293,6 +297,9 @@ def criterion_evidence_dto(row: GradingEvidenceRecord, rubric: Rubric | None) ->
             "evidence": row.evidence,
             "notes": row.notes,
             "grader_tier": row.grader_tier,
+            # Rubric tier ("core" | "transfer") — the feedback UI shows a pill
+            # when a rubric actually distinguishes tiers (teach_back items).
+            "tier": getattr(criterion, "tier", None) if criterion is not None else None,
         }
     )
 

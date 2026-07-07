@@ -12,6 +12,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { api } from "../api/client";
 import { masteryTone } from "../app/algoConfig";
 import type {
+  AttemptInspectorDetail,
   InspectorEntity,
   InspectorSearchResult,
   LearningObjectDetail,
@@ -258,7 +259,7 @@ function InspectorEntityView({
         ) : entity.kind === "error_event" ? (
           <ErrorEventBody detail={entity.detail} onGo={onGo} />
         ) : (
-          <AttemptBody id={entity.id} detail={entity.detail} />
+          <AttemptBody id={entity.id} detail={entity.detail} onGo={onGo} />
         )}
       </div>
     </>
@@ -553,25 +554,175 @@ function ErrorEventBody({ detail, onGo }: { detail: ErrorEventDto; onGo: (id: st
   );
 }
 
-// ── attempt (untyped detail) ────────────────────────────────────────────────
-function AttemptBody({ id, detail }: { id: string; detail: unknown }) {
-  const rows = detail && typeof detail === "object" ? Object.entries(detail as Record<string, unknown>) : [];
+// ── attempt ─────────────────────────────────────────────────────────────────
+// Structured mirror of the CLI's `learnloop show <attempt>` layout: identity
+// rows, a score stat grid, the learner answer, per-criterion grading evidence
+// with ✓/✗ verdicts, tutor feedback + repair suggestions, surprise, and error
+// attributions — instead of the old raw key/value dump.
+function AttemptBody({ id, detail, onGo }: { id: string; detail: AttemptInspectorDetail; onGo: (id: string) => void }) {
+  const feedback = detail.feedback ?? null;
+  const surprise = feedback?.surprise ?? null;
+  const evidence = feedback?.criterionEvidence ?? [];
+  const attributions = feedback?.errorAttributions ?? [];
+  const repairs = feedback?.repairSuggestions ?? [];
   return (
     <div>
       <InspectorRow label="attempt_id">
         <Dim style={{ fontFamily: FONT_MONO }}>{id}</Dim>
       </InspectorRow>
-      {rows.length ? (
-        rows.map(([key, value]) => (
-          <InspectorRow key={key} label={key}>
-            <span style={{ overflowWrap: "anywhere", fontFamily: FONT_MONO, fontSize: 12 }}>{formatUnknown(value)}</span>
-          </InspectorRow>
-        ))
-      ) : (
-        <div style={{ marginTop: 8 }}>
-          <Faint>no structured attempt detail available</Faint>
+      <InspectorRow label="practice_item">
+        <IdLink id={detail.practiceItemId} onGo={onGo} />
+      </InspectorRow>
+      <InspectorRow label="learning_object">
+        <IdLink id={detail.learningObjectId} onGo={onGo}>
+          {feedback?.learningObjectTitle ?? detail.learningObjectId}
+        </IdLink>
+      </InspectorRow>
+      {detail.concept ? <InspectorRow label="concept">{detail.concept}</InspectorRow> : null}
+      <InspectorRow label="mode">
+        <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
+          {detail.practiceMode ? <Pill color={modePillColor(detail.practiceMode)}>{detail.practiceMode}</Pill> : null}
+          {detail.attemptType ? <Pill color="slate">{detail.attemptType}</Pill> : null}
+        </span>
+      </InspectorRow>
+      <InspectorRow label="created">
+        {relTime(detail.createdAt)} <Meta>{detail.createdAt}</Meta>
+      </InspectorRow>
+
+      <SectionHeader>Score</SectionHeader>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        <Stat
+          label="rubric"
+          value={detail.rubricScore == null ? "—" : feedback ? `${detail.rubricScore}/${feedback.maxPoints}` : `${detail.rubricScore}`}
+          color={
+            detail.rubricScore != null && feedback
+              ? masteryColor(detail.rubricScore / Math.max(1, feedback.maxPoints))
+              : undefined
+          }
+        />
+        <Stat
+          label="correctness"
+          value={detail.correctness == null ? "—" : detail.correctness.toFixed(2)}
+          color={detail.correctness == null ? undefined : masteryColor(detail.correctness)}
+        />
+        <Stat label="grader_conf" value={detail.graderConfidence == null ? "—" : detail.graderConfidence.toFixed(2)} />
+        <Stat label="hints" value={detail.hintsUsed ?? 0} color={detail.hintsUsed ? COLOR.amber : undefined} />
+      </div>
+      {detail.errorType ? (
+        <div style={{ marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}>
+          <Pill color="red">{detail.errorType}</Pill>
+          {detail.manualReview ? <Pill color="amber">manual review</Pill> : null}
         </div>
-      )}
+      ) : null}
+
+      {detail.learnerAnswerMd ? (
+        <>
+          <SectionHeader>Learner answer</SectionHeader>
+          <div style={{ border: `1px solid ${COLOR.border}`, background: COLOR.bgElev, padding: "10px 12px", fontSize: 13 }}>
+            <MarkdownMath value={detail.learnerAnswerMd} />
+          </div>
+        </>
+      ) : null}
+
+      {evidence.length ? (
+        <>
+          <SectionHeader>Grading evidence</SectionHeader>
+          <div style={{ display: "grid", gap: 8 }}>
+            {evidence.map((row) => {
+              const earned = row.pointsAwarded > 0;
+              return (
+                <div
+                  key={row.criterionId}
+                  style={{
+                    borderLeft: `3px solid ${earned ? COLOR.green : COLOR.red}`,
+                    background: COLOR.bgElev,
+                    padding: "8px 12px",
+                    fontSize: 12
+                  }}
+                >
+                  <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                    <span style={{ color: earned ? COLOR.green : COLOR.red, fontFamily: FONT_MONO }}>{earned ? "✓" : "✗"}</span>
+                    <span style={{ color: COLOR.cyan, fontFamily: FONT_MONO, overflowWrap: "anywhere" }}>{row.criterionId}</span>
+                    <span style={{ color: earned ? COLOR.green : COLOR.red, fontFamily: FONT_MONO }}>
+                      {row.pointsAwarded}/{row.pointsPossible}
+                    </span>
+                  </div>
+                  {row.criterionDescription ? (
+                    <div style={{ marginTop: 3, color: COLOR.textDim }}>{row.criterionDescription}</div>
+                  ) : null}
+                  {row.evidence ? <div style={{ marginTop: 4, color: COLOR.text, lineHeight: 1.5 }}>{row.evidence}</div> : null}
+                  {row.notes ? <div style={{ marginTop: 3, color: COLOR.textFaint, lineHeight: 1.5 }}>{row.notes}</div> : null}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      ) : null}
+
+      {feedback?.feedbackMd || repairs.length || (feedback?.fatalErrors.length ?? 0) ? (
+        <>
+          <SectionHeader>Feedback{feedback?.gradingSource ? ` · graded by ${feedback.gradingSource}` : ""}</SectionHeader>
+          {feedback?.fatalErrors.length ? (
+            <div style={{ marginBottom: 6, color: COLOR.red, fontSize: 12 }}>
+              fatal errors: {feedback.fatalErrors.join(", ")}
+            </div>
+          ) : null}
+          {feedback?.feedbackMd ? (
+            <div style={{ fontSize: 13, lineHeight: 1.55 }}>
+              <MarkdownMath value={feedback.feedbackMd} />
+            </div>
+          ) : null}
+          {repairs.map((repair, index) => (
+            <div key={index} style={{ marginTop: 8, borderTop: `1px solid ${COLOR.border}`, paddingTop: 6, fontSize: 12 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ color: COLOR.amber }}>→ {repair.practiceMode}</span>
+                {(repair.targetEvidenceFamilies ?? []).map((facet) => (
+                  <Pill key={facet} color="cyan">
+                    {facet}
+                  </Pill>
+                ))}
+              </div>
+              {repair.rationale ? <div style={{ marginTop: 4, color: COLOR.textDim, lineHeight: 1.5 }}>{repair.rationale}</div> : null}
+            </div>
+          ))}
+        </>
+      ) : null}
+
+      {surprise && (surprise.predictiveSurprise != null || surprise.bayesianSurprise != null) ? (
+        <>
+          <SectionHeader>Surprise</SectionHeader>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+            <Stat
+              label="predictive"
+              value={surprise.predictiveSurprise == null ? "—" : surprise.predictiveSurprise.toFixed(3)}
+            />
+            <Stat label="bayesian" value={surprise.bayesianSurprise == null ? "—" : surprise.bayesianSurprise.toFixed(3)} />
+            <Stat
+              label="direction"
+              value={surprise.surpriseDirection ?? "—"}
+              color={surprise.surpriseDirection === "negative" ? COLOR.red : surprise.surpriseDirection === "positive" ? COLOR.green : undefined}
+            />
+          </div>
+        </>
+      ) : null}
+
+      {attributions.length ? (
+        <>
+          <SectionHeader>Error attributions</SectionHeader>
+          <div style={{ display: "grid", gap: 6 }}>
+            {attributions.map((ea) => (
+              <div key={ea.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
+                <IdLink id={ea.id} onGo={onGo}>
+                  <span style={{ color: COLOR.red }}>{ea.errorTitle ?? ea.errorType}</span>
+                </IdLink>
+                {ea.isMisconception ? <Pill color="red">misconception</Pill> : null}
+                <Pill color={ea.status === "active" ? "amber" : "slate"}>{ea.status}</Pill>
+                <Dim style={{ fontFamily: FONT_MONO }}>sev {ea.severity.toFixed(2)}</Dim>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -711,8 +862,10 @@ function SchedulerWhy({ scheduler }: { scheduler: SchedulerExplanationDto }) {
 function InspectorRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 12, padding: "4px 0", alignItems: "baseline", fontSize: 12 }}>
-      <span style={{ color: COLOR.textFaint, fontFamily: FONT_MONO }}>{label}</span>
-      <span style={{ color: COLOR.text }}>{children}</span>
+      {/* min-width:0 + overflow-wrap keep long unbreakable ids (source refs)
+          inside their grid track instead of overlapping the value column */}
+      <span style={{ color: COLOR.textFaint, fontFamily: FONT_MONO, minWidth: 0, overflowWrap: "anywhere" }}>{label}</span>
+      <span style={{ color: COLOR.text, minWidth: 0, overflowWrap: "anywhere" }}>{children}</span>
     </div>
   );
 }

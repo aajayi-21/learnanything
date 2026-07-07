@@ -292,6 +292,20 @@ export function MathLiveEditor({ value, onChange, disabled, placeholder, maxHeig
   }, [reconcile]);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    // Select-all must stay scoped to the editor (the browser default would grab
+    // the whole page) and must span rendered KaTeX widgets too — the copy/cut
+    // handlers below turn that selection back into raw `$…$` source.
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
+      const el = editorRef.current;
+      const sel = window.getSelection();
+      if (!el || !sel) return;
+      event.preventDefault();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return;
+    }
     // Ctrl/Cmd combos (submit, hint, …) belong to the screen's global handler.
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === "Enter") {
@@ -353,6 +367,39 @@ export function MathLiveEditor({ value, onChange, disabled, placeholder, maxHeig
     reconcile();
   };
 
+  // Map the current DOM selection back to a slice of the source model, so
+  // copying rendered equations yields their `$…$` LaTeX source instead of the
+  // KaTeX presentation DOM (which pastes as garbled plain text).
+  const selectionSource = (): string | null => {
+    const el = editorRef.current;
+    const sel = window.getSelection();
+    if (!el || !sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    const range = sel.getRangeAt(0);
+    if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) return null;
+    const start = serialize(el, range.startContainer, range.startOffset).caret;
+    const end = serialize(el, range.endContainer, range.endOffset).caret;
+    const { text } = serialize(el, null, 0);
+    return text.slice(Math.min(start, end), Math.max(start, end));
+  };
+
+  const onCopy = (event: React.ClipboardEvent<HTMLDivElement>) => {
+    const source = selectionSource();
+    if (source == null) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", source);
+  };
+
+  const onCut = (event: React.ClipboardEvent<HTMLDivElement>) => {
+    const source = selectionSource();
+    if (source == null) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", source);
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    sel.getRangeAt(0).deleteContents();
+    reconcile();
+  };
+
   return (
     <div
       ref={editorRef}
@@ -369,6 +416,8 @@ export function MathLiveEditor({ value, onChange, disabled, placeholder, maxHeig
       onKeyDown={onKeyDown}
       onMouseDown={onMouseDown}
       onPaste={onPaste}
+      onCopy={onCopy}
+      onCut={onCut}
       onBlur={renderAll}
       onCompositionStart={() => { composing.current = true; }}
       onCompositionEnd={() => { composing.current = false; reconcile(); }}

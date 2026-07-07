@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,10 @@ class SidecarContext:
     vault: LoadedVault | None = None
     repository: Repository | None = None
     shutdown_requested: bool = False
+    # Runtime-only grading backend override set via set_grading_provider: a
+    # configured provider key, the literal "manual", or None (config routing).
+    # Never persisted to learnloop.toml; survives vault reloads within this process.
+    grading_provider_override: str | None = None
 
     def load(self, vault_path: str | Path, *, maintenance: bool = True) -> None:
         self.vault_root = Path(vault_path).resolve()
@@ -57,7 +62,7 @@ class SidecarContext:
             {
                 "vault": vault_summary(vault),
                 "config": config_dto(vault),
-                "health": runtime_health(vault, repository),
+                "health": runtime_health(vault, repository, grading_override=self.grading_provider_override),
                 "active_session": active_session,
                 "streak": repository.session_day_streak(),
             }
@@ -94,6 +99,7 @@ def config_dto(vault: LoadedVault) -> dict[str, Any]:
             "scheduler": {
                 "forgetting_risk_weight": config.scheduler.forgetting_risk_weight,
                 "active_goal_weight": config.scheduler.active_goal_weight,
+                "goal_frontier_weight": config.scheduler.goal_frontier_weight,
                 "recent_error_weight": config.scheduler.recent_error_weight,
                 "probe_eig_weight": config.scheduler.probe_eig_weight,
                 "short_session_minutes": config.scheduler.short_session_minutes,
@@ -141,9 +147,17 @@ def config_dto(vault: LoadedVault) -> dict[str, Any]:
     )
 
 
-def runtime_health(vault: LoadedVault, repository: Repository) -> dict[str, Any]:
+def available_grading_providers(vault: LoadedVault) -> list[str]:
+    """Selectable grading backends: configured AI providers, legacy codex, manual."""
+
+    providers = set(vault.config.ai.providers) | {"codex"}
+    return sorted(providers) + ["manual"]
+
+
+def runtime_health(
+    vault: LoadedVault, repository: Repository, grading_override: str | None = None
+) -> dict[str, Any]:
     report = check_codex_runtime(vault.root, vault.config.codex)
-    ai_report = check_ai_runtime(vault.root, vault.config)
     versions = applied_versions(repository.sqlite_path)
     latest = max((migration.version for migration in discover_migrations()), default=0)
     return versioned(
@@ -156,15 +170,7 @@ def runtime_health(vault: LoadedVault, repository: Repository) -> dict[str, Any]
                 "base_url": vault.config.codex.base_url,
                 "checked_at": _nowish(),
             },
-            "ai": {
-                "ready": ai_report.ready,
-                "status": ai_report.status,
-                "active_provider": ai_report.active_provider,
-                "provider_type": ai_report.provider_type,
-                "model": ai_report.model,
-                "provider_revision": ai_report.provider_revision,
-                "checked_at": _nowish(),
-            },
+            "ai": _ai_health(vault, grading_override),
             "database": {
                 "ok": latest in versions if latest else True,
                 "migrations_applied": len(versions),
@@ -173,6 +179,56 @@ def runtime_health(vault: LoadedVault, repository: Repository) -> dict[str, Any]
             "vault_loaded": True,
         }
     )
+
+
+def _ai_health(vault: LoadedVault, grading_override: str | None) -> dict[str, Any]:
+    """The health.ai dto, honoring the runtime grading override.
+
+    - No override: unchanged behavior (config/env routed provider).
+    - Override "manual": AI grading is intentionally off; reported as
+      ready=True with status "manual" and manual_grading=True so the frontend
+      shows the self-grade flow instead of an "AI unavailable" warning.
+    - Override = provider key: health for that provider specifically.
+    """
+
+    base = {
+        "manual_grading": False,
+        "grading_provider_override": grading_override,
+        "available_grading_providers": available_grading_providers(vault),
+        "checked_at": _nowish(),
+    }
+    if grading_override == "manual":
+        return {
+            "ready": True,
+            "status": "manual",
+            "active_provider": "manual",
+            "provider_type": None,
+            "model": None,
+            "provider_revision": None,
+            **base,
+            "manual_grading": True,
+        }
+    if grading_override == "codex" and "codex" not in vault.config.ai.providers:
+        codex_report = check_codex_runtime(vault.root, vault.config.codex)
+        return {
+            "ready": codex_report.ready,
+            "status": codex_report.status,
+            "active_provider": "codex",
+            "provider_type": "codex",
+            "model": vault.config.codex.model,
+            "provider_revision": codex_report.actual_revision,
+            **base,
+        }
+    ai_report = check_ai_runtime(vault.root, vault.config, provider_name=grading_override)
+    return {
+        "ready": ai_report.ready,
+        "status": ai_report.status,
+        "active_provider": ai_report.active_provider,
+        "provider_type": ai_report.provider_type,
+        "model": ai_report.model,
+        "provider_revision": ai_report.provider_revision,
+        **base,
+    }
 
 
 def session_snapshot(repository: Repository, session_id: str) -> dict[str, Any] | None:
@@ -201,6 +257,7 @@ def checkpoint_dto(row: dict[str, Any]) -> dict[str, Any]:
         practice = focus.get("practice")
         if isinstance(practice, dict):
             hints_used = int(practice.get("hintsUsed") or practice.get("hints_used") or 0)
+    envelope = teach_back_envelope(row.get("current_answer"))
     return to_camel(
         {
             "current_practice_item_id": row.get("current_practice_item_id"),
@@ -210,8 +267,35 @@ def checkpoint_dto(row: dict[str, Any]) -> dict[str, Any]:
             "pending_grading_proposal": row.get("pending_grading_proposal"),
             "readiness": row.get("readiness"),
             "updated_at": row.get("updated_at"),
+            # Additive: a mid-conversation teach-back checkpoint, so the
+            # frontend can rehydrate the transcript instead of starting fresh.
+            "teach_back": envelope["state"] if envelope is not None else None,
         }
     )
+
+
+def teach_back_envelope(current_answer: Any) -> dict[str, Any] | None:
+    """Parse a teach-back conversation envelope from checkpoint current_answer.
+
+    The teach-back handler persists ``{"mode": "teach_back", "state": <core
+    TeachBackState dict>}`` as a JSON string in the checkpoint's
+    ``current_answer`` slot. Anything else (a plain draft answer, empty, or
+    malformed JSON) returns ``None``.
+    """
+
+    if not isinstance(current_answer, str) or not current_answer.strip():
+        return None
+    try:
+        payload = json.loads(current_answer)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if (
+        isinstance(payload, dict)
+        and payload.get("mode") == "teach_back"
+        and isinstance(payload.get("state"), dict)
+    ):
+        return payload
+    return None
 
 
 def mastery_dto(repository: Repository, learning_object_id: str, vault: LoadedVault | None = None) -> dict[str, Any] | None:

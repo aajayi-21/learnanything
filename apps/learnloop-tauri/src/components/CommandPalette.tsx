@@ -53,6 +53,7 @@ interface GrammarSpec {
 
 const GRAMMAR: Record<string, GrammarSpec> = {
   today: { help: "Launch the today loop", args: [], flags: [] },
+  ask: { help: "Ask the tutor a question about the current context", args: [], flags: [] },
   review: { help: "Print the current due queue", args: [], flags: ["--energy", "--minutes", "--json"] },
   why: { help: "Explain a queued item's scheduler priority", args: [{ name: "practice_item_id", kind: "practice_item" }], flags: [] },
   show: { help: "Universal inspector — open any LO / PI / attempt / error", args: [{ name: "id", kind: "any" }], flags: [] },
@@ -108,6 +109,7 @@ interface CmdCtx {
   onGoto: (tab: TopTab) => void;
   onOpenPractice: (id: string) => void;
   onInspect: (id: string) => void;
+  onAsk: () => boolean;
   clearBuffer: () => void;
   close: () => void;
 }
@@ -123,6 +125,13 @@ async function runCommand(name: string, args: string[], flags: Flags, ctx: CmdCt
       ctx.onGoto("today");
       ctx.close();
       return [{ type: "log", text: "→ today" }];
+    }
+    case "ask": {
+      if (!ctx.onAsk()) {
+        return [{ type: "err", text: "no askable context — open a note, a practice item, or feedback first" }];
+      }
+      ctx.close();
+      return [{ type: "log", text: "→ ask" }];
     }
     case "goto": {
       const tab = findTab(args[0]);
@@ -611,6 +620,7 @@ export function CommandPalette({
   onGoto,
   onOpenPractice,
   onInspect,
+  onAsk,
   onError
 }: {
   open: boolean;
@@ -622,6 +632,7 @@ export function CommandPalette({
   onGoto: (tab: TopTab) => void;
   onOpenPractice: (id: string) => void;
   onInspect: (id: string) => void;
+  onAsk: () => boolean;
   onError: (message: string) => void;
 }) {
   const [line, setLine] = useState("");
@@ -716,6 +727,7 @@ export function CommandPalette({
         onGoto,
         onOpenPractice,
         onInspect,
+        onAsk,
         clearBuffer: () => setBuffer([]),
         close: onClose
       };

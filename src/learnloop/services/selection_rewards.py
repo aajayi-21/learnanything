@@ -11,6 +11,12 @@ from learnloop.services.mastery import item_irt_params
 from learnloop.vault.models import LearningObject, LoadedVault, PracticeItem
 
 
+# Reward floor for teach_back items under the PROBE intent (see
+# score_selection_reward): keeps solid items weakly schedulable so transfer
+# escalation still gets served, without adding a scheduler weight knob.
+TEACH_BACK_REWARD_FLOOR = 0.05
+
+
 class SchedulerIntent(str, Enum):
     PROBE = "probe"
     PRACTICE = "practice"
@@ -145,7 +151,12 @@ def score_selection_reward(
     expected_skill_gain = float(expected_gain.get("expected_skill_gain") or 0.0)
     repetition_fatigue = 0.25 if demand.bad_item_suspicion >= 0.65 and intent != SchedulerIntent.REPAIR else 0.0
     overload_penalty = _overload_penalty(predicted, intent)
-    duplicate_probe_penalty = 0.10 if intent == SchedulerIntent.PROBE and probe_eig <= 0 else 0.0
+    is_teach_back = item.practice_mode == "teach_back"
+    # Teach-back rides the PROBE intent without a hypothesis set, so a zero
+    # hypothesis EIG is expected, not a duplicate probe.
+    duplicate_probe_penalty = (
+        0.10 if intent == SchedulerIntent.PROBE and probe_eig <= 0 and not is_teach_back else 0.0
+    )
 
     if intent == SchedulerIntent.PROBE:
         reward = (
@@ -155,6 +166,11 @@ def score_selection_reward(
             + 0.10 * clamp(base_components.get("active_goal", 0.0))
             - duplicate_probe_penalty
         )
+        if is_teach_back:
+            # Small floor, not a new tunable weight (the priority-weight sweep
+            # showed those are decision-inert): transfer escalation keeps
+            # solid, low-EIG items weakly schedulable at low priority.
+            reward = max(reward, TEACH_BACK_REWARD_FLOOR)
     elif intent == SchedulerIntent.REPAIR:
         reward = (
             0.30 * repair_value
@@ -163,6 +179,8 @@ def score_selection_reward(
             + 0.10 * targeted_boundary_fit
             + 0.15 * expected_skill_gain / 0.08
             + 0.10 * clamp(base_components.get("recent_error", 0.0))
+            # Repairing gaps on goal-relevant facets ranks above off-goal repairs.
+            + 0.15 * clamp(base_components.get("goal_frontier", 0.0))
             - overload_penalty
             - repetition_fatigue
         )
@@ -452,6 +470,7 @@ def _mode_retrieval_demand(practice_mode: str) -> float:
         "constructed_response": 0.90,
         "multiple_choice": 0.35,
         "self_report": 0.10,
+        "teach_back": 0.9,
     }.get(practice_mode, 0.65)
 
 

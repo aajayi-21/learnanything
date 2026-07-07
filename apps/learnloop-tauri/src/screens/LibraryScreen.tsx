@@ -109,11 +109,15 @@ function proposalLabel(item: ProposalItemDto): string {
 export function LibraryScreen({
   onError,
   focus = null,
-  onFocusConsumed
+  onFocusConsumed,
+  onAsk,
+  onNoteSelected
 }: {
   onError: (message: string) => void;
   focus?: { patchId: string; itemId: string } | null;
   onFocusConsumed?: () => void;
+  onAsk?: (target: { context: "library"; noteId: string }) => void;
+  onNoteSelected?: (noteId: string | null) => void;
 }) {
   const [snapshot, setSnapshot] = useState<VaultTreeSnapshot | null>(null);
   const [proposals, setProposals] = useState<ProposalsSnapshot | null>(null);
@@ -318,6 +322,19 @@ export function LibraryScreen({
     return [...files, ...props];
   }, [snapshot, collapsed, proposalsOpen, pendingByBatch]);
 
+  // A selected vault file under notes/ is an askable note; its id is the file
+  // stem (note frontmatter ids match the filename).
+  const selectedNoteId = useMemo(() => {
+    if (selected?.kind !== "file") return null;
+    const match = /(?:^|[\\/])notes[\\/]([^\\/]+)\.md$/.exec(selected.path);
+    return match ? match[1] : null;
+  }, [selected]);
+
+  useEffect(() => {
+    onNoteSelected?.(selectedNoteId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedNoteId]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -351,6 +368,11 @@ export function LibraryScreen({
         beginEdit();
         return;
       }
+      if (event.key === "?" && !editing && selectedNoteId && onAsk) {
+        event.preventDefault();
+        onAsk({ context: "library", noteId: selectedNoteId });
+        return;
+      }
       if (editing) return;
       const index = navEntries.findIndex((entry) => sameSelection(entry, selected));
       if (["j", "ArrowDown"].includes(event.key)) {
@@ -364,7 +386,7 @@ export function LibraryScreen({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navEntries, selected, editing, canEditRaw, isMd, content, draft, saving, focusedProposal]);
+  }, [navEntries, selected, editing, canEditRaw, isMd, content, draft, saving, focusedProposal, selectedNoteId, onAsk]);
 
   const rootName = useMemo(() => {
     if (!snapshot) return "vault";
@@ -388,7 +410,14 @@ export function LibraryScreen({
         { key: "j/k", label: "Move" }
       ];
     }
-    if (isMd) return [{ key: "^s", label: dirty ? "Save ●" : "Save" }, { key: "j/k", label: "Move" }, { key: "n", label: "New note" }];
+    if (isMd) {
+      return [
+        { key: "^s", label: dirty ? "Save ●" : "Save" },
+        { key: "j/k", label: "Move" },
+        { key: "n", label: "New note" },
+        ...(selectedNoteId ? [{ key: "?", label: "ask tutor" }] : [])
+      ];
+    }
     if (editing) {
       return [
         { key: "^s", label: "Save" },

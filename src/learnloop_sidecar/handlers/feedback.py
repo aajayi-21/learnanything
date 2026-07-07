@@ -73,7 +73,7 @@ def trigger_regrade(ctx: SidecarContext, params: TriggerRegradeInput) -> dict[st
     attempt = repository.fetch_practice_attempt(params.attempt_id)
     if attempt is None:
         raise SidecarError("not_found", f"Attempt {params.attempt_id} not found.")
-    provider_name, runtime, client = ready_grading_provider(vault)
+    provider_name, runtime, client = ready_grading_provider(vault, override=ctx.grading_provider_override)
     if not runtime.ready:
         label = provider_label(provider_name)
         raise SidecarError("ai_unavailable", f"{label} is {runtime.status}; regrade requires an AI provider.")

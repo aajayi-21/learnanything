@@ -9,7 +9,9 @@ import type {
   RubricCriterionDto,
   SelfGradeErrorAttributionDto,
   SelfGradeInputDto,
-  SessionSnapshot
+  SessionSnapshot,
+  TeachBackStateDto,
+  TeachBackTurnDto
 } from "../api/dto";
 import { Card, EntityLink, KeyBar, Pill, SectionHeader } from "../components/ui";
 import { MarkdownMath } from "../render/MarkdownMath";
@@ -22,10 +24,13 @@ export function PracticeScreen({
   gradingProvider,
   restoredAnswer,
   restoredHints,
+  restoredTeachBack,
   onFeedback,
   onBack,
   onCheckpointCleared,
+  onTeachBackActive,
   onInspect,
+  onAsk,
   onError
 }: {
   session: SessionSnapshot;
@@ -34,10 +39,18 @@ export function PracticeScreen({
   gradingProvider: string;
   restoredAnswer?: string;
   restoredHints?: number;
+  restoredTeachBack?: TeachBackStateDto | null;
   onFeedback: (attemptId: string) => void;
   onBack: () => void;
   onCheckpointCleared: () => void;
+  onTeachBackActive: (active: boolean) => void;
   onInspect: (id: string) => void;
+  onAsk: (target: {
+    context: "practice";
+    practiceItemId: string;
+    sessionId: string;
+    openedAtMs: number;
+  }) => void;
   onError: (message: string) => void;
 }) {
   const [item, setItem] = useState<PracticeItemDetail | null>(null);
@@ -63,6 +76,34 @@ export function PracticeScreen({
     hintsUsed
   });
   const suppressDraftFlush = useRef(false);
+  const isTeachBack = item?.practiceMode === "teach_back";
+  // Teach-back conversations own the checkpoint (the sidecar stores the
+  // conversation envelope in current_answer); the plain draft flush must never
+  // overwrite it. Seeded from the restored checkpoint so a resumed conversation
+  // is safe even before the item detail loads.
+  const teachBackRef = useRef(Boolean(restoredTeachBack));
+  // Report the mode upward: App's command-palette ask path must refuse to open
+  // the tutor during a teach-back conversation. Until the item detail loads,
+  // fall back to the restored checkpoint (a resumed conversation is already
+  // teach-back). The cleanup resets the flag on unmount/item switch.
+  const teachBackActive = item ? item.practiceMode === "teach_back" : Boolean(restoredTeachBack);
+  useEffect(() => {
+    onTeachBackActive(teachBackActive);
+    return () => onTeachBackActive(false);
+  }, [teachBackActive, onTeachBackActive]);
+  // When this item was opened — the ask overlay reports secondsIntoAttempt
+  // from it (there is no other attempt timer on this screen).
+  const openedAtMs = useRef(Date.now());
+  useEffect(() => {
+    openedAtMs.current = Date.now();
+  }, [practiceItemId]);
+  const openAsk = () =>
+    onAsk({
+      context: "practice",
+      practiceItemId,
+      sessionId: session.sessionId,
+      openedAtMs: openedAtMs.current
+    });
   // The editor grows with its content but is capped so the answer card never
   // pushes the Submit button (or anything below the editor) off-screen — once it
   // hits the cap it scrolls internally instead. The cap is "viewport below the
@@ -94,7 +135,7 @@ export function PracticeScreen({
   }, [answer, hintsUsed, practiceItemId, session.sessionId]);
 
   const flushDraft = useCallback(async () => {
-    if (suppressDraftFlush.current) return;
+    if (suppressDraftFlush.current || teachBackRef.current) return;
     await api.savePracticeDraft(latestDraft.current);
   }, []);
 
@@ -110,6 +151,7 @@ export function PracticeScreen({
     api.getPracticeItem(practiceItemId)
       .then((detail) => {
         if (cancelled) return;
+        teachBackRef.current = detail.practiceMode === "teach_back";
         setItem(detail);
         setSelfGrade((current) => ({
           ...current,
@@ -159,17 +201,29 @@ export function PracticeScreen({
     const onKey = (event: KeyboardEvent) => {
       const ctrl = event.ctrlKey || event.metaKey;
       if (ctrl && event.key === "Enter") {
-        event.preventDefault();
-        void submit();
+        // Teach-back conversations handle ^enter themselves (send turn).
+        if (!isTeachBack) {
+          event.preventDefault();
+          void submit();
+        }
       } else if (ctrl && event.key.toLowerCase() === "h") {
         event.preventDefault();
-        revealHint();
+        if (!isTeachBack) revealHint();
       } else if (ctrl && event.key.toLowerCase() === "d") {
         event.preventDefault();
-        void dontKnow();
+        if (!isTeachBack) void dontKnow();
       } else if (ctrl && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void skip();
+      } else if (event.key === "?" && !ctrl && !isTypingTarget(event.target)) {
+        event.preventDefault();
+        if (isTeachBack) {
+          // No hints in teach-back: the tutor could leak what the naive
+          // student is probing for.
+          onError("ask-tutor is disabled during a teach-back conversation.");
+        } else {
+          openAsk();
+        }
       } else if (event.key === "Escape") {
         event.preventDefault();
         onBack();
@@ -304,6 +358,22 @@ export function PracticeScreen({
             {fallbackRequired ? <Pill tone="amber">self-grade required</Pill> : <Pill tone="green">{gradingProvider} grading</Pill>}
           </div>
           <div className="markdown"><MarkdownMath value={item.prompt} /></div>
+          {isTeachBack ? (
+            <TeachBackConversation
+              key={item.id}
+              session={session}
+              item={item}
+              restoredState={
+                restoredTeachBack && restoredTeachBack.practiceItemId === item.id ? restoredTeachBack : null
+              }
+              onFeedback={onFeedback}
+              onCheckpointCleared={onCheckpointCleared}
+              markSubmitted={() => {
+                suppressDraftFlush.current = true;
+              }}
+            />
+          ) : (
+          <>
           <div className="answer-editor-slot" ref={editorSlotRef}>
             <MathLiveEditor
               value={answer}
@@ -339,15 +409,238 @@ export function PracticeScreen({
               </button>
             </div>
           </div>
+          </>
+          )}
         </Card>
       </div>
-      <KeyBar keys={[
+      <KeyBar keys={isTeachBack ? [
+        { key: "^enter", label: "send" },
+        { key: "^s", label: "skip" },
+        { key: "esc", label: "today" }
+      ] : [
         { key: "^enter", label: "submit" },
         { key: "^h", label: "hint" },
         { key: "^d", label: "don't know" },
         { key: "^s", label: "skip" },
+        { key: "?", label: "ask tutor" },
         { key: "esc", label: "today" }
       ]} />
+    </div>
+  );
+}
+
+// ── Teach-back conversation ──────────────────────────────────────────────────
+// The learner teaches; the AI plays a curious naive student that never
+// confirms, corrects, or reveals. The transcript replaces the answer box and
+// the whole conversation is graded as one attempt when the question budget is
+// exhausted (or the learner finishes early). The sidecar owns the state via
+// the session checkpoint; `restoredState` rehydrates it after a restart.
+function TeachBackConversation({
+  session,
+  item,
+  restoredState,
+  onFeedback,
+  onCheckpointCleared,
+  markSubmitted
+}: {
+  session: SessionSnapshot;
+  item: PracticeItemDetail;
+  restoredState: TeachBackStateDto | null;
+  onFeedback: (attemptId: string) => void;
+  onCheckpointCleared: () => void;
+  markSubmitted: () => void;
+}) {
+  const [turns, setTurns] = useState<TeachBackTurnDto[]>(restoredState?.turns ?? []);
+  const [asked, setAsked] = useState(restoredState?.askedCount ?? 0);
+  const [budget, setBudget] = useState<number | null>(restoredState ? restoredState.planned.length : null);
+  const [input, setInput] = useState("");
+  const [pending, setPending] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [inlineError, setInlineError] = useState<string | null>(null);
+  const [startFailed, setStartFailed] = useState(false);
+  // Guards the mount-time start against a double mount (same idiom as
+  // startupStartedRef in App.tsx); the retry button bypasses it on purpose.
+  const startedRef = useRef(false);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
+
+  const lastRole = turns.length > 0 ? turns[turns.length - 1].role : null;
+  // Resume gap: the answer was checkpointed but the next question was never
+  // generated — "continue" works without new text, and anything typed is
+  // appended server-side to the pending learner turn.
+  const needsText = turns.length === 0 || lastRole === "ai";
+
+  const start = useCallback(() => {
+    setInlineError(null);
+    setStartFailed(false);
+    api
+      .startTeachBack({ sessionId: session.sessionId, practiceItemId: item.id })
+      .then((result) => {
+        // start is idempotent server-side and returns the authoritative
+        // conversation state (the in-progress one when checkpointed, empty
+        // otherwise). The locally restored snapshot can be stale — App only
+        // reads the checkpoint at startup — so the server's copy always wins.
+        setBudget(result.budget);
+        setTurns(result.state.turns);
+        setAsked(result.state.askedCount);
+      })
+      .catch((error) => {
+        const command = error as CommandError;
+        setStartFailed(true);
+        setInlineError(command.message);
+      });
+  }, [session.sessionId, item.id]);
+
+  useEffect(() => {
+    // Always sync with the server on mount; the restored snapshot (seeded into
+    // state above) only bridges the gap while the call is in flight or if it
+    // fails.
+    if (startedRef.current) return;
+    startedRef.current = true;
+    start();
+  }, [start]);
+
+  useEffect(() => {
+    const node = transcriptRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [turns.length, pending]);
+
+  async function send(finish = false) {
+    if (pending || startFailed) return;
+    const text = input.trim();
+    if (needsText && !text && !finish) return;
+    setPending(true);
+    setFinishing(finish);
+    setInlineError(null);
+    try {
+      const result = await api.submitTeachBackTurn({
+        sessionId: session.sessionId,
+        practiceItemId: item.id,
+        answerMd: text,
+        finish
+      });
+      if (result.done) {
+        markSubmitted();
+        onCheckpointCleared();
+        onFeedback(result.attemptId);
+      } else {
+        setTurns(result.state.turns);
+        setAsked(result.asked);
+        setBudget(result.budget);
+        setInput("");
+      }
+    } catch (error) {
+      setInlineError((error as CommandError).message);
+    } finally {
+      setPending(false);
+      setFinishing(false);
+    }
+  }
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        void send();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  const submitLabel =
+    turns.length === 0 ? "Start teaching" : lastRole === "learner" ? "Continue" : "Send answer";
+  const questionsAnswered = asked > 0 && lastRole === "learner";
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div className="queue-meta" style={{ alignItems: "center", gap: 8 }}>
+        <Pill tone="amber">teach-back</Pill>
+        {budget !== null ? (
+          <Pill>{asked > 0 ? `question ${Math.min(asked, budget)} of ${budget}` : `${budget} follow-up question${budget === 1 ? "" : "s"} planned`}</Pill>
+        ) : null}
+        <span style={{ opacity: 0.65, fontSize: 12 }}>
+          the AI plays a student — it will not confirm or correct
+        </span>
+      </div>
+
+      {/* transcript */}
+      <div
+        ref={transcriptRef}
+        style={{ maxHeight: "44vh", overflowY: "auto", margin: "10px 0", display: "flex", flexDirection: "column", gap: 10 }}
+      >
+        {turns.map((turn, index) => (
+          <div
+            key={`${index}-${turn.role}`}
+            style={
+              turn.role === "learner"
+                ? { alignSelf: "flex-end", maxWidth: "85%", border: "1px solid #7a5a2a", borderLeft: "3px solid #e3a063", background: "#1c1710", padding: "8px 12px" }
+                : { alignSelf: "flex-start", maxWidth: "85%", border: "1px solid #2a2a2a", borderLeft: "3px solid #3a3a3a", background: "#141414", padding: "8px 12px" }
+            }
+          >
+            <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>
+              {turn.role === "learner" ? (index === 0 ? "you · opening explanation" : "you") : "student"}
+            </div>
+            <div className="markdown" style={{ fontSize: 13, lineHeight: 1.6 }}>
+              <MarkdownMath value={turn.contentMd} />
+            </div>
+          </div>
+        ))}
+        {pending ? (
+          <div style={{ alignSelf: "flex-start", opacity: 0.6, fontSize: 12 }}>
+            {finishing || (budget !== null && asked >= budget && lastRole === "ai") ? "grading the conversation …" : "the student is thinking …"}
+          </div>
+        ) : null}
+      </div>
+
+      {inlineError ? (
+        <div className="hint-banner" style={{ borderColor: "#e07e7e" }}>
+          <Pill tone="red">error</Pill> {inlineError}
+          {startFailed ? (
+            <button type="button" className="queue-row" style={{ marginLeft: 10 }} onClick={start}>
+              retry
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* input */}
+      {!startFailed ? (
+        <>
+          <MathLiveEditor
+            value={input}
+            onChange={setInput}
+            disabled={pending}
+            placeholder={
+              turns.length === 0
+                ? "teach the concept in your own words — $math$ renders as you type"
+                : lastRole === "learner"
+                  ? "add to your previous answer (optional), then continue"
+                  : "answer the student's question"
+            }
+            maxHeight={220}
+            ariaLabel="teach-back answer"
+          />
+          <div className="queue-meta">{input.length} chars · {input.split(/\s+/).filter(Boolean).length} words</div>
+          <div className="form-row" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
+            <button className="queue-row focused" type="button" onClick={() => void send()} disabled={pending}>
+              <span className="queue-hotkey">^↵</span>
+              <span className="queue-title">{submitLabel}</span>
+              <span className="queue-score">{budget !== null ? `${asked}/${budget}` : ""}</span>
+            </button>
+            {questionsAnswered || turns.length > 0 ? (
+              <button
+                type="button"
+                className="queue-row"
+                onClick={() => void send(true)}
+                disabled={pending || turns.length === 0}
+                title="stop here and grade the conversation so far"
+              >
+                finish &amp; grade now
+              </button>
+            ) : null}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -513,6 +806,16 @@ function CriterionErrorPicker({
 
 // Keep only attributions whose criterion is still below full credit (or that
 // aren't tied to a criterion), so a restored score never ships a stale tag.
+// "?" must never fire while the learner is typing an answer: guard plain
+// inputs, textareas, the MathLive editor's <math-field>, and contenteditables.
+function isTypingTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  if (!element) return false;
+  const tag = element.tagName?.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "math-field") return true;
+  return Boolean(element.isContentEditable);
+}
+
 function prunedAttributions(item: PracticeItemDetail, grade: SelfGradeInputDto): SelfGradeErrorAttributionDto[] {
   const docked = new Set(
     (item.rubric?.criteria ?? [])

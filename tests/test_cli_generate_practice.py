@@ -503,7 +503,7 @@ def _configure_codex(vault_root, checkout, base_url: str) -> None:
     config_path = vault_root / "learnloop.toml"
     text = config_path.read_text(encoding="utf-8")
     text = text.replace('provider = "sdk"', 'provider = "http"')
-    text = text.replace('checkout_path = "../codex"', f'checkout_path = "{checkout.as_posix()}"')
+    text = text.replace('checkout_path = ""', f'checkout_path = "{checkout.as_posix()}"')
     text = text.replace('revision = "<pinned-commit>"', 'revision = "abc123"')
     text = text.replace('base_url = "http://127.0.0.1:8765"', f'base_url = "{base_url}"')
     config_path.write_text(text, encoding="utf-8")
@@ -558,3 +558,39 @@ class _ProposalServer:
                 self.wfile.write(raw)
 
         return Handler
+
+
+def test_generate_practice_dry_run_focus_concepts_filters_targets(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    _complete_probe(paths.sqlite_path)
+    runner = CliRunner()
+    v = ["--vault", str(vault_root), "--dry-run", "--json"]
+
+    matching = runner.invoke(
+        app, ["generate-practice", "--focus-concepts", "singular_value_decomposition", *v]
+    )
+    assert matching.exit_code == 0, matching.output
+    targets = json.loads(matching.output)["plan"]["targets"]
+    assert [target["learning_object_id"] for target in targets] == ["lo_svd_definition"]
+
+    non_matching = runner.invoke(app, ["generate-practice", "--focus-concepts", "other_concept", *v])
+    assert non_matching.exit_code == 0, non_matching.output
+    assert json.loads(non_matching.output)["plan"]["targets"] == []
+
+
+def test_generate_practice_from_goal_merges_concept_anchors(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    _complete_probe(paths.sqlite_path)
+    runner = CliRunner()
+    v = ["--vault", str(vault_root), "--dry-run", "--json"]
+
+    from_goal = runner.invoke(app, ["generate-practice", "--from-goal", "goal_linear_algebra_ml", *v])
+    assert from_goal.exit_code == 0, from_goal.output
+    targets = json.loads(from_goal.output)["plan"]["targets"]
+    assert [target["learning_object_id"] for target in targets] == ["lo_svd_definition"]
+
+    unknown = runner.invoke(app, ["generate-practice", "--from-goal", "goal_missing", *v])
+    assert unknown.exit_code == 1
+    assert json.loads(unknown.output)["error"] == "invalid_goal"

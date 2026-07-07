@@ -134,6 +134,7 @@ def ingest_canonical_source(
     retry_client: CodexClient | AIProviderClient | None = None,
     retry_model: str | None = None,
     retry_provider_revision: str | None = None,
+    purpose: str = "canonical_ingest",
     clock: Clock | None = None,
 ) -> IngestResult:
     vault = load_vault(root)
@@ -184,7 +185,7 @@ def ingest_canonical_source(
         resolved_kind,
         target_learning_object_ids,
     )
-    completed = repository.completed_agent_run_by_context("canonical_ingest", context_hash)
+    completed = repository.completed_agent_run_by_context(purpose, context_hash)
     if completed is not None:
         batch = repository.proposal_batch_for_agent_run(completed["id"])
         return _result_from_existing_batch(
@@ -201,7 +202,7 @@ def ingest_canonical_source(
     agent_run_id = repository.insert_agent_run(
         {
             "id": new_ulid(),
-            "purpose": "canonical_ingest",
+            "purpose": purpose,
             **provider_fields,
             "prompt_template": "canonical-ingestor",
             "prompt_version": CANONICAL_INGEST_PROMPT_VERSION,
@@ -245,7 +246,7 @@ def ingest_canonical_source(
             agent_run_id = repository.insert_agent_run(
                 {
                     "id": new_ulid(),
-                    "purpose": "canonical_ingest",
+                    "purpose": purpose,
                     **provider_fields,
                     "prompt_template": "canonical-ingestor",
                     "prompt_version": CANONICAL_INGEST_PROMPT_VERSION,
@@ -283,7 +284,7 @@ def ingest_canonical_source(
             {
                 "id": new_ulid(),
                 "agent_run_id": agent_run_id,
-                "purpose": "canonical_ingest",
+                "purpose": purpose,
                 "source_refs": proposal_payload["source_refs"],
                 "summary": merged.summary,
                 "created_at": now,

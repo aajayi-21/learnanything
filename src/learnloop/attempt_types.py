@@ -12,6 +12,8 @@ AttemptType: TypeAlias = Literal[
     "skip",
     "self_report",
     "open_text",
+    "exam_evidence",
+    "teach_back",
 ]
 
 SUPPORTED_ATTEMPT_TYPES: tuple[AttemptType, ...] = (
@@ -24,6 +26,14 @@ SUPPORTED_ATTEMPT_TYPES: tuple[AttemptType, ...] = (
     "skip",
     "self_report",
     "open_text",
+    # Imported per-question outcome from a past exam (exam seeding). Recorded
+    # through the deterministic attempt path with a backdated clock; heavily
+    # discounted because one exam is one correlated evidence event.
+    "exam_evidence",
+    # Teach-back conversation graded as one attempt: the learner explains, an
+    # AI naive student asks follow-ups, and the whole transcript is graded
+    # against the asked rubric criteria only (recording type).
+    "teach_back",
 )
 
 NON_RECORDING_ATTEMPT_TYPES: frozenset[AttemptType] = frozenset({"guided_walkthrough", "skip"})

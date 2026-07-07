@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 from math import log
 from typing import Any, Iterable, Mapping
 
+from learnloop.clock import Clock, parse_utc, utc_now_iso
 from learnloop.config import LearnLoopConfig
 from learnloop.db.repositories import FacetRecallState, FacetUncertaintyState, MasteryState, Repository
 from learnloop.services.mastery import display_mastery
@@ -253,10 +255,100 @@ def build_facet_uncertainty_updates(
     return updates, update_trace
 
 
+def facet_state_label(
+    facet_id: str,
+    uncertainty: FacetUncertaintyState | None,
+    recall: FacetRecallState | None,
+    min_evidence_mass: float,
+) -> str:
+    """Diagnostic bucket for one required facet.
+
+    Returns one of ``unexamined`` / ``uncertain`` / ``known_gap`` / ``solid``,
+    the same classification ``mastery_diagnostic_view`` renders. ``recall`` is
+    the aggregate (``practice_item_id is None``) facet recall state.
+    """
+
+    if uncertainty is not None:
+        top_label = max(uncertainty.hypothesis_marginal, key=uncertainty.hypothesis_marginal.get)
+        if uncertainty.status in {"open", "resolving"}:
+            return "uncertain"
+        if top_label != f"facet_solid:{facet_id}":
+            return "known_gap"
+        if recall is not None and recall.independent_evidence_mass > min_evidence_mass:
+            return "solid"
+        return "unexamined"
+    if recall is not None and recall.independent_evidence_mass > min_evidence_mass:
+        return "solid"
+    return "unexamined"
+
+
+# Tutor Q&A read-side uncertainty adjustment (design decision, see the tutor_qa
+# service): asking about a facet raises the *displayed* diagnostic uncertainty
+# instead of writing a facet_uncertainty row. question_events persist, so this
+# view is automatically replay-consistent — rebuilding derived state can never
+# disagree with it — and the mastery mean is untouched by construction. The
+# bump is bounded: at most _QUESTION_BUMP_MAX_COUNT recent unresolved questions
+# count, each adding config.tutor_qa.uncertainty_evidence_mass nats.
+_QUESTION_BUMP_WINDOW_DAYS = 7
+_QUESTION_BUMP_MAX_COUNT = 3
+
+
+def unresolved_question_facet_counts(
+    vault: LoadedVault,
+    repository: Repository,
+    learning_object_id: str,
+    *,
+    recall_states: Mapping[str, FacetRecallState] | None = None,
+    clock: Clock | None = None,
+) -> dict[str, int]:
+    """Recent unresolved tutor questions per facet for one LO.
+
+    A question is *unresolved* while no attempt evidence on that facet has
+    landed after it (aggregate recall's last_attempt_at). Question events map
+    to the LO through their practice item (practice/feedback contexts) or the
+    note's related_los (library context)."""
+
+    now = parse_utc(utc_now_iso(clock))
+    since = (now - timedelta(days=_QUESTION_BUMP_WINDOW_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if recall_states is None:
+        recall_states = {
+            state.facet_id: state
+            for state in repository.facet_recall_states(learning_object_id)
+            if state.practice_item_id is None
+        }
+    counts: dict[str, int] = {}
+    for event in repository.question_events(since=since):
+        item_id = event.get("practice_item_id")
+        note_id = event.get("note_id")
+        if item_id is not None:
+            item = vault.practice_items.get(item_id)
+            if item is None or item.learning_object_id != learning_object_id:
+                continue
+        elif note_id is not None:
+            note = vault.notes.get(note_id)
+            if note is None or learning_object_id not in note.related_los:
+                continue
+        else:
+            continue
+        for facet in event.get("facets", []):
+            facet_id = vault.canonical_facet_id(str(facet))
+            recall = recall_states.get(facet_id)
+            if (
+                recall is not None
+                and recall.last_attempt_at is not None
+                and recall.last_attempt_at > event["created_at"]
+            ):
+                continue  # answered by later attempt evidence: resolved
+            counts[facet_id] = counts.get(facet_id, 0) + 1
+    return counts
+
+
 def mastery_diagnostic_view(
     vault: LoadedVault,
     repository: Repository,
     learning_object_id: str,
+    *,
+    clock: Clock | None = None,
 ) -> dict[str, Any]:
     mastery = repository.mastery_state(learning_object_id)
     display = display_mastery(mastery) if mastery is not None else None
@@ -270,33 +362,47 @@ def mastery_diagnostic_view(
         for state in repository.facet_uncertainty_states(learning_object_id)
     }
     required = required_facets(vault, learning_object_id, repository)
+    question_counts: dict[str, int] = {}
+    if vault.config.tutor_qa.apply_uncertainty_effect:
+        question_counts = unresolved_question_facet_counts(
+            vault,
+            repository,
+            learning_object_id,
+            recall_states=recall_states,
+            clock=clock,
+        )
     facets: list[dict[str, Any]] = []
     min_mass = vault.config.recall_coverage.min_facet_evidence_mass
     for facet in sorted(required | set(uncertainty_states)):
         uncertainty = uncertainty_states.get(facet)
         recall = recall_states.get(facet)
-        state = "unexamined"
-        known_gap_label = None
-        if uncertainty is not None:
-            top_label = max(uncertainty.hypothesis_marginal, key=uncertainty.hypothesis_marginal.get)
-            if uncertainty.status in {"open", "resolving"}:
+        state = facet_state_label(facet, uncertainty, recall, min_mass)
+        known_gap_label = (
+            max(uncertainty.hypothesis_marginal, key=uncertainty.hypothesis_marginal.get)
+            if state == "known_gap" and uncertainty is not None
+            else None
+        )
+        question_count = question_counts.get(facet, 0)
+        question_bump = (
+            min(question_count, _QUESTION_BUMP_MAX_COUNT)
+            * vault.config.tutor_qa.uncertainty_evidence_mass
+        )
+        displayed_uncertainty = uncertainty.uncertainty if uncertainty is not None else None
+        if question_bump > 0:
+            displayed_uncertainty = (displayed_uncertainty or 0.0) + question_bump
+            # Asking about a facet the diagnostics call solid/unexamined marks
+            # it uncertain in the view; known gaps stay known gaps.
+            if state in {"solid", "unexamined"}:
                 state = "uncertain"
-            elif top_label != f"facet_solid:{facet}":
-                state = "known_gap"
-                known_gap_label = top_label
-            elif recall is not None and recall.independent_evidence_mass > min_mass:
-                state = "solid"
-            else:
-                state = "unexamined"
-        elif recall is not None and recall.independent_evidence_mass > min_mass:
-            state = "solid"
         facets.append(
             {
                 "facet_id": facet,
                 "state": state,
                 "known_gap": known_gap_label,
                 "independent_evidence_mass": recall.independent_evidence_mass if recall is not None else 0.0,
-                "uncertainty": uncertainty.uncertainty if uncertainty is not None else None,
+                "uncertainty": displayed_uncertainty,
+                "question_uncertainty_bump": question_bump,
+                "recent_question_count": question_count,
                 "hypothesis_marginal": uncertainty.hypothesis_marginal if uncertainty is not None else None,
             }
         )

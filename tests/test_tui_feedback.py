@@ -141,7 +141,7 @@ def _configure_codex(vault_root, checkout, base_url: str) -> None:
     config_path = vault_root / "learnloop.toml"
     text = config_path.read_text(encoding="utf-8")
     text = text.replace('provider = "sdk"', 'provider = "http"')
-    text = text.replace('checkout_path = "../codex"', f'checkout_path = "{checkout.as_posix()}"')
+    text = text.replace('checkout_path = ""', f'checkout_path = "{checkout.as_posix()}"')
     text = text.replace('revision = "<pinned-commit>"', 'revision = "abc123"')
     text = text.replace('base_url = "http://127.0.0.1:8765"', f'base_url = "{base_url}"')
     config_path.write_text(text, encoding="utf-8")

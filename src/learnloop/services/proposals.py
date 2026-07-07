@@ -45,6 +45,8 @@ def build_authoring_context(
     note_ids: list[str] | None = None,
     source_refs: list[dict] | None = None,
     instructions: str | None = None,
+    focus_concepts: list[str] | None = None,
+    focus_facets: list[str] | None = None,
 ) -> AuthoringContext:
     """Assemble a deterministic authoring context from selected vault sources.
 
@@ -112,6 +114,8 @@ def build_authoring_context(
         learning_objects=learning_objects,
         practice_items=practice_items,
         goals=goals,
+        focus_concepts=list(focus_concepts or []),
+        focus_facets=list(focus_facets or []),
     )
 
 
@@ -167,6 +171,8 @@ def authoring_context_hash(context: AuthoringContext) -> str:
         "learning_objects": context.learning_objects,
         "practice_items": context.practice_items,
         "goals": context.goals,
+        "focus_concepts": context.focus_concepts,
+        "focus_facets": context.focus_facets,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -227,6 +233,8 @@ def generate_authoring_proposal(
     note_ids: list[str] | None = None,
     source_refs: list[dict[str, Any]] | None = None,
     instructions: str | None = None,
+    focus_concepts: list[str] | None = None,
+    focus_facets: list[str] | None = None,
     model: str | None = None,
     codex_revision: str | None = None,
     merge_context_source_refs: bool = False,
@@ -246,6 +254,8 @@ def generate_authoring_proposal(
         note_ids=note_ids,
         source_refs=source_refs,
         instructions=instructions,
+        focus_concepts=focus_concepts,
+        focus_facets=focus_facets,
     )
     now = utc_now_iso(clock)
     provider_fields = _agent_provider_fields(codex_client, model=model, provider_revision=codex_revision)
@@ -927,7 +937,11 @@ def _validation_errors(
         )
     if item.operation == "create" and item.item_type == "practice_item":
         practice_mode = getattr(item.payload, "practice_mode", None)
-        if getattr(item.payload, "grading_rubric", None) is None and practice_mode not in vault.default_rubrics:
+        # teach_back items always carry their own two-tier rubric: the default-rubric
+        # fallback is not allowed for them.
+        if getattr(item.payload, "grading_rubric", None) is None and (
+            practice_mode == _TEACH_BACK_PRACTICE_MODE or practice_mode not in vault.default_rubrics
+        ):
             errors.append(f"missing_rubric:{practice_mode or 'unknown_practice_mode'}")
         payload = item.payload.model_dump(mode="json", exclude_none=True)
         errors.extend(_attempt_type_validation_errors(payload))
@@ -983,7 +997,9 @@ def _edited_payload_validation_errors(
         errors.extend(_required_create_payload_errors(item["item_type"], edited_payload, vault, None))
     if item["operation"] == "create" and item["item_type"] == "practice_item":
         practice_mode = edited_payload.get("practice_mode")
-        if edited_payload.get("grading_rubric") is None and practice_mode not in vault.default_rubrics:
+        if edited_payload.get("grading_rubric") is None and (
+            practice_mode == _TEACH_BACK_PRACTICE_MODE or practice_mode not in vault.default_rubrics
+        ):
             errors.append(f"missing_rubric:{practice_mode or 'unknown_practice_mode'}")
     if item["item_type"] == "practice_item":
         errors.extend(_attempt_type_validation_errors(edited_payload))
@@ -1067,6 +1083,12 @@ def _required_create_payload_errors(
     return errors
 
 
+# Kept as a local literal (matches services.teach_back.TEACH_BACK_PRACTICE_MODE)
+# so proposal validation stays import-light.
+_TEACH_BACK_PRACTICE_MODE = "teach_back"
+_RUBRIC_CRITERION_TIERS = {"core", "transfer"}
+
+
 def _missing(value: Any) -> bool:
     return value is None or value == "" or value == []
 
@@ -1105,6 +1127,46 @@ def _practice_item_metadata_errors(
             errors.append(f"unknown_criterion_facet_criterion:{criterion_id}")
         for facet in sorted(set(facet_weights) - set(evidence_facets)):
             errors.append(f"unknown_criterion_facet_facet:{facet}")
+    if payload.get("practice_mode") == _TEACH_BACK_PRACTICE_MODE:
+        errors.extend(_teach_back_rubric_errors(payload, evidence_facets, criterion_facet_weights))
+    return errors
+
+
+def _teach_back_rubric_errors(
+    payload: dict[str, Any],
+    evidence_facets: list[str],
+    criterion_facet_weights: dict[str, dict[str, float]],
+) -> list[str]:
+    """Structural checks for teach_back rubrics beyond the generic rubric rules.
+
+    Only asked criteria produce evidence at grade time, and follow-up planning
+    walks criterion_facet_weights per tier, so every criterion must be facet
+    mapped and every evidence facet must be reachable through a core-tier
+    criterion. The missing-rubric case itself is reported by the create-path
+    ``missing_rubric:teach_back`` error, not here.
+    """
+
+    rubric = payload.get("grading_rubric")
+    if not isinstance(rubric, dict):
+        return []
+    criteria = rubric.get("criteria")
+    if not isinstance(criteria, list):
+        return []
+    tier_by_criterion: dict[str, str] = {}
+    for criterion in criteria:
+        if not isinstance(criterion, dict) or not criterion.get("id"):
+            continue
+        tier_by_criterion[str(criterion["id"])] = str(criterion.get("tier") or "core")
+    errors: list[str] = []
+    for criterion_id in sorted(tier_by_criterion):
+        if not criterion_facet_weights.get(criterion_id):
+            errors.append(f"teach_back_unmapped_criterion:{criterion_id}")
+    core_facets: set[str] = set()
+    for criterion_id, facet_weights in criterion_facet_weights.items():
+        if tier_by_criterion.get(criterion_id) == "core":
+            core_facets.update(facet for facet, weight in facet_weights.items() if weight > 0)
+    for facet in sorted(set(evidence_facets) - core_facets):
+        errors.append(f"teach_back_missing_core_criterion:{facet}")
     return errors
 
 
@@ -1136,6 +1198,9 @@ def _practice_item_rubric_errors(payload: dict[str, Any]) -> list[str]:
                 continue
             if points <= 0 or points > 4:
                 errors.append(f"invalid_grading_rubric:criterion_points:{criterion.get('id') or 'unknown'}")
+            tier = criterion.get("tier")
+            if tier is not None and tier not in _RUBRIC_CRITERION_TIERS:
+                errors.append(f"invalid_grading_rubric:criterion_tier:{criterion.get('id') or 'unknown'}")
             total_points += max(points, 0.0)
     if criteria and total_points > max_points + 1e-6:
         errors.append("invalid_grading_rubric:criteria_points_exceed_max_points")

@@ -170,7 +170,7 @@ def _configure_codex(vault_root, checkout, base_url: str) -> None:
     config_path = vault_root / "learnloop.toml"
     text = config_path.read_text(encoding="utf-8")
     text = text.replace('provider = "sdk"', 'provider = "http"')
-    text = text.replace('checkout_path = "../codex"', f'checkout_path = "{checkout.as_posix()}"')
+    text = text.replace('checkout_path = ""', f'checkout_path = "{checkout.as_posix()}"')
     text = text.replace('revision = "<pinned-commit>"', 'revision = "abc123"')
     text = text.replace('base_url = "http://127.0.0.1:8765"', f'base_url = "{base_url}"')
     config_path.write_text(text, encoding="utf-8")
@@ -225,3 +225,41 @@ class _ProposalServer:
                 self.wfile.write(raw)
 
         return Handler
+
+
+def test_cli_propose_from_goal_rejects_unknown_goal(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["propose", "--context-stats", "--from-goal", "goal_missing", "--json", "--vault", str(vault_root)],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"] == "invalid_goal"
+
+
+def test_cli_propose_context_stats_accepts_goal_focus(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "propose",
+            "--context-stats",
+            "--from-goal",
+            "goal_linear_algebra_ml",
+            "--focus-facets",
+            "recall",
+            "--json",
+            "--vault",
+            str(vault_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["authoring_context"]["counts"]["goals"] == 1

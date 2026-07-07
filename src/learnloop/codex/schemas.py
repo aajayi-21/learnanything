@@ -60,6 +60,9 @@ class RubricCriterionPayload(BaseModel):
     id: str
     points: float = Field(gt=0.0, le=4.0)
     description: str
+    # Teach-back rubrics are two-tiered: "core" probes one evidence facet,
+    # "transfer" stress-tests solid knowledge (discounted evidence mass).
+    tier: Literal["core", "transfer"] = "core"
 
 
 class RubricFatalErrorPayload(BaseModel):
@@ -222,3 +225,29 @@ class GradingProposal(BaseModel):
     manual_review_recommended: bool = False
     feedback_md: str | None = None
     repair_suggestions: list[RepairSuggestion] = Field(default_factory=list)
+
+
+QuestionType = Literal["clarification", "prerequisite", "mechanism", "strategy", "verification", "other"]
+
+
+class TeachBackQuestion(BaseModel):
+    """One naive-student follow-up question in a teach-back conversation.
+
+    The persona never corrects, confirms, or reveals; the service supplies the
+    target criterion/facets in the context and stores the question as an AI
+    transcript turn.
+    """
+
+    question_md: str
+
+
+class TutorAnswer(BaseModel):
+    """Structured tutor Q&A output: the answer plus the question classification.
+
+    ``facets`` must be a subset of the candidate facets supplied in the
+    context; the service drops anything else before persisting.
+    """
+
+    answer_md: str
+    question_type: QuestionType = "other"
+    facets: list[str] = Field(default_factory=list)

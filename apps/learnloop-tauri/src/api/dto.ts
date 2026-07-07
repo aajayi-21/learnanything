@@ -10,7 +10,8 @@ export type AttemptType =
   | "reconstruction_after_walkthrough"
   | "skip"
   | "self_report"
-  | "open_text";
+  | "open_text"
+  | "teach_back";
 
 export type FsrsRating = "again" | "hard" | "good" | "easy";
 export type GradingSource = "codex" | "ai" | "self";
@@ -33,9 +34,77 @@ export interface RuntimeHealth {
     model: string | null;
     providerRevision: string | null;
     checkedAt: IsoTimestamp;
+    manualGrading?: boolean;
+    gradingProviderOverride?: string | null;
+    availableGradingProviders?: string[];
   };
   database: { ok: boolean; migrationsApplied: number; latestMigration: number };
   vaultLoaded: boolean;
+}
+
+export interface GradingProviderResult {
+  activeProvider: string;
+  manualGrading: boolean;
+  ready: boolean;
+  availableProviders: string[];
+}
+
+export interface FacetMasteryLearningObject {
+  id: string;
+  title: string;
+  state: string;
+  facetMastery: number;
+}
+
+export interface FacetMasteryPracticeItem {
+  id: string;
+  title: string;
+  learningObjectId: string;
+  weight: number | null;
+  difficulty: number | null;
+  isProbe: boolean;
+  queued: boolean;
+}
+
+export interface FacetMasteryFacet {
+  facetId: string;
+  mastery: number;
+  /** Mean per-LO diagnostic posterior entropy (nats) — the radar's variance band radius. */
+  uncertainty: number;
+  stateCounts: { solid: number; uncertain: number; knownGap: number; unexamined: number };
+  learningObjects: FacetMasteryLearningObject[];
+  practiceItems: FacetMasteryPracticeItem[];
+  /** Total tutor Q&A question events classified onto this facet. */
+  questionCount: number;
+}
+
+export interface FacetMasterySnapshot {
+  facets: FacetMasteryFacet[];
+  counts: { facets: number; learningObjects: number; practiceItems: number };
+}
+
+export interface KnowledgeMapPoint {
+  id: string;
+  title: string;
+  learningObjectId: string;
+  conceptId: string | null;
+  x: number;
+  y: number;
+  mastery: number | null;
+  variance: number | null;
+  predictedCorrect: number | null;
+  isProbe: boolean;
+  queued: boolean;
+  difficulty: number | null;
+  facets: string[];
+}
+
+export interface KnowledgeMapSnapshot {
+  version: number;
+  points: KnowledgeMapPoint[];
+  counts: { items: number; learningObjects: number; concepts: number; facets: number };
+  /** Kruskal stress-1 of the 2D embedding — how approximate the map is. */
+  stress: number;
 }
 
 export interface VaultSummary {
@@ -111,6 +180,8 @@ export interface SessionCheckpoint {
   pendingGradingProposal: unknown | null;
   readiness: Record<string, unknown> | null;
   updatedAt: IsoTimestamp;
+  /** Mid-conversation teach-back state, when the checkpoint holds one. */
+  teachBack?: TeachBackStateDto | null;
 }
 
 export interface QueueInput {
@@ -123,6 +194,7 @@ export interface QueueInput {
 export interface SchedulerComponents {
   forgettingRisk: number;
   activeGoal: number;
+  goalFrontier?: number;
   recentError: number;
   probeEig: number;
   negativeSurpriseFollowup?: number;
@@ -342,7 +414,146 @@ export interface FeedbackBundle {
   // Non-null when this attempt is itself a follow-up (drives the rating strip).
   followupSource?: FollowupSourceDto | null;
   followupRating?: FollowupRatingDto | null;
+  /** Tutor questions that counted as hints on this attempt. */
+  questionHintEquivalents?: number;
 }
+
+// ── Tutor Q&A ("ask") ──────────────────────────────────────────────────────
+
+export type TutorQuestionContext = "library" | "practice" | "feedback";
+
+export interface AskTutorQuestionInput {
+  context: TutorQuestionContext;
+  question: string;
+  practiceItemId?: string;
+  attemptId?: string;
+  noteId?: string;
+  sessionId?: string;
+  secondsIntoAttempt?: number;
+}
+
+export interface TutorAnswerDto {
+  version: number;
+  eventId: string;
+  answerMd: string;
+  questionType: string;
+  facets: string[];
+  hintEquivalent: boolean;
+  leakSuspected: boolean;
+  remaining: number;
+}
+
+export interface TutorQuestionEventDto {
+  id: string;
+  context: TutorQuestionContext;
+  noteId: string | null;
+  practiceItemId: string | null;
+  attemptId: string | null;
+  sessionId: string | null;
+  questionMd: string;
+  answerMd: string | null;
+  questionType: string | null;
+  facets: string[];
+  hintEquivalent: boolean;
+  leakSuspected: boolean;
+  rating: number | null;
+  secondsIntoAttempt: number | null;
+  provider: string | null;
+  createdAt: IsoTimestamp;
+}
+
+export interface TutorTranscriptInput {
+  context: TutorQuestionContext;
+  practiceItemId?: string;
+  attemptId?: string;
+  noteId?: string;
+  sessionId?: string;
+}
+
+export interface TutorTranscriptSnapshot {
+  version: number;
+  events: TutorQuestionEventDto[];
+  remaining: number;
+}
+
+export interface TutorSaveNoteResult {
+  version: number;
+  noteId: string | null;
+  path: string;
+}
+
+// ── Teach-back conversation ────────────────────────────────────────────────
+
+export type RubricTier = "core" | "transfer";
+
+export interface TeachBackPlannedDto {
+  criterionId: string;
+  tier: RubricTier;
+  facetTargets: string[];
+}
+
+export interface TeachBackTurnDto {
+  role: "learner" | "ai";
+  contentMd: string;
+  criterionId: string | null;
+}
+
+/** Camelized core TeachBackState — persisted verbatim in the session checkpoint. */
+export interface TeachBackStateDto {
+  version: number;
+  practiceItemId: string;
+  planned: TeachBackPlannedDto[];
+  turns: TeachBackTurnDto[];
+  askedCount: number;
+}
+
+export interface StartTeachBackInput {
+  sessionId: string;
+  practiceItemId: string;
+}
+
+export interface StartTeachBackResult {
+  version: number;
+  practiceItemId: string;
+  /** Teaching brief: the item prompt. */
+  prompt: string;
+  learningObjectTitle: string;
+  /** Planned number of follow-up questions (capped at config max). */
+  budget: number;
+  state: TeachBackStateDto;
+}
+
+export interface SubmitTeachBackTurnInput {
+  sessionId: string;
+  practiceItemId: string;
+  answerMd: string;
+  /** Grade the transcript now instead of asking further questions. */
+  finish?: boolean;
+  latencySeconds?: number | null;
+}
+
+export interface TeachBackQuestionResult {
+  version: number;
+  done: false;
+  questionMd: string;
+  criterionId: string;
+  tier: RubricTier;
+  facetTargets: string[];
+  questionNumber: number;
+  remaining: number;
+  asked: number;
+  budget: number;
+  state: TeachBackStateDto;
+}
+
+export type TeachBackFinishResult = AttemptResultDto & {
+  done: true;
+  transcriptMd: string;
+  askedCriterionIds: string[];
+  gradedCriterionIds: string[];
+};
+
+export type TeachBackTurnResult = TeachBackQuestionResult | TeachBackFinishResult;
 
 export interface FollowupSourceDto {
   gateAttemptId: string;
@@ -378,6 +589,8 @@ export interface CriterionEvidenceRowDto {
   evidence: string | null;
   notes: string | null;
   graderTier: number;
+  /** Rubric tier ("core" | "transfer"); shown as a pill when a rubric mixes tiers. */
+  tier?: RubricTier | null;
 }
 
 export interface ErrorEventDto {
@@ -475,12 +688,41 @@ export interface RepairSuggestionDto {
   practiceMode: string;
   learningObjectId: string | null;
   rationale: string;
+  targetEvidenceFamilies?: string[];
+}
+
+// Detail payload for `inspect_entity` on a practice attempt (sidecar
+// attempt_detail): the raw attempt row camelized, plus the full feedback bundle.
+export interface AttemptInspectorDetail {
+  version: number;
+  id: string;
+  practiceItemId: string;
+  learningObjectId: string;
+  subject: string | null;
+  concept: string | null;
+  practiceMode: string | null;
+  attemptType: string | null;
+  learnerAnswerMd: string | null;
+  rubricScore: number | null;
+  correctness: number | null;
+  confidence: string | number | null;
+  latencySeconds: number | null;
+  hintsUsed: number | null;
+  errorType: string | null;
+  graderConfidence: number | null;
+  manualReview: boolean | number | null;
+  manualReviewReason: string | null;
+  sessionId: string | null;
+  schedulerSlateId?: string | null;
+  schedulerCandidateId?: string | null;
+  createdAt: IsoTimestamp;
+  feedback: FeedbackBundle | null;
 }
 
 export type InspectorEntity =
   | { version: number; kind: "practice_item"; id: string; detail: PracticeItemDetail }
   | { version: number; kind: "learning_object"; id: string; detail: LearningObjectDetail }
-  | { version: number; kind: "attempt"; id: string; detail: unknown }
+  | { version: number; kind: "attempt"; id: string; detail: AttemptInspectorDetail }
   | { version: number; kind: "error_event"; id: string; detail: ErrorEventDto }
   | { version: number; kind: "not_found"; id: string; suggestions: InspectorSearchResult[] };
 

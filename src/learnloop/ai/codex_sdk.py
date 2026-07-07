@@ -10,7 +10,10 @@ def codex_config_from_ai_profile(profile: AIProviderConfig) -> CodexConfig:
     provider = "http" if profile.type in {"http", "http_adapter"} else "sdk"
     return CodexConfig(
         provider=provider,
-        checkout_path=profile.checkout_path or "../codex",
+        # Left blank when unset so the runtime check surfaces a clear
+        # "configure LEARNLOOP_CODEX_CHECKOUT_PATH" message instead of silently
+        # resolving a stale relative default.
+        checkout_path=profile.checkout_path or "",
         revision=profile.revision or "<pinned-commit>",
         startup_command=profile.startup_command or "",
         startup_timeout_seconds=profile.startup_timeout_seconds or 20,
@@ -27,6 +30,8 @@ def codex_config_from_ai_profile(profile: AIProviderConfig) -> CodexConfig:
         authoring_path=profile.authoring_path or "/authoring-proposal",
         canonical_ingest_path=profile.canonical_ingest_path or "/canonical-ingest",
         grading_path=profile.grading_path or "/grading-proposal",
+        tutor_qa_path=profile.tutor_qa_path or "/tutor-qa",
+        teach_back_path=profile.teach_back_path or "/teach-back",
     )
 
 

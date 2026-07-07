@@ -1,0 +1,57 @@
+# Default sensitivity sweep for `learnloop sim sweep`.
+#
+# Each entry re-runs the same seeded simulation with one config override on a
+# fresh vault copy and reports whether the parameter actually changed
+# scheduling decisions (queue order / follow-up counts / belief accuracy) in
+# this scenario. Values bracket the shipped defaults (see config.py).
+sweeps:
+  # Scheduler priority weights (defaults: forgetting 1.0, active_goal 0.35,
+  # goal_frontier 0.25, recent_error 0.50, probe_eig 0.25).
+  - param_path: scheduler.goal_frontier_weight
+    values: [0.0, 0.5, 1.0]
+  - param_path: scheduler.active_goal_weight
+    values: [0.0, 0.7]
+  - param_path: scheduler.recent_error_weight
+    values: [0.0, 1.5]
+  - param_path: scheduler.forgetting_risk_weight
+    values: [0.25, 2.0]
+  - param_path: scheduler.probe_eig_weight
+    values: [0.0, 1.0]
+
+  # Seeded exploration over near-tie candidates (default 0.1).
+  - param_path: scheduler.selection_exploration_rate
+    values: [0.0, 0.3]
+
+  # Follow-up gate (defaults: quantile 0.85, score threshold 0.5).
+  - param_path: scheduler.followup.tau_followup_quantile
+    values: [0.5, 0.95]
+  - param_path: scheduler.followup.gate_score_threshold
+    values: [0.25, 0.75]
+
+  # Surprise-driven FSRS interval modulation (default alpha_interval 0.3).
+  - param_path: scheduler.surprise.alpha_interval
+    values: [0.0, 0.6]
+
+  # Misconception auto-resolution (default 3 clean attempts).
+  - param_path: misconceptions.auto_resolve_clean_attempts
+    values: [1, 6]
+
+  # Evidence mass per attempt type (default independent_attempt 1.0).
+  - param_path: evidence.attempt_types.independent_attempt.evidence_mass
+    values: [0.5, 1.0]
+
+  # Teach-back evidence knobs (defaults: evidence_mass 0.8, transfer-tier
+  # evidence multiplier 0.5). Only move anything when the vault has
+  # practice_mode "teach_back" items.
+  - param_path: evidence.attempt_types.teach_back.evidence_mass
+    values: [0.4, 1.0]
+  - param_path: teach_back.transfer_evidence_multiplier
+    values: [0.25, 1.0]
+
+  # Facet evidence-mass floor for "examined" facets (default 0.5).
+  - param_path: recall_coverage.min_facet_evidence_mass
+    values: [0.25, 1.0]
+
+  # Mastery EKF observation noise (default 1.0).
+  - param_path: mastery.base_observation_variance
+    values: [0.5, 2.0]

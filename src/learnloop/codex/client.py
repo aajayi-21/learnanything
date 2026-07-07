@@ -17,8 +17,14 @@ from typing import Literal, Protocol
 from pydantic import BaseModel
 
 from learnloop.config import CodexConfig
-from learnloop.codex.prompts import AUTHORING_PROMPT_VERSION, CANONICAL_INGEST_PROMPT_VERSION, GRADING_PROMPT_VERSION
-from learnloop.codex.schemas import AuthoringProposal, GradingProposal
+from learnloop.codex.prompts import (
+    AUTHORING_PROMPT_VERSION,
+    CANONICAL_INGEST_PROMPT_VERSION,
+    GRADING_PROMPT_VERSION,
+    TEACH_BACK_PROMPT_VERSION,
+    TUTOR_QA_PROMPT_VERSION,
+)
+from learnloop.codex.schemas import AuthoringProposal, GradingProposal, TeachBackQuestion, TutorAnswer
 
 LOG = logging.getLogger(__name__)
 EVENT_FIELDS_ATTR = "event_fields"
@@ -39,6 +45,8 @@ class AuthoringContext:
     learning_objects: list[dict] = field(default_factory=list)
     practice_items: list[dict] = field(default_factory=list)
     goals: list[dict] = field(default_factory=list)
+    focus_concepts: list[str] = field(default_factory=list)
+    focus_facets: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -115,6 +123,57 @@ class GradingContext:
     error_taxonomy: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class TutorQAContext:
+    """Bounded input for one tutor Q&A turn.
+
+    ``context`` selects the guardrail profile (practice = Socratic, no answer
+    reveal or verification; feedback = full explanation grounded in the graded
+    attempt; library = explanatory, grounded in the note body).
+    ``candidate_facets`` is the closed facet vocabulary the classification may
+    map the question onto. ``thread`` is the prior Q&A turns in this context,
+    oldest first, as {question_md, answer_md, question_type} dicts.
+    """
+
+    context: str  # "library" | "practice" | "feedback"
+    question_md: str
+    candidate_facets: list[str] = field(default_factory=list)
+    thread: list[dict] = field(default_factory=list)
+    practice_item_prompt: str | None = None
+    expected_answer: str | None = None
+    rubric: dict | None = None
+    learner_answer_md: str | None = None
+    grading_feedback: dict | None = None
+    note_title: str | None = None
+    note_body: str | None = None
+    learning_object_summaries: list[dict] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TeachBackQuestionContext:
+    """Bounded input for one teach-back naive-student question.
+
+    The learner is teaching the practice item's concept; the AI plays a
+    curious naive student. ``criterion_id``/``criterion_description``/
+    ``facet_targets`` name the rubric criterion the next question must probe
+    (selected by the uncertainty-ranked follow-up plan). ``transcript`` is the
+    conversation so far, oldest first, as {role, content_md} dicts with role
+    "learner" or "ai" — the question must not re-ask what it already covers.
+    """
+
+    practice_item_id: str
+    practice_item_prompt: str
+    criterion_id: str
+    criterion_description: str
+    criterion_tier: str  # "core" | "transfer"
+    facet_targets: list[str] = field(default_factory=list)
+    transcript: list[dict] = field(default_factory=list)
+    question_number: int = 1
+    max_followups: int = 3
+    learning_object_title: str | None = None
+    learning_object_summary: str | None = None
+
+
 class CodexClient(Protocol):
     def run_authoring_proposal(self, context: AuthoringContext) -> AuthoringProposal:
         ...
@@ -123,6 +182,12 @@ class CodexClient(Protocol):
         ...
 
     def run_grading_proposal(self, context: GradingContext) -> GradingProposal:
+        ...
+
+    def run_tutor_qa(self, context: TutorQAContext) -> TutorAnswer:
+        ...
+
+    def run_teach_back_question(self, context: TeachBackQuestionContext) -> TeachBackQuestion:
         ...
 
 
@@ -168,6 +233,14 @@ class HttpCodexClient:
     def run_grading_proposal(self, context: GradingContext) -> GradingProposal:
         payload = self._post(self.config.grading_path, {"context": asdict(context)}, purpose="grading")
         return GradingProposal.model_validate(payload.get("proposal", payload))
+
+    def run_tutor_qa(self, context: TutorQAContext) -> TutorAnswer:
+        payload = self._post(self.config.tutor_qa_path, {"context": asdict(context)}, purpose="tutor_qa")
+        return TutorAnswer.model_validate(payload.get("proposal", payload))
+
+    def run_teach_back_question(self, context: TeachBackQuestionContext) -> TeachBackQuestion:
+        payload = self._post(self.config.teach_back_path, {"context": asdict(context)}, purpose="teach_back")
+        return TeachBackQuestion.model_validate(payload.get("proposal", payload))
 
     def _post(self, path: str, payload: dict, *, purpose: str) -> dict:
         url = _url(self.config.base_url, path)
@@ -304,6 +377,22 @@ class SdkCodexClient:
         )
         return GradingProposal.model_validate_json(text)
 
+    def run_tutor_qa(self, context: TutorQAContext) -> TutorAnswer:
+        text = self._run_structured(
+            _tutor_qa_prompt(context),
+            _codex_output_schema(TutorAnswer),
+            purpose="tutor_qa",
+        )
+        return TutorAnswer.model_validate_json(text)
+
+    def run_teach_back_question(self, context: TeachBackQuestionContext) -> TeachBackQuestion:
+        text = self._run_structured(
+            _teach_back_question_prompt(context),
+            _codex_output_schema(TeachBackQuestion),
+            purpose="teach_back",
+        )
+        return TeachBackQuestion.model_validate_json(text)
+
     def _run_structured(self, prompt: str, output_schema: dict[str, Any], *, purpose: str) -> str:
         _ensure_sdk_importable(self.sdk_python_path)
         try:
@@ -415,6 +504,11 @@ def _authoring_prompt(context: AuthoringContext) -> str:
                 "Create a LearnLoop AuthoringProposal for useful Learning Objects, "
                 "Practice Items, concept edges, or rubric updates. Persist nothing; "
                 "return only schema-valid JSON. "
+                "When context.focus_concepts is non-empty, concentrate the proposal "
+                "on those concept ids: prefer Learning Objects and Practice Items "
+                "that teach or assess them. When context.focus_facets is non-empty, "
+                "target those evidence facets in generated Practice Items "
+                "(evidence_facets/evidence_weights). "
                 + _DIFFICULTY_GUIDANCE
                 + " "
                 + _PRACTICE_METADATA_GUIDANCE
@@ -468,6 +562,91 @@ def _grading_prompt(context: GradingContext) -> str:
                 "Use the supplied `error_taxonomy.selection_policy` and "
                 "`error_taxonomy.targeting_policy` exactly."
             ),
+            "context": asdict(context),
+        },
+    )
+
+
+# Per-context tutor behavior. Practice guardrails are the load-bearing part:
+# mid-attempt the tutor must never hand over or verify the answer, or hint
+# dampening on the eventual attempt becomes meaningless.
+_TUTOR_QA_SHARED = (
+    "You are a LearnLoop tutor answering one learner question. Return a "
+    "TutorAnswer as schema-valid JSON only. Classify the question as exactly one "
+    "question_type: `clarification` (what the prompt/wording means), "
+    "`prerequisite` (background knowledge needed), `mechanism` (why/how "
+    "something works), `strategy` (how to approach the task), `verification` "
+    "(is my answer/approach right?), or `other`. Fill `facets` with the subset "
+    "of context.candidate_facets the question is genuinely about (empty when "
+    "none apply); never invent facet ids outside that list. Use "
+    "context.thread as prior conversation turns and stay consistent with them. "
+    "Write answer_md as concise Markdown (LaTeX math allowed)."
+)
+
+_TUTOR_QA_CONTEXT_TASKS = {
+    "practice": (
+        "Context: the learner is MID-ATTEMPT on the given practice item. Act as "
+        "a Socratic tutor. You MUST NOT state the answer, complete the "
+        "derivation, reveal the expected answer, or confirm or deny whether the "
+        "learner's current approach or partial answer is correct. If the "
+        "question asks for verification, deflect with a guiding question that "
+        "helps the learner check it themselves. Clarify wording, surface "
+        "prerequisites, and nudge strategy without giving away the solution."
+    ),
+    "feedback": (
+        "Context: the learner's attempt has already been graded. Full "
+        "explanation is allowed and encouraged: ground your answer in the "
+        "practice item, its rubric, the learner's answer, and the grading "
+        "feedback provided, explaining what went wrong or right and why."
+    ),
+    "library": (
+        "Context: the learner is reading a note. Answer explanatorily, "
+        "grounded in the note body and the related learning objects; connect "
+        "the answer back to the note's content."
+    ),
+}
+
+
+# Naive-student persona for teach-back. The load-bearing guardrails: the
+# student must never correct, confirm, deny, or reveal — otherwise the graded
+# transcript stops being independent learner evidence.
+_TEACH_BACK_TASK = (
+    "You are a curious NAIVE STUDENT being taught by the learner. The learner "
+    "just explained the concept to you (see context.transcript, oldest first). "
+    "Return a TeachBackQuestion as schema-valid JSON only. Ask exactly ONE "
+    "short follow-up question, in character, that probes the rubric criterion "
+    "described by context.criterion_description and its target facets "
+    "(context.facet_targets). You do not know the answer: you may feign "
+    "confusion, ask for a simpler explanation, an example, an edge case, or a "
+    "what-if — but you MUST NOT correct the learner, confirm or deny whether "
+    "anything they said is right, reveal any part of the answer, or introduce "
+    "facts they have not taught you. Condition on the transcript: do not ask "
+    "about something the learner's explanation or earlier answers already "
+    "clearly covered; probe the part of the criterion that is still untaught "
+    "or fuzzy. If context.criterion_tier is \"transfer\", push toward edge "
+    "cases, unusual applications, or transfer scenarios for the criterion. "
+    "Write question_md as one concise Markdown question (LaTeX math allowed)."
+)
+
+
+def _teach_back_question_prompt(context: TeachBackQuestionContext) -> str:
+    return _json_prompt(
+        "learnloop teach-back question",
+        TEACH_BACK_PROMPT_VERSION,
+        {
+            "task": _TEACH_BACK_TASK,
+            "context": asdict(context),
+        },
+    )
+
+
+def _tutor_qa_prompt(context: TutorQAContext) -> str:
+    task = _TUTOR_QA_CONTEXT_TASKS.get(context.context, _TUTOR_QA_CONTEXT_TASKS["library"])
+    return _json_prompt(
+        "learnloop tutor qa",
+        TUTOR_QA_PROMPT_VERSION,
+        {
+            "task": _TUTOR_QA_SHARED + " " + task,
             "context": asdict(context),
         },
     )

@@ -95,6 +95,103 @@ def resolve_coverage(
     )
 
 
+def scale_coverage_for_graded_criteria(
+    coverage: CoverageResult,
+    item: PracticeItem,
+    rubric: Rubric | None,
+    *,
+    criterion_points: Mapping[str, float],
+    transfer_evidence_multiplier: float = 1.0,
+) -> CoverageResult:
+    """Scale per-facet evidence mass by the graded (asked) criterion share.
+
+    Two effects, both symmetric (they scale the facet evidence *mass*, so
+    success and failure are discounted equally):
+
+    - Criteria absent from ``criterion_points`` were never assessed (teach_back
+      asks a subset of the rubric); the facet mass they would have certified is
+      removed. A facet reachable only through ungraded criteria drops out of
+      ``covered_facets`` entirely and contributes no evidence.
+    - Graded criteria with rubric ``tier == "transfer"`` contribute their facet
+      mass multiplied by ``transfer_evidence_multiplier`` (config, read at
+      apply time so replay reproduces it).
+
+    No-ops (bit-for-bit) when the rubric has no criteria, no criterion→facet
+    mapping exists, ``criterion_points`` is empty (no criterion information:
+    legacy behavior kept), or every criterion is graded and core-tier.
+    """
+
+    if rubric is None or not rubric.criteria or not criterion_points:
+        return coverage
+    mapping = criterion_facet_weights_for_item(item, rubric)
+    if not mapping:
+        return coverage
+    graded = set(criterion_points)
+    tiers = {criterion.id: getattr(criterion, "tier", "core") or "core" for criterion in rubric.criteria}
+    all_graded = graded >= set(tiers)
+    graded_has_transfer = any(tiers.get(criterion_id) == "transfer" for criterion_id in graded)
+    if all_graded and not graded_has_transfer:
+        return coverage
+
+    max_points = max(float(rubric.max_points), 1.0)
+    criteria = {criterion.id: criterion for criterion in rubric.criteria}
+    numerator: dict[str, float] = {}
+    denominator: dict[str, float] = {}
+    for criterion_id, raw_map in mapping.items():
+        criterion = criteria.get(criterion_id)
+        if criterion is None:
+            continue
+        weights = {
+            facet: max(0.0, float(weight))
+            for facet, weight in raw_map.items()
+            if facet in item.evidence_facets
+        }
+        total = sum(weights.values())
+        if total <= 0:
+            continue
+        criterion_weight = float(criterion.points) / max_points
+        multiplier = (
+            clamp(transfer_evidence_multiplier) if tiers.get(criterion_id) == "transfer" else 1.0
+        )
+        for facet, weight in weights.items():
+            share = weight / total
+            denominator[facet] = denominator.get(facet, 0.0) + criterion_weight * share
+            if criterion_id in graded:
+                numerator[facet] = numerator.get(facet, 0.0) + criterion_weight * share * multiplier
+
+    scales: dict[str, float] = {}
+    for facet in coverage.covered_facets:
+        den = denominator.get(facet, 0.0)
+        if den <= 0:
+            # Facet not reachable through any mapped criterion: no criterion
+            # information, keep legacy full mass.
+            scales[facet] = 1.0
+        else:
+            scales[facet] = max(0.0, numerator.get(facet, 0.0)) / den
+    scaled_covered = {
+        facet: round(mass * scales[facet], 12)
+        for facet, mass in coverage.covered_facets.items()
+        if mass * scales[facet] > 0
+    }
+    effective_coverage = clamp(sum(scaled_covered.values()))
+    trace = dict(coverage.trace)
+    trace["graded_criterion_scaling"] = {
+        "graded_criteria": sorted(graded),
+        "ungraded_criteria": sorted(set(tiers) - graded),
+        "transfer_evidence_multiplier": clamp(transfer_evidence_multiplier),
+        "facet_scales": {facet: scales[facet] for facet in sorted(scales)},
+    }
+    trace["covered_facets"] = scaled_covered
+    trace["effective_coverage"] = effective_coverage
+    return CoverageResult(
+        item_coverage=coverage.item_coverage,
+        effective_coverage=effective_coverage,
+        covered_facets=scaled_covered,
+        normalized_facet_weights=coverage.normalized_facet_weights,
+        trace=trace,
+    )
+
+
 def resolve_reliability(
     item: PracticeItem,
     *,
@@ -133,6 +230,12 @@ def derive_facet_outcomes(
     max_points = max(float(rubric.max_points), 1.0)
     attributed_failed_facets = _error_attributed_facets(error_attributions)
     criterion_facet_weights = criterion_facet_weights_for_item(item, rubric)
+    # Partial grading (teach_back asked-criteria-only; graders that omit a
+    # criterion): a criterion absent from criterion_points was never assessed,
+    # so it contributes nothing — it must not be scored as a zero-point
+    # failure. When criterion_points is empty we keep the legacy all-zero
+    # behavior (no criterion information at all).
+    graded_criteria = set(criterion_points) if criterion_points else set(criteria)
     outcomes: dict[str, float] = {}
     for facet in covered_facets:
         num = 0.0
@@ -140,6 +243,8 @@ def derive_facet_outcomes(
         for criterion_id, raw_map in criterion_facet_weights.items():
             criterion = criteria.get(criterion_id)
             if criterion is None:
+                continue
+            if criterion_id not in graded_criteria:
                 continue
             weights = {
                 mapped_facet: max(0.0, float(weight))

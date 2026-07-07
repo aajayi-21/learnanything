@@ -1,0 +1,9 @@
+# Workaround for a WebKitGTK crash on Wayland with newer Mesa:
+#   "Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display."
+# The DMA-BUF renderer path in WebKitGTK is unstable on recent Mesa/Wayland
+# stacks (seen on Mesa 26 / WebKitGTK 2.52). Disabling it forces a stable
+# rendering path. Harmless on macOS/Windows (WebKitGTK-only, ignored there).
+# Applied via cargo's [env], so it reaches the app process launched by
+# `tauri dev` (cargo run) and `cargo test`.
+[env]
+WEBKIT_DISABLE_DMABUF_RENDERER = "1"
