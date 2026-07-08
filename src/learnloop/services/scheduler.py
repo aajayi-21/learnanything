@@ -17,10 +17,11 @@ from learnloop.services.probes import (
     resolve_item_irt,
 )
 from learnloop.numeric import clamp
-from learnloop.services.facet_diagnostics import facet_state_label
+from learnloop.services.goal_projection import build_goal_frontier
+from learnloop.services.exam_pool import reserved_item_ids as reserved_exam_pool_item_ids
 from learnloop.services.recall_coverage import familiarity_discount, resolve_coverage
 from learnloop.services.selection_rewards import SchedulerIntent, score_selection_reward
-from learnloop.vault.models import ConceptEdge, Goal, LoadedVault, PracticeItem
+from learnloop.vault.models import LoadedVault, PracticeItem
 
 
 @dataclass(frozen=True)
@@ -55,10 +56,12 @@ def build_due_queue(
     session = session or SchedulerSession()
     config = vault.config
     item_states = repository.practice_item_states()
+    # Items reserved for a goal's held-out exam are quarantined from practice so
+    # the exam stays an honest, uncontaminated test (fetched once per build).
+    reserved_item_ids = reserved_exam_pool_item_ids(repository)
     mastery_states = repository.mastery_states()
     probe_states = repository.probe_states()
     errors_by_lo = _errors_by_learning_object(repository.active_error_events())
-    goal_reachable = _goal_reachable_concepts(vault.goals, vault.edges)
     short_session = (
         session.available_minutes is not None
         and session.available_minutes <= config.scheduler.short_session_minutes
@@ -71,10 +74,10 @@ def build_due_queue(
         learning_object_id: repository.facet_recall_states(learning_object_id)
         for learning_object_id in vault.learning_objects
     }
-    goal_frontier_by_lo = _goal_frontier_facets_by_lo(
+    frontier = build_goal_frontier(
         vault,
         repository,
-        goal_reachable,
+        clock=clock,
         item_states=item_states,
         facet_states_by_lo=facet_states_by_lo,
     )
@@ -85,6 +88,8 @@ def build_due_queue(
         state = item_states.get(item.id)
         if state is not None and not state.active:
             continue
+        if item.id in reserved_item_ids:
+            continue
         learning_object = vault.learning_object_for_item(item)
         if learning_object is None:
             continue
@@ -94,11 +99,10 @@ def build_due_queue(
         if (mastery is None or mastery.last_evidence_at is None) and not in_probe:
             continue
 
-        active_goal = _active_goal(learning_object.concept, vault.goals, goal_reachable)
+        frontier_entry = frontier.by_lo.get(learning_object.id)
         components: dict[str, float] = {
             "forgetting_risk": _forgetting_risk(state, now, fsrs_weights),
-            "active_goal": active_goal,
-            "goal_frontier": _goal_frontier(item, goal_frontier_by_lo.get(learning_object.id), active_goal),
+            "goal_frontier": _goal_frontier(vault, item, frontier_entry),
             "recent_error": _recent_error(errors_by_lo.get(learning_object.id, []), now),
             "probe_eig": 0.0,
         }
@@ -194,8 +198,13 @@ def build_due_queue(
     # policy, which is what off-policy estimation reweights by.
     propensity_by_id = _selection_propensities(queue, session, config)
     queue = _apply_seeded_exploration(queue, session, config, now)
-    queue = _insert_pending_followups(vault, queue, pending_followups, readiness_factor)
     queue = _enforce_teach_back_session_cap(queue, config.teach_back.session_cap)
+    # Goal-composition quota: guarantee a floor share of goal-frontier items in the
+    # ordered queue while a goal has at-risk facets. Applied before the limit slice
+    # so the floor holds even in short sessions, and before follow-up insertion
+    # (force-inserted follow-ups are a separate triggered decision).
+    queue = _apply_goal_quota(queue, frontier.quota_floor)
+    queue = _insert_pending_followups(vault, queue, pending_followups, readiness_factor)
     considered_queue = list(queue)
     if limit is not None:
         queue = queue[:limit]
@@ -259,7 +268,6 @@ def _insert_pending_followups(
                 priority=0.0,
                 components={
                     "forgetting_risk": 0.0,
-                    "active_goal": 0.0,
                     "goal_frontier": 0.0,
                     "recent_error": 0.0,
                     "probe_eig": 0.0,
@@ -369,7 +377,6 @@ def explain_practice_item(vault: LoadedVault, repository: Repository, practice_i
 def _priority(components: dict[str, float], config: LearnLoopConfig) -> float:
     return (
         config.scheduler.forgetting_risk_weight * components["forgetting_risk"]
-        + config.scheduler.active_goal_weight * components["active_goal"]
         + config.scheduler.goal_frontier_weight * components.get("goal_frontier", 0.0)
         + config.scheduler.recent_error_weight * components["recent_error"]
         + config.scheduler.probe_eig_weight * components["probe_eig"]
@@ -540,8 +547,10 @@ def _scheduler_config_snapshot(config: LearnLoopConfig) -> dict[str, object]:
     scheduler = config.scheduler
     return {
         "forgetting_risk_weight": scheduler.forgetting_risk_weight,
-        "active_goal_weight": scheduler.active_goal_weight,
         "goal_frontier_weight": scheduler.goal_frontier_weight,
+        "goal_quota_floor_min": scheduler.goal_quota_floor_min,
+        "goal_quota_floor_max": scheduler.goal_quota_floor_max,
+        "goal_quota_ramp_days": scheduler.goal_quota_ramp_days,
         "recent_error_weight": scheduler.recent_error_weight,
         "probe_eig_weight": scheduler.probe_eig_weight,
         "short_session_minutes": scheduler.short_session_minutes,
@@ -568,83 +577,63 @@ def _forgetting_risk(
     return 1 - forgetting_curve(state.stability, elapsed_days, weights)
 
 
-def _active_goal(concept_id: str, goals: list[Goal], reachable_by_goal: dict[str, set[str]]) -> float:
-    score = 0.0
-    for goal in goals:
-        if goal.status != "active":
-            continue
-        if concept_id in reachable_by_goal.get(goal.id, set()):
-            score = max(score, goal.priority)
-    return score
+def _goal_frontier(vault: LoadedVault, item: PracticeItem, entry) -> float:
+    """Fraction of the item's evidence facets on its LO's goal frontier, scaled by goal priority.
 
-
-def _goal_frontier_facets_by_lo(
-    vault: LoadedVault,
-    repository: Repository,
-    goal_reachable: dict[str, set[str]],
-    *,
-    item_states: dict[str, PracticeItemState],
-    facet_states_by_lo: dict[str, list],
-) -> dict[str, set[str]]:
-    """Facets still on the goal frontier, per goal-reachable learning object.
-
-    The frontier is the set of required facets (from active practice items)
-    whose diagnostic state is ``unexamined`` or ``known_gap`` — what an active
-    goal still needs surfaced or repaired. Computed once per queue build, only
-    for LOs whose concept is reachable from an active goal.
+    ``entry`` is the ``FrontierEntry`` for the item's LO (or ``None``). The frontier
+    now spans unexamined/known-gap facets AND solid facets projected to decay below
+    the goal's target_recall by its due date. The frontier's facet ids are canonical,
+    so item evidence facets are canonicalized before the overlap.
     """
 
-    reachable_concepts: set[str] = set()
-    for goal in vault.goals:
-        if goal.status != "active":
-            continue
-        reachable_concepts |= goal_reachable.get(goal.id, set())
-    if not reachable_concepts:
-        return {}
-    required_by_lo: dict[str, set[str]] = {}
-    for item in vault.practice_items.values():
-        state = item_states.get(item.id)
-        if state is not None and not state.active:
-            continue
-        required_by_lo.setdefault(item.learning_object_id, set()).update(
-            str(facet) for facet in item.evidence_facets
-        )
-    min_mass = vault.config.recall_coverage.min_facet_evidence_mass
-    frontier: dict[str, set[str]] = {}
-    for learning_object_id, learning_object in vault.learning_objects.items():
-        if learning_object.concept not in reachable_concepts:
-            continue
-        required = required_by_lo.get(learning_object_id, set())
-        uncertainty_states = {
-            state.facet_id: state
-            for state in repository.facet_uncertainty_states(learning_object_id)
-        }
-        recall_states = {
-            state.facet_id: state
-            for state in facet_states_by_lo.get(learning_object_id, [])
-            if state.practice_item_id is None
-        }
-        facets = {
-            facet
-            for facet in required | set(uncertainty_states)
-            if facet_state_label(facet, uncertainty_states.get(facet), recall_states.get(facet), min_mass)
-            in {"unexamined", "known_gap"}
-        }
-        if facets:
-            frontier[learning_object_id] = facets
-    return frontier
-
-
-def _goal_frontier(item: PracticeItem, frontier_facets: set[str] | None, goal_priority: float) -> float:
-    """Fraction of the item's evidence facets on its LO's goal frontier, scaled by goal priority."""
-
-    if not frontier_facets or goal_priority <= 0:
+    if entry is None or not entry.facets or entry.goal_priority <= 0:
         return 0.0
-    facets = [str(facet) for facet in item.evidence_facets]
+    facets = [vault.canonical_facet_id(str(facet)) for facet in item.evidence_facets]
     if not facets:
         return 0.0
-    overlap = sum(1 for facet in facets if facet in frontier_facets) / len(facets)
-    return goal_priority * overlap
+    overlap = sum(1 for facet in facets if facet in entry.facets) / len(facets)
+    return entry.goal_priority * overlap
+
+
+def _apply_goal_quota(queue: list[ScheduledItem], floor: float) -> list[ScheduledItem]:
+    """Reorder-only greedy quota guaranteeing a floor share of goal-frontier items.
+
+    Composition gating (not a score weight): walk output positions ``k = 1..n``
+    maintaining the running goal share; whenever it would fall below ``floor`` and a
+    goal item remains, pull the highest-ranked remaining goal item forward, else emit
+    the highest-ranked remaining item. Relative order is otherwise preserved (stable).
+    """
+
+    if floor <= 0:
+        return queue
+
+    def is_goal(item: ScheduledItem) -> bool:
+        return item.components.get("goal_frontier", 0.0) > 0
+
+    if not any(is_goal(item) for item in queue):
+        return queue
+
+    remaining = list(queue)
+    result: list[ScheduledItem] = []
+    goal_count = 0
+    reason = f"goal quota: pulled forward (floor {floor:.2f})"
+    while remaining:
+        k = len(result) + 1
+        if goal_count < floor * k and any(is_goal(item) for item in remaining):
+            index = next(i for i, item in enumerate(remaining) if is_goal(item))
+        else:
+            index = 0
+        chosen = remaining.pop(index)
+        if index > 0:
+            # Pulled ahead of higher-ranked non-goal items it would otherwise trail.
+            chosen = replace(
+                chosen,
+                plain_english=[reason] + [existing for existing in chosen.plain_english if existing != reason],
+            )
+        if is_goal(chosen):
+            goal_count += 1
+        result.append(chosen)
+    return result
 
 
 def _recent_error(errors: list[ActiveErrorEvent], now: datetime) -> float:
@@ -665,24 +654,10 @@ def _errors_by_learning_object(errors: list[ActiveErrorEvent]) -> dict[str, list
     return grouped
 
 
-def _goal_reachable_concepts(goals: list[Goal], edges: list[ConceptEdge]) -> dict[str, set[str]]:
-    allowed_relations = {"prerequisite", "part_of"}
-    reachable: dict[str, set[str]] = {}
-    for goal in goals:
-        concepts = set(goal.concept_anchors)
-        for edge in edges:
-            if edge.relation_type in allowed_relations and edge.source in goal.concept_anchors:
-                concepts.add(edge.target)
-        reachable[goal.id] = concepts
-    return reachable
-
-
 def _plain_english(item: PracticeItem, components: dict[str, float]) -> list[str]:
     reasons: list[str] = []
     if components["forgetting_risk"] > 0:
         reasons.append(f"forgetting risk {components['forgetting_risk']:.2f}")
-    if components["active_goal"] > 0:
-        reasons.append(f"active goal weight {components['active_goal']:.2f}")
     if components.get("goal_frontier", 0.0) > 0:
         reasons.append(f"goal frontier weight {components['goal_frontier']:.2f}")
     if components["recent_error"] > 0:

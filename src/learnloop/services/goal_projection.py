@@ -1,0 +1,339 @@
+"""Forward projection of facet recall against a goal's due date.
+
+Goals commit to a ``target_recall`` over a facet set by a ``due_at`` (or, for
+open-ended goals, the default projection horizon). Deciding whether a facet is
+*on track* requires projecting its recall forward to that horizon.
+
+Facet recall states are beta distributions with **no time decay** (the mean is
+evidence, not a memory trace). The forgetting information lives on FSRS per
+*practice item* (``stability`` + ``last_attempt_at``). So a facet-level forward
+projection must be derived from the FSRS states of the items that carry
+evidence for that facet.
+
+MVP approximation (documented deliberately, so a later model can replace it):
+
+  * ``current_recall`` is the aggregate facet recall mean.
+  * For each active supporting item (an active practice item whose evidence
+    weight for the facet is > 0) that has an FSRS ``stability`` and a parseable
+    ``last_attempt_at``, we form a *retention ratio* — the FSRS forgetting
+    curve at the horizon divided by the curve at ``now`` — and take the
+    evidence-weighted mean across items. ``projected_recall`` is
+    ``current_recall`` scaled by that mean.
+  * When no supporting item carries decay information, ``projected_recall`` is
+    just ``current_recall``. This is *no decay information*, which is not the
+    same as *no decay* — we simply cannot do better without an FSRS state, so we
+    hold recall flat rather than inventing a curve.
+  * When there is no aggregate recall state at all, both ``current_recall`` and
+    ``projected_recall`` are ``None``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+from learnloop.clock import Clock, SystemClock, parse_utc
+from learnloop.db.repositories import FacetRecallState, PracticeItemState, Repository
+from learnloop.numeric import clamp
+from learnloop.services.facet_diagnostics import facet_state_label, required_facets
+from learnloop.services.fitted_params import resolve_fsrs_weights
+from learnloop.services.fsrs import forgetting_curve
+from learnloop.vault.models import Goal, LoadedVault
+
+
+@dataclass(frozen=True)
+class FacetProjection:
+    learning_object_id: str
+    facet_id: str
+    label: str                      # unexamined | uncertain | known_gap | solid
+    current_recall: float | None    # aggregate recall_mean; None when no aggregate state
+    projected_recall: float | None  # forward-projected to the horizon; None when no aggregate state
+    on_track: bool
+
+
+@dataclass(frozen=True)
+class GoalReport:
+    goal_id: str
+    target_recall: float
+    due_at: datetime | None
+    horizon: datetime
+    facets: list[FacetProjection]
+
+    @property
+    def on_track_count(self) -> int:
+        return sum(1 for facet in self.facets if facet.on_track)
+
+    @property
+    def total(self) -> int:
+        return len(self.facets)
+
+
+@dataclass(frozen=True)
+class FrontierEntry:
+    facets: set[str]        # facet ids not on track for some active goal, for this LO
+    goal_priority: float    # max priority among contributing active goals
+
+
+@dataclass(frozen=True)
+class GoalFrontier:
+    by_lo: dict[str, FrontierEntry]
+    active_goal_ids: list[str]   # active goals with a non-empty frontier
+    quota_floor: float           # resolved queue-composition floor; 0.0 when no active goal has frontier
+
+
+def resolve_goal_scope(
+    vault: LoadedVault,
+    goal: Goal,
+    repository: Repository,
+) -> dict[str, set[str]]:
+    """``lo_id -> set of canonical facet ids`` in the goal's scope.
+
+    An active LO whose concept is in ``goal.facet_scope.concepts`` contributes
+    all of its (canonicalized) required facets. Each explicit facet id in
+    ``goal.facet_scope.facets`` is additionally attached to any active LO whose
+    required facets already contain it. LOs that end up with no facets are
+    omitted.
+    """
+
+    concept_scope = set(goal.facet_scope.concepts)
+    explicit_facets = {vault.canonical_facet_id(str(facet)) for facet in goal.facet_scope.facets}
+    scope: dict[str, set[str]] = {}
+    for learning_object_id, learning_object in vault.learning_objects.items():
+        if learning_object.status != "active":
+            continue
+        required = {
+            vault.canonical_facet_id(str(facet))
+            for facet in required_facets(vault, learning_object_id, repository)
+        }
+        if not required:
+            continue
+        facets: set[str] = set()
+        if learning_object.concept in concept_scope:
+            facets |= required
+        facets |= explicit_facets & required
+        if facets:
+            scope[learning_object_id] = facets
+    return scope
+
+
+def _supporting_weight(vault: LoadedVault, item, facet_id: str) -> float:
+    """The item's evidence weight for ``facet_id`` (0.0 when not a support)."""
+
+    if item.evidence_weights:
+        weights = {
+            vault.canonical_facet_id(str(facet)): float(weight)
+            for facet, weight in item.evidence_weights.items()
+        }
+    else:
+        weights = {vault.canonical_facet_id(str(facet)): 1.0 for facet in item.evidence_facets}
+    return max(weights.get(facet_id, 0.0), 0.0)
+
+
+def _project_recall(
+    vault: LoadedVault,
+    learning_object_id: str,
+    facet_id: str,
+    current_recall: float | None,
+    *,
+    now: datetime,
+    horizon: datetime,
+    item_states: dict[str, PracticeItemState],
+    fsrs_weights: tuple[float, ...],
+) -> float | None:
+    if current_recall is None:
+        return None
+    numerator = 0.0
+    weight_total = 0.0
+    for item in vault.practice_items.values():
+        if item.learning_object_id != learning_object_id:
+            continue
+        state = item_states.get(item.id)
+        if state is not None and not state.active:
+            continue
+        weight = _supporting_weight(vault, item, facet_id)
+        if weight <= 0.0:
+            continue
+        if state is None or state.stability is None:
+            continue
+        last_attempt = parse_utc(state.last_attempt_at)
+        if last_attempt is None:
+            continue
+        horizon_days = (horizon - last_attempt).total_seconds() / 86400
+        now_days = (now - last_attempt).total_seconds() / 86400
+        baseline = max(forgetting_curve(state.stability, now_days, fsrs_weights), 1e-6)
+        retention_ratio = clamp(forgetting_curve(state.stability, horizon_days, fsrs_weights) / baseline)
+        numerator += weight * retention_ratio
+        weight_total += weight
+    if weight_total <= 0.0:
+        # No decay information (not the same as no decay): hold recall flat.
+        return current_recall
+    return current_recall * (numerator / weight_total)
+
+
+def _facet_projections(
+    vault: LoadedVault,
+    repository: Repository,
+    goal: Goal,
+    *,
+    now: datetime,
+    horizon: datetime,
+    item_states: dict[str, PracticeItemState],
+    facet_states_by_lo: dict[str, list[FacetRecallState]],
+    fsrs_weights: tuple[float, ...],
+) -> list[FacetProjection]:
+    scope = resolve_goal_scope(vault, goal, repository)
+    min_mass = vault.config.recall_coverage.min_facet_evidence_mass
+    projections: list[FacetProjection] = []
+    for learning_object_id in sorted(scope):
+        recall_by_facet = {
+            state.facet_id: state
+            for state in facet_states_by_lo.get(learning_object_id, [])
+            if state.practice_item_id is None
+        }
+        uncertainty_by_facet = {
+            state.facet_id: state
+            for state in repository.facet_uncertainty_states(learning_object_id)
+        }
+        for facet_id in sorted(scope[learning_object_id]):
+            recall_state = recall_by_facet.get(facet_id)
+            uncertainty_state = uncertainty_by_facet.get(facet_id)
+            label = facet_state_label(facet_id, uncertainty_state, recall_state, min_mass)
+            current_recall = recall_state.recall_mean if recall_state is not None else None
+            projected_recall = _project_recall(
+                vault,
+                learning_object_id,
+                facet_id,
+                current_recall,
+                now=now,
+                horizon=horizon,
+                item_states=item_states,
+                fsrs_weights=fsrs_weights,
+            )
+            on_track = (
+                label == "solid"
+                and projected_recall is not None
+                and projected_recall >= goal.target_recall
+            )
+            projections.append(
+                FacetProjection(
+                    learning_object_id=learning_object_id,
+                    facet_id=facet_id,
+                    label=label,
+                    current_recall=current_recall,
+                    projected_recall=projected_recall,
+                    on_track=on_track,
+                )
+            )
+    return projections
+
+
+def _horizon(vault: LoadedVault, goal: Goal, now: datetime) -> tuple[datetime | None, datetime]:
+    due_at = parse_utc(goal.due_at)
+    if due_at is not None:
+        return due_at, due_at
+    horizon = now + timedelta(days=vault.config.goals.default_projection_horizon_days)
+    return None, horizon
+
+
+def goal_report(
+    vault: LoadedVault,
+    repository: Repository,
+    goal: Goal,
+    *,
+    clock: Clock | None = None,
+) -> GoalReport:
+    now = (clock or SystemClock()).now().astimezone(UTC)
+    due_at, horizon = _horizon(vault, goal, now)
+    item_states = repository.practice_item_states()
+    facet_states_by_lo = {
+        learning_object_id: repository.facet_recall_states(learning_object_id)
+        for learning_object_id in vault.learning_objects
+    }
+    fsrs_weights = resolve_fsrs_weights(repository)
+    facets = _facet_projections(
+        vault,
+        repository,
+        goal,
+        now=now,
+        horizon=horizon,
+        item_states=item_states,
+        facet_states_by_lo=facet_states_by_lo,
+        fsrs_weights=fsrs_weights,
+    )
+    return GoalReport(
+        goal_id=goal.id,
+        target_recall=goal.target_recall,
+        due_at=due_at,
+        horizon=horizon,
+        facets=facets,
+    )
+
+
+def _quota_floor_for_goal(goal: Goal, config, now: datetime) -> float:
+    scheduler = config.scheduler
+    floor_min = scheduler.goal_quota_floor_min
+    floor_max = scheduler.goal_quota_floor_max
+    ramp_days = scheduler.goal_quota_ramp_days
+    due_at = parse_utc(goal.due_at)
+    if due_at is None:
+        return floor_min
+    remaining_days = (due_at - now).total_seconds() / 86400
+    if remaining_days <= 0:
+        return floor_max
+    ramp = clamp((ramp_days - remaining_days) / ramp_days) if ramp_days else 1.0
+    return floor_min + (floor_max - floor_min) * ramp
+
+
+def build_goal_frontier(
+    vault: LoadedVault,
+    repository: Repository,
+    *,
+    clock: Clock | None = None,
+    item_states: dict[str, PracticeItemState] | None = None,
+    facet_states_by_lo: dict[str, list[FacetRecallState]] | None = None,
+) -> GoalFrontier:
+    now = (clock or SystemClock()).now().astimezone(UTC)
+    if item_states is None:
+        item_states = repository.practice_item_states()
+    if facet_states_by_lo is None:
+        facet_states_by_lo = {
+            learning_object_id: repository.facet_recall_states(learning_object_id)
+            for learning_object_id in vault.learning_objects
+        }
+    fsrs_weights = resolve_fsrs_weights(repository)
+
+    by_lo: dict[str, FrontierEntry] = {}
+    active_goal_ids: list[str] = []
+    quota_floor = 0.0
+    for goal in vault.goals:
+        if goal.status != "active":
+            continue
+        _, horizon = _horizon(vault, goal, now)
+        projections = _facet_projections(
+            vault,
+            repository,
+            goal,
+            now=now,
+            horizon=horizon,
+            item_states=item_states,
+            facet_states_by_lo=facet_states_by_lo,
+            fsrs_weights=fsrs_weights,
+        )
+        at_risk = [projection for projection in projections if not projection.on_track]
+        if not at_risk:
+            continue
+        active_goal_ids.append(goal.id)
+        quota_floor = max(quota_floor, _quota_floor_for_goal(goal, vault.config, now))
+        for projection in at_risk:
+            existing = by_lo.get(projection.learning_object_id)
+            if existing is None:
+                by_lo[projection.learning_object_id] = FrontierEntry(
+                    facets={projection.facet_id},
+                    goal_priority=goal.priority,
+                )
+            else:
+                by_lo[projection.learning_object_id] = FrontierEntry(
+                    facets=existing.facets | {projection.facet_id},
+                    goal_priority=max(existing.goal_priority, goal.priority),
+                )
+    return GoalFrontier(by_lo=by_lo, active_goal_ids=active_goal_ids, quota_floor=quota_floor)

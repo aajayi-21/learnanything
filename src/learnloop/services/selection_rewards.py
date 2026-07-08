@@ -163,7 +163,9 @@ def score_selection_reward(
             0.70 * float(probe_eig_debug["normalized_total"])
             + 0.10 * clamp(ability.lo_mastery_variance)
             + 0.10 * _facet_uncertainty(ability, demand)
-            + 0.10 * clamp(base_components.get("active_goal", 0.0))
+            # Goal frontier now spans unexamined/known-gap AND solid-but-projected-
+            # to-decay-below-target-by-due-date facets.
+            + 0.10 * clamp(base_components.get("goal_frontier", 0.0))
             - duplicate_probe_penalty
         )
         if is_teach_back:
@@ -187,7 +189,9 @@ def score_selection_reward(
     else:
         reward = (
             0.20 * clamp(base_components.get("forgetting_risk", 0.0))
-            + 0.15 * clamp(base_components.get("active_goal", 0.0))
+            # Goal frontier now spans unexamined/known-gap AND solid-but-projected-
+            # to-decay-below-target-by-due-date facets.
+            + 0.15 * clamp(base_components.get("goal_frontier", 0.0))
             + 0.20 * facet_weakness
             + 0.20 * gradient_fit
             + 0.15 * targeted_boundary_fit

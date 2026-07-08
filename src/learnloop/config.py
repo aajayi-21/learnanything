@@ -4,6 +4,7 @@ import os
 import re
 import tomllib
 from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -14,7 +15,7 @@ DEFAULT_CONFIG_TEXT = """schema_version = 1
 sqlite_path = "state.sqlite"
 
 [algorithms]
-algorithm_version = "mvp-0.4"
+algorithm_version = "mvp-0.5"
 
 # Single source of truth for per-attempt-type evidence (Fable's-take item 3).
 # evidence_mass weights ability-belief updates (mastery EKF / reliability);
@@ -34,6 +35,10 @@ self_report = { evidence_mass = 0.3 }
 # Imported past-exam outcome: one exam is one correlated evidence event, so
 # each seeded question carries a fraction of a live independent attempt.
 exam_evidence = { evidence_mass = 0.35 }
+# Held-out practice-exam answer on a fresh, never-practiced item: a proctored
+# fresh-item answer is the highest-quality evidence in the system, so it carries
+# full evidence mass (deliberately unlike the discounted `exam_evidence` import).
+exam_attempt = { evidence_mass = 1.0 }
 # Teach-back conversation graded as one attempt: high-quality generative
 # evidence, but the opening explanation and follow-up answers are one
 # correlated multi-question event, so it carries less than a full independent
@@ -57,12 +62,17 @@ self_report = 0.25
 
 [scheduler]
 forgetting_risk_weight = 1.0
-active_goal_weight = 0.35
-# Goal facet frontier: fraction of an item's evidence facets that are
-# unexamined/known_gap on a goal-reachable LO, scaled by goal priority.
+# Goal facet frontier: fraction of an item's evidence facets not yet on track
+# for an active goal (unexamined/known_gap or projected below target_recall
+# at the goal's due date), scaled by goal priority.
 goal_frontier_weight = 0.25
 recent_error_weight = 0.50
 probe_eig_weight = 0.25
+# Goal quota: guaranteed floor share of the queue overlapping the goal
+# frontier; ramps min -> max over the last ramp_days before due_at.
+goal_quota_floor_min = 0.30
+goal_quota_floor_max = 0.70
+goal_quota_ramp_days = 28
 short_session_minutes = 20
 # Seeded exploration over near-tie candidates so logged slates carry non-degenerate
 # selection propensities (off-policy learnability). See architecture_pivot.md Stage 0.
@@ -96,6 +106,17 @@ gate_subscore_steepness = 12.0
 # Predictive facet EIG (logged-but-inert at weight 0.0; see services/predictive_eig.py).
 predictive_eig_weight = 0.0
 predictive_eig_target_cap = 4
+# Misconception discrimination gate (spec_misconception_diagnostics.md §4.1).
+# tau_discrimination_power is the Youden-J lower bound a diagnostic candidate
+# must clear against an active misconception; require_misconception_discrimination
+# routes to no_suitable_item rather than queueing a non-discriminating paraphrase.
+tau_discrimination_power = 0.3
+require_misconception_discrimination = true
+
+# Goal projection: open-ended goals (no due_at) project facet recall at a
+# fixed horizon so the frontier stays defined.
+[goals]
+default_projection_horizon_days = 30
 
 # Automatic misconception resolution ("close the loop"): an active error event
 # is resolved once the learning object accumulates N clean attempts after the
@@ -104,6 +125,20 @@ predictive_eig_target_cap = 4
 [misconceptions]
 auto_resolve_clean_attempts = 3
 auto_resolve_min_correctness = 0.85
+# Registry-based resolution and the sim discrimination gate
+# (spec_misconception_diagnostics.md §6, §7). Parsed now; consumed in later phases.
+tau_misconception_resolved = 0.15
+sim_gate_min_sensitivity_lb = 0.7
+sim_gate_min_specificity_lb = 0.8
+# 8, not 5: a perfect run over N trials has lower bound 0.25^(1/(N+1)) at the
+# 25th percentile — 0.794 at N=5 (below the 0.8 specificity gate), 0.857 at N=8.
+sim_gate_trials = 8
+# Opt-in codex answers-under-belief pass for the gate. 0 = pure deterministic
+# (no provider tokens). When > 0, codex role-plays that many planted + clean
+# students in ONE call per gate run and their fires combine with the
+# deterministic trials. Costs provider tokens per accepted item; the same N>=8
+# caveat applies (0.25^(1/(N+1)) at the 25th percentile) to the COMBINED counts.
+sim_gate_llm_trials = 0
 
 # Offline parameter fitting from the learner's own logs (`learnloop fit`).
 # Fitted sets live in the fitted_parameters table; defaults apply when none is active.
@@ -202,6 +237,28 @@ min_content_chars = 400
 default_goal_priority = 0.5
 allow_auto_captions = false
 
+# PDF extraction for canonical sources (textbook chapters, past exams, any
+# ingested .pdf). engine "auto" uses marker-pdf (structured Markdown with
+# headings, tables, LaTeX math, and OCR for scanned pages) when installed
+# (`pip install learnloop[pdf]`), falling back to plain pypdf text extraction.
+# use_llm adds marker's VLM boost for difficult scans and dense math: hard
+# regions are sent to an OpenAI-compatible endpoint -- e.g. a local vLLM
+# serving deepseek-ai/DeepSeek-OCR (llm_base_url = "http://127.0.0.1:8000/v1",
+# llm_model = "deepseek-ai/DeepSeek-OCR") or any hosted vision model. The API
+# key is read from the env var named by llm_api_key_env. Marker conversions
+# are cached under .learnloop/source-cache/pdf/ keyed by file bytes + config.
+[ingest.pdf]
+engine = "auto"
+# "" = auto-detect (GPU when the installed torch supports it); pin with
+# "cuda", "cuda:1", "cpu", or "mps" to override.
+torch_device = ""
+force_ocr = false
+use_llm = false
+llm_service = "marker.services.openai.OpenAIService"
+llm_base_url = ""
+llm_model = ""
+llm_api_key_env = "LEARNLOOP_PDF_LLM_API_KEY"
+
 [ai]
 active_provider = "codex"
 fallback_provider = ""
@@ -238,6 +295,7 @@ healthcheck_path = "/health"
 authoring_path = "/authoring-proposal"
 canonical_ingest_path = "/canonical-ingest"
 grading_path = "/grading-proposal"
+misconception_match_path = "/misconception-match"
 
 [ai.providers.deepseek_flash]
 type = "openai_chat"
@@ -280,6 +338,7 @@ healthcheck_path = "/health"
 authoring_path = "/authoring-proposal"
 canonical_ingest_path = "/canonical-ingest"
 grading_path = "/grading-proposal"
+misconception_match_path = "/misconception-match"
 
 # Family-keyed mastery damage per error type (spec §"Error-aware updates").
 # recall_failure is the deterministic attribution for `dont_know` attempts.
@@ -385,7 +444,7 @@ class StorageConfig(BaseModel):
 
 
 class AlgorithmsConfig(BaseModel):
-    algorithm_version: str = "mvp-0.4"
+    algorithm_version: str = "mvp-0.5"
 
 
 class SchedulerSurpriseConfig(BaseModel):
@@ -433,16 +492,32 @@ class SchedulerFollowupConfig(BaseModel):
     # logs justify trusting it (log-before-trust).
     predictive_eig_weight: float = 0.0
     predictive_eig_target_cap: int = 4
+    # Misconception discrimination gate (spec §4.1, Phase 1: parsed but inert).
+    # A diagnostic candidate must clear this Youden-J lower bound against an
+    # active misconception to be diagnostic-eligible. require_misconception_discrimination
+    # gates whether an active misconception with no discriminating candidate
+    # routes to no_suitable_item instead of queueing a paraphrase.
+    tau_discrimination_power: float = 0.3
+    require_misconception_discrimination: bool = True
 
 
 class SchedulerConfig(BaseModel):
     forgetting_risk_weight: float = 1.0
-    active_goal_weight: float = 0.35
-    # Goal facet frontier: rewards items whose evidence facets are still
-    # unexamined or known gaps on LOs reachable from an active goal.
+    # Goal facet frontier: rewards items whose evidence facets are not yet
+    # on track for an active goal (unexamined, known gap, or projected below
+    # the goal's target_recall at its due date).
     goal_frontier_weight: float = 0.25
     recent_error_weight: float = 0.50
     probe_eig_weight: float = 0.25
+    # Goal quota: guaranteed floor share of the built queue overlapping the
+    # goal frontier while an active goal has at-risk facets. Ramps from min
+    # to max as due_at approaches (linearly over the last ramp_days); goals
+    # without a due date stay at min; past-due goals use max. Composition
+    # gating, not a score weight — the priority-weight sweep showed additive
+    # weights are decision-inert.
+    goal_quota_floor_min: float = 0.30
+    goal_quota_floor_max: float = 0.70
+    goal_quota_ramp_days: int = 28
     short_session_minutes: int = 20
     candidate_log_retention_limit: int = 200
     # Matches DEFAULT_CONFIG_TEXT: exploration must stay on even for vaults whose
@@ -452,6 +527,12 @@ class SchedulerConfig(BaseModel):
     selection_exploration_reward_window: float = 0.15
     surprise: SchedulerSurpriseConfig = Field(default_factory=SchedulerSurpriseConfig)
     followup: SchedulerFollowupConfig = Field(default_factory=SchedulerFollowupConfig)
+
+
+class GoalsConfig(BaseModel):
+    # Projection horizon for goals without a due date: facet recall is
+    # forward-projected this many days out when deciding on-track status.
+    default_projection_horizon_days: int = 30
 
 
 class MasteryIRTConfig(BaseModel):
@@ -472,6 +553,13 @@ class MasteryIRTConfig(BaseModel):
     # flags + flag-flip-and-rebuild before defaulting on. The authored value
     # stays the prior mean; b learns ~5x slower than mu (gain scale) with a
     # per-attempt step clamp.
+    # Primed attempts (retry launched from the source-review panel): the item
+    # is effectively easier because the source is fresh in working memory.
+    # Applied as b_eff = b - priming_b_offset AFTER resolve_item_irt_params
+    # clamping, so a primed success barely moves mu (predicted p near 1) while
+    # a primed failure moves it strongly. Default is provisional pending sim
+    # sweep calibration (mastery.irt.priming_b_offset in default_sweep.yaml).
+    priming_b_offset: float = 2.0
     eb_difficulty_enabled: bool = False
     b_prior_variance: float = 0.25           # sigma = 0.5 logits around the authored prior
     b_learning_rate_scale: float = 0.2
@@ -623,6 +711,29 @@ class MisconceptionsConfig(BaseModel):
 
     auto_resolve_clean_attempts: int = 3
     auto_resolve_min_correctness: float = 0.85
+    # Evidence-based resolution (spec §7, Phase 1: parsed, consumed later): a
+    # registry misconception resolves once its posterior P(misconception) falls
+    # below this threshold, rather than by a raw clean-attempt count.
+    tau_misconception_resolved: float = 0.15
+    # Sim discrimination gate (spec §6, Phase 1: parsed, consumed later). A
+    # generated diagnostic is accepted only if the sim-estimated Beta lower
+    # bounds clear these thresholds over sim_gate_trials planted/clean trials;
+    # specificity errs stricter because false fires poison the posterior.
+    sim_gate_min_sensitivity_lb: float = 0.7
+    sim_gate_min_specificity_lb: float = 0.8
+    # 8 trials, not 5: a perfect N-trial run has a 25th-percentile lower bound of
+    # 0.25^(1/(N+1)) — 0.794 at N=5, which fails the 0.8 specificity gate even
+    # for a flawless discriminator; N=8 gives 0.857.
+    sim_gate_trials: int = 8
+    # Opt-in codex answers-under-belief pass for the sim gate (spec §6). 0 keeps
+    # the pure-deterministic string-match grader (no provider tokens). When > 0,
+    # codex role-plays that many planted + that many clean students in ONE call
+    # per gate run; their fires combine with the deterministic trials into the
+    # Beta posteriors. Costs provider tokens per accepted item, so it is off by
+    # default. Same N-trial caveat as sim_gate_trials: a perfect discriminator
+    # needs the COMBINED N >= 8 to clear the 0.8 specificity gate (the
+    # 25th-percentile lower bound is 0.25^(1/(N+1))), and low counts self-limit.
+    sim_gate_llm_trials: int = 0
 
 
 class FacetDiagnosticConfig(BaseModel):
@@ -680,11 +791,28 @@ class TeachBackConfig(BaseModel):
     session_cap: int = Field(default=1, ge=0)
 
 
+class PdfIngestConfig(BaseModel):
+    engine: Literal["auto", "marker", "pypdf"] = "auto"
+    # Device for marker model inference: "" lets marker/surya auto-detect
+    # (cuda when available), or pin e.g. "cuda", "cuda:1", "cpu", "mps".
+    torch_device: str = ""
+    force_ocr: bool = False
+    use_llm: bool = False
+    llm_service: str = "marker.services.openai.OpenAIService"
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_api_key_env: str = "LEARNLOOP_PDF_LLM_API_KEY"
+    # Escape hatch: raw marker settings merged over the derived config
+    # (e.g. {"paginate_output" = true} under [ingest.pdf.marker_options]).
+    marker_options: dict[str, Any] = Field(default_factory=dict)
+
+
 class IngestConfig(BaseModel):
     window_char_cap: int = 150000
     min_content_chars: int = 400
     default_goal_priority: float = 0.5
     allow_auto_captions: bool = False
+    pdf: PdfIngestConfig = Field(default_factory=PdfIngestConfig)
 
 
 class CodexConfig(BaseModel):
@@ -708,6 +836,7 @@ class CodexConfig(BaseModel):
     grading_path: str = "/grading-proposal"
     tutor_qa_path: str = "/tutor-qa"
     teach_back_path: str = "/teach-back"
+    misconception_match_path: str = "/misconception-match"
 
 
 class AIProviderConfig(BaseModel):
@@ -739,6 +868,7 @@ class AIProviderConfig(BaseModel):
     grading_path: str | None = None
     tutor_qa_path: str | None = None
     teach_back_path: str | None = None
+    misconception_match_path: str | None = None
 
 
 class AIRoutingConfig(BaseModel):
@@ -832,6 +962,10 @@ def default_attempt_type_evidence() -> dict[str, EvidenceMassEntry]:
         "dont_know": EvidenceMassEntry(evidence_mass=0.7, surface_exposure=1.0),
         "self_report": EvidenceMassEntry(evidence_mass=0.3),
         "exam_evidence": EvidenceMassEntry(evidence_mass=0.35),
+        # Held-out practice-exam answer on a fresh, never-practiced item: the
+        # highest-quality evidence in the system, so full mass (unlike the
+        # discounted exam_evidence import type above).
+        "exam_attempt": EvidenceMassEntry(evidence_mass=1.0),
         # High-quality generative evidence, but one correlated multi-question
         # conversation, so less than a full independent attempt per facet.
         "teach_back": EvidenceMassEntry(evidence_mass=0.8),
@@ -886,6 +1020,7 @@ class LearnLoopConfig(BaseModel):
     algorithms: AlgorithmsConfig = Field(default_factory=AlgorithmsConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    goals: GoalsConfig = Field(default_factory=GoalsConfig)
     mastery: MasteryConfig = Field(default_factory=MasteryConfig)
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
     recall_coverage: RecallCoverageConfig = Field(default_factory=RecallCoverageConfig)
@@ -981,6 +1116,7 @@ def ai_provider_from_codex(config: CodexConfig) -> AIProviderConfig:
         grading_path=config.grading_path,
         tutor_qa_path=config.tutor_qa_path,
         teach_back_path=config.teach_back_path,
+        misconception_match_path=config.misconception_match_path,
     )
 
 

@@ -11,6 +11,7 @@ from learnloop.clock import Clock, SystemClock, parse_utc, utc_now_iso
 from learnloop.db.connection import connect
 from learnloop.db.migrate import apply_migrations
 from learnloop.ids import new_ulid
+from learnloop.numeric import beta_mean, beta_quantile
 
 
 def _json(data: Any) -> str:
@@ -77,6 +78,75 @@ class ActiveErrorEvent:
     severity: float
     is_misconception: bool
     created_at: str
+    misconception_id: str | None = None
+    misconception_statement: str | None = None
+
+
+@dataclass(frozen=True)
+class MisconceptionRecord:
+    """A normalized, content-bearing belief scoped to a learning object.
+
+    ``severity`` is the max over source events (decayed by consumers, not here);
+    ``source_error_event_ids`` is append-only provenance. See spec §1.1.
+    """
+
+    id: str
+    learning_object_id: str
+    concept_id: str | None
+    statement: str
+    signature: str | None
+    facet_ids: list[str]
+    severity: float
+    status: str
+    source_error_event_ids: list[str]
+    created_at: str | None
+    updated_at: str | None
+    resolved_at: str | None
+
+
+@dataclass(frozen=True)
+class ItemMisconceptionDiscrimination:
+    """Estimated discrimination of an item's keyed fatal error vs a misconception.
+
+    Beta posteriors over sensitivity = P(fatal fires | learner holds belief) and
+    specificity = P(no fire | clean learner). Consumers read the lower bounds
+    (``sensitivity_lb`` / ``specificity_lb``) so thin-evidence rows self-limit.
+    See spec §1.3.
+    """
+
+    practice_item_id: str
+    misconception_id: str
+    sensitivity_alpha: float
+    sensitivity_beta: float
+    specificity_alpha: float
+    specificity_beta: float
+    n_planted_trials: int
+    n_clean_trials: int
+    source: str | None
+    updated_at: str | None
+
+    @property
+    def sensitivity_mean(self) -> float:
+        return beta_mean(self.sensitivity_alpha, self.sensitivity_beta)
+
+    @property
+    def specificity_mean(self) -> float:
+        return beta_mean(self.specificity_alpha, self.specificity_beta)
+
+    def sensitivity_lb(self, q: float = 0.25) -> float:
+        return beta_quantile(q, self.sensitivity_alpha, self.sensitivity_beta)
+
+    def specificity_lb(self, q: float = 0.25) -> float:
+        return beta_quantile(q, self.specificity_alpha, self.specificity_beta)
+
+    @property
+    def youden_j(self) -> float:
+        """Discrimination power J = E[sens] + E[spec] - 1."""
+        return self.sensitivity_mean + self.specificity_mean - 1.0
+
+    def youden_j_lb(self, q: float = 0.25) -> float:
+        """Conservative J from the sensitivity/specificity lower bounds."""
+        return self.sensitivity_lb(q) + self.specificity_lb(q) - 1.0
 
 
 @dataclass(frozen=True)
@@ -415,6 +485,40 @@ class Repository:
             ).fetchall()
         return [str(row["learning_object_id"]) for row in rows]
 
+    def list_attempt_history(self) -> list[dict[str, Any]]:
+        """Every attempt (time-ordered) with its posterior delta, if recorded.
+
+        One LEFT JOIN so the knowledge-map chronicle can reconstruct each
+        learning object's mastery trajectory (``posterior_delta`` carries the
+        logit-space prior/posterior of the mastery update) alongside the raw
+        attempt events. Attempts without a surprise row (legacy, or types that
+        never update mastery) come back with ``posterior_delta`` = None.
+        """
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT a.id AS id,
+                       a.practice_item_id AS practice_item_id,
+                       a.learning_object_id AS learning_object_id,
+                       a.attempt_type AS attempt_type,
+                       a.correctness AS correctness,
+                       a.rubric_score AS rubric_score,
+                       a.hints_used AS hints_used,
+                       a.created_at AS created_at,
+                       s.posterior_delta_json AS posterior_delta_json
+                FROM practice_attempts a
+                LEFT JOIN attempt_surprise s ON s.attempt_id = a.id
+                ORDER BY a.created_at ASC, a.id ASC
+                """
+            ).fetchall()
+        history: list[dict[str, Any]] = []
+        for row in rows:
+            payload = dict(row)
+            payload["posterior_delta"] = _loads(payload.pop("posterior_delta_json"), None)
+            history.append(payload)
+        return history
+
     def count_attempts_with_error_type(self, practice_item_id: str, error_type: str) -> int:
         """Attempts on an item carrying ``error_type`` — the §12.4 promotion signal."""
 
@@ -647,17 +751,7 @@ class Repository:
             rows = connection.execute(
                 "SELECT * FROM error_events WHERE status = 'active' ORDER BY created_at DESC"
             ).fetchall()
-        return [
-            ActiveErrorEvent(
-                id=row["id"],
-                learning_object_id=row["learning_object_id"],
-                error_type=row["error_type"],
-                severity=row["severity"],
-                is_misconception=bool(row["is_misconception"]),
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+        return [_active_error(row) for row in rows]
 
     def active_errors_by_learning_object(self, learning_object_id: str) -> list[ActiveErrorEvent]:
         with self.connection() as connection:
@@ -687,6 +781,271 @@ class Repository:
         with self.connection() as connection:
             self._insert_error_event(connection, event)
             connection.commit()
+
+    def set_error_event_misconception(
+        self,
+        event_id: str,
+        misconception_id: str | None,
+        *,
+        clock: Clock | None = None,
+    ) -> bool:
+        """Link (or unlink) an error event to a normalized registry belief."""
+
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE error_events SET misconception_id = ?, updated_at = ? WHERE id = ?",
+                (misconception_id, now, event_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    # -- Misconception registry (spec §1.1) ---------------------------------
+
+    def insert_misconception(
+        self,
+        *,
+        learning_object_id: str,
+        statement: str,
+        id: str | None = None,
+        concept_id: str | None = None,
+        signature: str | None = None,
+        facet_ids: Iterable[str] | None = None,
+        severity: float = 0.0,
+        status: str = "active",
+        source_error_event_ids: Iterable[str] | None = None,
+        clock: Clock | None = None,
+    ) -> str:
+        if status not in {"active", "resolving", "resolved"}:
+            raise ValueError("status must be one of active, resolving, resolved")
+        misconception_id = id or new_ulid()
+        now = utc_now_iso(clock)
+        resolved_at = now if status == "resolved" else None
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO misconceptions(
+                  id, learning_object_id, concept_id, statement, signature,
+                  facet_ids_json, severity, status, source_error_event_ids_json,
+                  created_at, updated_at, resolved_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    misconception_id,
+                    learning_object_id,
+                    concept_id,
+                    statement,
+                    signature,
+                    _json(sorted({str(f) for f in (facet_ids or [])})),
+                    float(severity),
+                    status,
+                    _json([str(e) for e in (source_error_event_ids or [])]),
+                    now,
+                    now,
+                    resolved_at,
+                ),
+            )
+            connection.commit()
+        return misconception_id
+
+    def misconception(self, misconception_id: str) -> MisconceptionRecord | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM misconceptions WHERE id = ?",
+                (misconception_id,),
+            ).fetchone()
+        return _decode_misconception(row) if row is not None else None
+
+    def misconceptions_for_learning_object(
+        self,
+        learning_object_id: str,
+        statuses: Iterable[str] = ("active", "resolving"),
+    ) -> list[MisconceptionRecord]:
+        status_list = list(statuses)
+        placeholders = ",".join("?" for _ in status_list) or "''"
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM misconceptions
+                WHERE learning_object_id = ? AND status IN ({placeholders})
+                ORDER BY created_at DESC, id DESC
+                """,
+                (learning_object_id, *status_list),
+            ).fetchall()
+        return [_decode_misconception(row) for row in rows]
+
+    def misconceptions_for_concepts(
+        self,
+        concept_ids: Iterable[str],
+        statuses: Iterable[str] = ("active", "resolving"),
+    ) -> list[MisconceptionRecord]:
+        concept_list = [str(c) for c in concept_ids]
+        status_list = list(statuses)
+        if not concept_list:
+            return []
+        concept_placeholders = ",".join("?" for _ in concept_list)
+        status_placeholders = ",".join("?" for _ in status_list) or "''"
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM misconceptions
+                WHERE concept_id IN ({concept_placeholders})
+                  AND status IN ({status_placeholders})
+                ORDER BY created_at DESC, id DESC
+                """,
+                (*concept_list, *status_list),
+            ).fetchall()
+        return [_decode_misconception(row) for row in rows]
+
+    def update_misconception(
+        self,
+        misconception_id: str,
+        *,
+        statement: str | None = None,
+        signature: str | None = None,
+        facet_ids: Iterable[str] | None = None,
+        severity: float | None = None,
+        status: str | None = None,
+        append_source_error_event_ids: Iterable[str] | None = None,
+        clock: Clock | None = None,
+    ) -> MisconceptionRecord | None:
+        if status is not None and status not in {"active", "resolving", "resolved"}:
+            raise ValueError("status must be one of active, resolving, resolved")
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM misconceptions WHERE id = ?",
+                (misconception_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = _decode_misconception(row)
+            new_statement = statement if statement is not None else current.statement
+            new_signature = signature if signature is not None else current.signature
+            new_facets = (
+                sorted({str(f) for f in facet_ids})
+                if facet_ids is not None
+                else current.facet_ids
+            )
+            new_severity = float(severity) if severity is not None else current.severity
+            new_status = status if status is not None else current.status
+            source_ids = list(current.source_error_event_ids)
+            if append_source_error_event_ids:
+                for event_id in append_source_error_event_ids:
+                    if event_id not in source_ids:
+                        source_ids.append(str(event_id))
+            # Resolution stamps resolved_at; any reactivation clears it.
+            if new_status == "resolved":
+                resolved_at = current.resolved_at or now
+            else:
+                resolved_at = None
+            connection.execute(
+                """
+                UPDATE misconceptions
+                SET statement = ?, signature = ?, facet_ids_json = ?, severity = ?,
+                    status = ?, source_error_event_ids_json = ?, updated_at = ?,
+                    resolved_at = ?
+                WHERE id = ?
+                """,
+                (
+                    new_statement,
+                    new_signature,
+                    _json(new_facets),
+                    new_severity,
+                    new_status,
+                    _json(source_ids),
+                    now,
+                    resolved_at,
+                    misconception_id,
+                ),
+            )
+            connection.commit()
+        return self.misconception(misconception_id)
+
+    # -- Item/misconception discrimination (spec §1.3) ----------------------
+
+    def upsert_item_misconception_discrimination(
+        self,
+        row: ItemMisconceptionDiscrimination,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
+        now = row.updated_at or utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO item_misconception_discrimination(
+                  practice_item_id, misconception_id,
+                  sensitivity_alpha, sensitivity_beta,
+                  specificity_alpha, specificity_beta,
+                  n_planted_trials, n_clean_trials, source, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(practice_item_id, misconception_id) DO UPDATE SET
+                  sensitivity_alpha = excluded.sensitivity_alpha,
+                  sensitivity_beta = excluded.sensitivity_beta,
+                  specificity_alpha = excluded.specificity_alpha,
+                  specificity_beta = excluded.specificity_beta,
+                  n_planted_trials = excluded.n_planted_trials,
+                  n_clean_trials = excluded.n_clean_trials,
+                  source = excluded.source,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    row.practice_item_id,
+                    row.misconception_id,
+                    row.sensitivity_alpha,
+                    row.sensitivity_beta,
+                    row.specificity_alpha,
+                    row.specificity_beta,
+                    row.n_planted_trials,
+                    row.n_clean_trials,
+                    row.source,
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def discrimination_row(
+        self, practice_item_id: str, misconception_id: str
+    ) -> ItemMisconceptionDiscrimination | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM item_misconception_discrimination
+                WHERE practice_item_id = ? AND misconception_id = ?
+                """,
+                (practice_item_id, misconception_id),
+            ).fetchone()
+        return _decode_discrimination(row) if row is not None else None
+
+    def discrimination_rows_for_item(
+        self, practice_item_id: str
+    ) -> list[ItemMisconceptionDiscrimination]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM item_misconception_discrimination WHERE practice_item_id = ?",
+                (practice_item_id,),
+            ).fetchall()
+        return [_decode_discrimination(row) for row in rows]
+
+    def discrimination_rows_for_misconceptions(
+        self, misconception_ids: Iterable[str]
+    ) -> list[ItemMisconceptionDiscrimination]:
+        ids = [str(m) for m in misconception_ids]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM item_misconception_discrimination
+                WHERE misconception_id IN ({placeholders})
+                """,
+                ids,
+            ).fetchall()
+        return [_decode_discrimination(row) for row in rows]
 
     def count_clean_attempts_since(
         self,
@@ -2005,6 +2364,40 @@ class Repository:
                 parameters,
             ).fetchall()
         return [_decode_intervention_need(row) for row in rows]
+
+    def intervention_need(self, need_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM intervention_needs WHERE id = ?",
+                (need_id,),
+            ).fetchone()
+        return _decode_intervention_need(row) if row is not None else None
+
+    def update_intervention_need_diagnostic_focus(
+        self,
+        need_id: str,
+        diagnostic_focus: dict[str, Any] | None,
+        *,
+        clock: Clock | None = None,
+    ) -> bool:
+        """Replace a need's diagnostic_focus snapshot in place (spec §6 reopen).
+
+        Used to attach the sim gate's ``last_gate_result`` estimates when a
+        generated diagnostic is rejected, so the next generation round sees why
+        the previous item failed. A direct UPDATE (not upsert) to avoid changing
+        the upsert dedup key."""
+
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE intervention_needs SET diagnostic_focus_json = ?, updated_at = ? WHERE id = ?",
+                (
+                    _json(diagnostic_focus) if diagnostic_focus is not None else None,
+                    utc_now_iso(clock),
+                    need_id,
+                ),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
 
     def intervention_need_for_attempt(self, attempt_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
@@ -3496,9 +3889,10 @@ class Repository:
               attempt_type, learner_answer_md, evidence_facets_json, evidence_weights_json,
               rubric_score, correctness, confidence, latency_seconds, hints_used,
               error_type, grader_confidence, manual_review, manual_review_reason,
-              created_at, updated_at, session_id, scheduler_slate_id, scheduler_candidate_id
+              created_at, updated_at, session_id, scheduler_slate_id, scheduler_candidate_id,
+              primed
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attempt["id"],
@@ -3525,6 +3919,7 @@ class Repository:
                 attempt.get("session_id"),
                 attempt.get("scheduler_slate_id"),
                 attempt.get("scheduler_candidate_id"),
+                1 if attempt.get("primed") else 0,
             ),
         )
 
@@ -3565,9 +3960,10 @@ class Repository:
             """
             INSERT INTO error_events(
               id, attempt_id, learning_object_id, error_type, severity,
-              is_misconception, repair_plan_json, status, created_at, updated_at
+              is_misconception, repair_plan_json, status, created_at, updated_at,
+              misconception_id, misconception_statement, misconception_consistent_answer
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.get("id") or new_ulid(),
@@ -3580,6 +3976,9 @@ class Repository:
                 event.get("status", "active"),
                 event["created_at"],
                 event.get("updated_at"),
+                event.get("misconception_id"),
+                event.get("misconception_statement"),
+                event.get("misconception_consistent_answer"),
             ),
         )
 
@@ -4040,6 +4439,247 @@ class Repository:
                 ),
             )
 
+    # ------------------------------------------------------------------
+    # Exam pool (held-out practice-exam item reservations)
+    # ------------------------------------------------------------------
+
+    def attempted_practice_item_ids(self) -> set[str]:
+        """Practice item ids that have at least one recorded attempt."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT practice_item_id FROM practice_attempts"
+            ).fetchall()
+        return {row["practice_item_id"] for row in rows}
+
+    def reserved_exam_pool_items(self, goal_id: str) -> list[dict[str, Any]]:
+        """Unreleased pool reservations for a goal, in reservation order."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM exam_pool_items
+                WHERE goal_id = ? AND released_at IS NULL
+                ORDER BY reserved_at, id
+                """,
+                (goal_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reserved_exam_pool_item_ids(self) -> set[str]:
+        """All practice item ids currently reserved (unreleased) across goals."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT practice_item_id FROM exam_pool_items WHERE released_at IS NULL"
+            ).fetchall()
+        return {row["practice_item_id"] for row in rows}
+
+    def insert_exam_pool_items(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        with self.connection() as connection:
+            for row in rows:
+                connection.execute(
+                    """
+                    INSERT INTO exam_pool_items(
+                      id, goal_id, practice_item_id, facet_id, difficulty_stratum,
+                      reserved_at, released_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["id"],
+                        row["goal_id"],
+                        row["practice_item_id"],
+                        row.get("facet_id"),
+                        row.get("difficulty_stratum"),
+                        row["reserved_at"],
+                        row.get("released_at"),
+                    ),
+                )
+            connection.commit()
+
+    def release_exam_pool(self, goal_id: str, *, clock: Clock | None = None) -> list[str]:
+        """Release every unreleased reservation for a goal; return the item ids."""
+
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT practice_item_id FROM exam_pool_items WHERE goal_id = ? AND released_at IS NULL",
+                (goal_id,),
+            ).fetchall()
+            item_ids = [row["practice_item_id"] for row in rows]
+            connection.execute(
+                "UPDATE exam_pool_items SET released_at = ? WHERE goal_id = ? AND released_at IS NULL",
+                (now, goal_id),
+            )
+            connection.commit()
+        return item_ids
+
+    # ------------------------------------------------------------------
+    # Exam sessions
+    # ------------------------------------------------------------------
+
+    def insert_exam_session(self, session: Mapping[str, Any]) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO exam_sessions(
+                  id, goal_id, status, item_order_json, report_json,
+                  started_at, updated_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session["id"],
+                    session["goal_id"],
+                    session["status"],
+                    _json(session.get("item_order") or []),
+                    _json(session["report"]) if session.get("report") is not None else None,
+                    session["started_at"],
+                    session["updated_at"],
+                    session.get("completed_at"),
+                ),
+            )
+            connection.commit()
+
+    def exam_session(self, session_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM exam_sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+        return _decode_exam_session(row) if row is not None else None
+
+    def exam_session_in_progress_for_goal(self, goal_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM exam_sessions
+                WHERE goal_id = ? AND status = 'in_progress'
+                ORDER BY started_at DESC, id DESC
+                LIMIT 1
+                """,
+                (goal_id,),
+            ).fetchone()
+        return _decode_exam_session(row) if row is not None else None
+
+    def update_exam_session(
+        self,
+        session_id: str,
+        *,
+        status: str | None = None,
+        report: Any | None = None,
+        completed_at: str | None = None,
+        clock: Clock | None = None,
+    ) -> None:
+        now = utc_now_iso(clock)
+        sets = ["updated_at = ?"]
+        params: list[Any] = [now]
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+        if report is not None:
+            sets.append("report_json = ?")
+            params.append(_json(report))
+        if completed_at is not None:
+            sets.append("completed_at = ?")
+            params.append(completed_at)
+        params.append(session_id)
+        with self.connection() as connection:
+            connection.execute(
+                f"UPDATE exam_sessions SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            connection.commit()
+
+    def insert_exam_predictions(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        with self.connection() as connection:
+            for row in rows:
+                connection.execute(
+                    """
+                    INSERT INTO exam_predictions(
+                      id, session_id, practice_item_id, predicted_correctness,
+                      facet_projection_json, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["id"],
+                        row["session_id"],
+                        row["practice_item_id"],
+                        float(row["predicted_correctness"]),
+                        _json(row.get("facet_projection"))
+                        if row.get("facet_projection") is not None
+                        else None,
+                        row["created_at"],
+                    ),
+                )
+            connection.commit()
+
+    def exam_predictions(self, session_id: str) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM exam_predictions WHERE session_id = ? ORDER BY created_at, id",
+                (session_id,),
+            ).fetchall()
+        return [_decode_exam_prediction(row) for row in rows]
+
+    def all_exam_predictions(self) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM exam_predictions ORDER BY session_id, created_at, id"
+            ).fetchall()
+        return [_decode_exam_prediction(row) for row in rows]
+
+    def upsert_exam_answer(self, answer: Mapping[str, Any], *, clock: Clock | None = None) -> None:
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO exam_answers(
+                  id, session_id, practice_item_id, answer_md, rubric_score,
+                  correctness, grade_json, attempt_id, answered_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, practice_item_id) DO UPDATE SET
+                  answer_md = excluded.answer_md,
+                  rubric_score = excluded.rubric_score,
+                  correctness = excluded.correctness,
+                  grade_json = excluded.grade_json,
+                  attempt_id = excluded.attempt_id,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    answer.get("id") or new_ulid(),
+                    answer["session_id"],
+                    answer["practice_item_id"],
+                    answer.get("answer_md"),
+                    answer.get("rubric_score"),
+                    answer.get("correctness"),
+                    _json(answer.get("grade")) if answer.get("grade") is not None else None,
+                    answer.get("attempt_id"),
+                    answer.get("answered_at") or now,
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def set_exam_answer_attempt_id(self, session_id: str, practice_item_id: str, attempt_id: str) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE exam_answers SET attempt_id = ? WHERE session_id = ? AND practice_item_id = ?",
+                (attempt_id, session_id, practice_item_id),
+            )
+            connection.commit()
+
+    def exam_answers(self, session_id: str) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM exam_answers WHERE session_id = ? ORDER BY answered_at, id",
+                (session_id,),
+            ).fetchall()
+        return [_decode_exam_answer(row) for row in rows]
+
 
 def _practice_item_state(row: sqlite3.Row) -> PracticeItemState:
     return PracticeItemState(
@@ -4268,6 +4908,7 @@ def _decode_intervention_need(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _active_error(row: sqlite3.Row) -> ActiveErrorEvent:
+    keys = row.keys()
     return ActiveErrorEvent(
         id=row["id"],
         learning_object_id=row["learning_object_id"],
@@ -4275,6 +4916,8 @@ def _active_error(row: sqlite3.Row) -> ActiveErrorEvent:
         severity=row["severity"],
         is_misconception=bool(row["is_misconception"]),
         created_at=row["created_at"],
+        misconception_id=row["misconception_id"] if "misconception_id" in keys else None,
+        misconception_statement=row["misconception_statement"] if "misconception_statement" in keys else None,
     )
 
 
@@ -4300,6 +4943,7 @@ def _decode_attempt(row: sqlite3.Row) -> dict[str, Any]:
     payload["evidence_facets"] = _loads(payload.pop("evidence_facets_json"), [])
     payload["evidence_weights"] = _loads(payload.pop("evidence_weights_json"), {})
     payload["manual_review"] = bool(payload["manual_review"])
+    payload["primed"] = bool(payload.get("primed", 0))
     return payload
 
 
@@ -4315,6 +4959,38 @@ def _decode_error_event(row: sqlite3.Row) -> dict[str, Any]:
     payload["is_misconception"] = bool(payload["is_misconception"])
     payload["repair_plan"] = _loads(payload.pop("repair_plan_json"), None)
     return payload
+
+
+def _decode_misconception(row: sqlite3.Row) -> MisconceptionRecord:
+    return MisconceptionRecord(
+        id=row["id"],
+        learning_object_id=row["learning_object_id"],
+        concept_id=row["concept_id"],
+        statement=row["statement"],
+        signature=row["signature"],
+        facet_ids=_loads(row["facet_ids_json"], []),
+        severity=row["severity"],
+        status=row["status"],
+        source_error_event_ids=_loads(row["source_error_event_ids_json"], []),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        resolved_at=row["resolved_at"],
+    )
+
+
+def _decode_discrimination(row: sqlite3.Row) -> ItemMisconceptionDiscrimination:
+    return ItemMisconceptionDiscrimination(
+        practice_item_id=row["practice_item_id"],
+        misconception_id=row["misconception_id"],
+        sensitivity_alpha=row["sensitivity_alpha"],
+        sensitivity_beta=row["sensitivity_beta"],
+        specificity_alpha=row["specificity_alpha"],
+        specificity_beta=row["specificity_beta"],
+        n_planted_trials=row["n_planted_trials"],
+        n_clean_trials=row["n_clean_trials"],
+        source=row["source"],
+        updated_at=row["updated_at"],
+    )
 
 
 def _decode_surprise(row: sqlite3.Row) -> dict[str, Any]:
@@ -4384,6 +5060,25 @@ def _attempt_label_snapshot(row: sqlite3.Row) -> dict[str, Any]:
         "latency_seconds": row["latency_seconds"],
         "created_at": row["created_at"],
     }
+
+
+def _decode_exam_session(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["item_order"] = _loads(payload.pop("item_order_json"), [])
+    payload["report"] = _loads(payload.pop("report_json"), None)
+    return payload
+
+
+def _decode_exam_prediction(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["facet_projection"] = _loads(payload.pop("facet_projection_json"), None)
+    return payload
+
+
+def _decode_exam_answer(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["grade"] = _loads(payload.pop("grade_json"), None)
+    return payload
 
 
 def _decode_proposal_batch(row: sqlite3.Row) -> dict[str, Any]:

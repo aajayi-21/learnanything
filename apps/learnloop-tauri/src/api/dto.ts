@@ -97,6 +97,8 @@ export interface KnowledgeMapPoint {
   queued: boolean;
   difficulty: number | null;
   facets: string[];
+  /** Top-4 nearest items by the true blended distance (not the lossy 2D embedding). */
+  neighbors: Array<{ id: string; distance: number }>;
 }
 
 export interface KnowledgeMapSnapshot {
@@ -105,6 +107,33 @@ export interface KnowledgeMapSnapshot {
   counts: { items: number; learningObjects: number; concepts: number; facets: number };
   /** Kruskal stress-1 of the 2D embedding — how approximate the map is. */
   stress: number;
+}
+
+export interface KnowledgeHistoryAttempt {
+  id: string;
+  /** ISO timestamp of the attempt. */
+  t: string;
+  practiceItemId: string;
+  learningObjectId: string;
+  attemptType: string;
+  correctness: number | null;
+  rubricScore: number | null;
+  hintsUsed: number;
+}
+
+export interface KnowledgeHistorySeriesPoint {
+  /** ISO timestamp of the mastery update (the attempt that caused it). */
+  t: string;
+  /** Display-space mastery mean after the update. */
+  mastery: number;
+}
+
+/** Attempt events + per-LO mastery step series for the chronicle view. */
+export interface KnowledgeMapHistory {
+  version: number;
+  attempts: KnowledgeHistoryAttempt[];
+  learningObjects: Array<{ id: string; series: KnowledgeHistorySeriesPoint[] }>;
+  range: { start: string; end: string } | null;
 }
 
 export interface VaultSummary {
@@ -193,7 +222,6 @@ export interface QueueInput {
 
 export interface SchedulerComponents {
   forgettingRisk: number;
-  activeGoal: number;
   goalFrontier?: number;
   recentError: number;
   probeEig: number;
@@ -362,6 +390,31 @@ export interface SubmitAttemptInput {
   hintsUsed: number;
   latencySeconds?: number | null;
   selfGrade?: SelfGradeInputDto | null;
+  /** Retry launched from the feedback screen's source-review panel. */
+  primed?: boolean;
+}
+
+/** A source ref resolved to displayable content for the source-review panel. */
+export interface ResolvedSourceRefDto {
+  refType: string;
+  /** canonical_source note kind (youtube_video | website_page | ...) or "note". */
+  kind: string | null;
+  title: string;
+  externalUrl: string | null;
+  /** Vault path of the backing note, for the "View in Library" jump. */
+  notePath: string | null;
+  locator: string | null;
+  locatorResolved: boolean;
+  /** The source changed since this item was extracted (or the locator dangled). */
+  sourceChanged: boolean;
+  headingPath: string[] | null;
+  /** Resolved section text (or transcript excerpt window; quote on fallback). */
+  sectionMd: string | null;
+  video: {
+    videoId: string;
+    startSeconds: number;
+    endSeconds: number | null;
+  } | null;
 }
 
 export interface AttemptResultDto {
@@ -410,12 +463,25 @@ export interface FeedbackBundle {
   feedbackMd: string | null;
   repairSuggestions: RepairSuggestionDto[];
   interventionNeed: InterventionNeedDto | null;
+  /** This attempt was itself a primed retry. */
+  primed: boolean;
+  /** Canonical-source sections that spawned this item (source-review panel). */
+  sourceRefs: ResolvedSourceRefDto[];
   followupQueued: boolean;
   // Non-null when this attempt is itself a follow-up (drives the rating strip).
   followupSource?: FollowupSourceDto | null;
   followupRating?: FollowupRatingDto | null;
   /** Tutor questions that counted as hints on this attempt. */
   questionHintEquivalents?: number;
+}
+
+/** Result of start_primed_retry: a sibling item to retry with primed=true. */
+export interface PrimedRetryResultDto {
+  available: boolean;
+  /** The item was generated on demand (LLM authoring) rather than pre-existing. */
+  generated: boolean;
+  reason?: string | null;
+  practiceItem: PracticeItemDetail | null;
 }
 
 // ── Tutor Q&A ("ask") ──────────────────────────────────────────────────────
@@ -764,6 +830,25 @@ export interface CliCommandResult {
   stderr: string;
 }
 
+export interface RecentIngestEntry {
+  noteId: string;
+  path: string | null;
+  subjectId: string | null;
+  title: string;
+  kind: string | null;
+  canonicalUri: string | null;
+  authors: string[];
+  retrievedAt: string | null;
+  createdAt: string | null;
+  patchId: string | null;
+  purpose: "canonical_ingest" | "exam_ingest";
+}
+
+export interface RecentIngestsSnapshot {
+  version: number;
+  ingests: RecentIngestEntry[];
+}
+
 export interface ConceptGraphLearningObject {
   id: string;
   title: string;
@@ -933,4 +1018,151 @@ export interface ProposalsSnapshot {
   batches: ProposalBatchDto[];
   totals: ProposalDecisionCounts;
   batchCount: number;
+}
+
+// ── goals + practice exams (goal redesign phases 3-4) ────────────────────────
+
+export interface GoalReportSummaryDto {
+  onTrackCount: number;
+  total: number;
+  onTrackFraction: number | null;
+  atRiskCount: number;
+  horizon: string;
+  dueAt: string | null;
+}
+
+export interface GoalAtRiskFacetDto {
+  learningObjectId: string;
+  learningObjectTitle: string;
+  facetId: string;
+  label: "unexamined" | "uncertain" | "known_gap" | "solid";
+  currentRecall: number | null;
+  projectedRecall: number | null;
+}
+
+export interface GoalDto {
+  id: string;
+  title: string;
+  status: "active" | "paused" | "completed" | "expired";
+  priority: number;
+  targetRecall: number;
+  dueAt: string | null;
+  facetScope: { concepts: string[]; facets: string[] };
+  exam: { enabled: boolean; itemCount: number };
+  createdAt: string;
+  updatedAt: string;
+  report: GoalReportSummaryDto | null;
+}
+
+export interface GoalsListSnapshot {
+  version: number;
+  goals: GoalDto[];
+}
+
+export interface GoalReportSnapshot {
+  version: number;
+  goal: GoalDto;
+  report: GoalReportSummaryDto & { atRisk: GoalAtRiskFacetDto[] };
+}
+
+export interface GoalSeriesPointDto {
+  at: string;
+  onTrackCount: number;
+  total: number;
+  onTrackFraction: number | null;
+}
+
+export interface GoalSeriesSnapshot {
+  version: number;
+  goalId: string;
+  series: GoalSeriesPointDto[];
+}
+
+export interface GoalFeasibilityInput {
+  targetRecall: number;
+  dueAt?: string | null;
+  concepts: string[];
+  facets: string[];
+}
+
+export interface GoalFeasibilityResult {
+  version: number;
+  scopeFacetCount: number;
+  onTrackCount: number;
+  projectedOnTrackFraction: number | null;
+  uncoveredConcepts: string[];
+}
+
+export interface CreateGoalInput {
+  title: string;
+  targetRecall: number;
+  dueAt?: string | null;
+  concepts: string[];
+  facets: string[];
+  examEnabled: boolean;
+  examItemCount?: number;
+}
+
+export interface CreateGoalResult {
+  version: number;
+  goal: GoalDto;
+}
+
+export interface ExamStatusSnapshot {
+  version: number;
+  goalId: string;
+  inWindow: boolean;
+  daysUntilDue: number | null;
+  pastDueGrace: boolean;
+  existingSessionId: string | null;
+  poolItemCount: number;
+  uncoveredFacets: string[];
+}
+
+export interface ExamItemDto {
+  practiceItemId: string;
+  index: number;
+  total: number;
+  prompt: string;
+  practiceMode: string;
+}
+
+export interface ExamSessionSnapshot {
+  version: number;
+  sessionId: string;
+  goalId: string;
+  status: "in_progress" | "completed" | "abandoned";
+  items: ExamItemDto[];
+  answeredItemIds: string[];
+}
+
+export interface ExamAnswerResult {
+  version: number;
+  sessionId: string;
+  practiceItemId: string;
+  correctness: number;
+  score: number;
+  maxPoints: number;
+}
+
+export interface ExamFacetOutcomeDto {
+  facetId: string;
+  learningObjectId: string;
+  predictedRecall: number | null;
+  observedCorrectness: number | null;
+}
+
+export interface ExamReportSnapshot {
+  version: number;
+  sessionId: string;
+  goalId: string;
+  scoreFraction: number | null;
+  predictedScoreFraction: number | null;
+  brier: number | null;
+  perFacet: ExamFacetOutcomeDto[];
+  itemOutcomes: Array<{
+    practiceItemId: string;
+    predictedCorrectness: number | null;
+    observedCorrectness: number | null;
+  }>;
 }

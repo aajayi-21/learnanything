@@ -91,14 +91,15 @@ def build_sim_vault(root: Path) -> Path:
     write_yaml(
         paths.goals_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "goals": [
                 {
                     "id": "goal_algebra",
                     "title": "Algebra fluency",
                     "status": "active",
                     "priority": 0.8,
-                    "concept_anchors": ["linear_equations"],
+                    "target_recall": 0.8,
+                    "facet_scope": {"concepts": ["linear_equations"]},
                     "due_at": None,
                     "created_at": NOW_ISO,
                     "updated_at": NOW_ISO,

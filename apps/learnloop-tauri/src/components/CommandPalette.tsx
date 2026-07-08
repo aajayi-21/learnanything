@@ -256,7 +256,7 @@ async function runWhy(args: string[]): Promise<OutputRow[]> {
     { type: "label", text: "priority", value: explanation.priority.toFixed(3) },
     { type: "blank" },
     { type: "why-row", k: "forgetting_risk", contrib: c.forgettingRisk },
-    { type: "why-row", k: "active_goal", contrib: c.activeGoal },
+    { type: "why-row", k: "goal_frontier", contrib: c.goalFrontier ?? 0 },
     { type: "why-row", k: "recent_error", contrib: c.recentError },
     { type: "why-row", k: "probe_eig", contrib: c.probeEig }
   ];

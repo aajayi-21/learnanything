@@ -59,6 +59,7 @@ class SubmitAttemptInput(ParamsModel):
     hints_used: int = 0
     latency_seconds: int | None = None
     self_grade: SelfGradeInputDto | None = None
+    primed: bool = False
 
 
 class DontKnowInput(ParamsModel):
@@ -116,6 +117,7 @@ def submit_attempt(ctx: SidecarContext, params: SubmitAttemptInput) -> dict[str,
         hints_used=hints_used,
         latency_seconds=params.latency_seconds,
         session_id=params.session_id,
+        primed=params.primed,
     )
     self_grade = _self_grade(params.self_grade)
     provider_name, runtime, client = ready_grading_provider(vault, override=ctx.grading_provider_override)
@@ -174,7 +176,9 @@ def submit_attempt(ctx: SidecarContext, params: SubmitAttemptInput) -> dict[str,
     except (AttemptValidationError, ValueError) as exc:
         raise SidecarError("validation_error", str(exc)) from exc
     _persist_feedback_metadata(repository, result, self_grade)
-    _evaluate_followup(vault, repository, params.session_id, result)
+    _evaluate_followup(
+        vault, repository, params.session_id, result, ai_client=client if runtime.ready else None
+    )
     # Clear the checkpoint in the same call that records the attempt, so a lost
     # client-side clear can never leave a submitted draft to replay on restart.
     repository.clear_session_checkpoint(params.session_id)
@@ -277,12 +281,13 @@ def _persist_feedback_metadata(repository, result, self_grade: SelfGradeInput | 
     )
 
 
-def _evaluate_followup(vault, repository, session_id: str, result) -> None:
+def _evaluate_followup(vault, repository, session_id: str, result, ai_client=None) -> None:
     evaluate_attempt_intervention_followup(
         vault,
         repository,
         result=result,
         session_id=session_id,
+        ai_client=ai_client,
     )
 
 

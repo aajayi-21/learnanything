@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from learnloop.attempt_types import AttemptType
 from learnloop.config import LearnLoopConfig
@@ -28,19 +28,59 @@ class Provenance(VaultModel):
     source_refs: list[SourceRef] = Field(default_factory=list)
 
 
+class GoalFacetScope(VaultModel):
+    # Concepts expand to every evidence facet required by LOs on that concept;
+    # facets add explicit facet ids (matched wherever an LO requires them).
+    concepts: list[str] = Field(default_factory=list)
+    facets: list[str] = Field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.concepts and not self.facets
+
+
+class GoalExamConfig(VaultModel):
+    enabled: bool = False
+    item_count: int = 20
+
+
 class Goal(VaultModel):
+    """A measurable commitment: target recall over a facet set by a due date.
+
+    Schema v2. Legacy v1 goals (concept_anchors) convert at load:
+    anchors become facet_scope.concepts and target_recall defaults.
+    """
+
     id: str
     title: str
-    status: Literal["active", "paused", "completed"] = "active"
+    status: Literal["active", "paused", "completed", "expired"] = "active"
+    # Tiebreaker between overlapping goals, not a scheduling weight.
     priority: float = Field(default=0.5, ge=0.0, le=1.0)
-    concept_anchors: list[str] = Field(default_factory=list)
+    # A facet counts toward the goal when its projected recall at due_at
+    # (or the default horizon for open-ended goals) meets this threshold.
+    target_recall: float = Field(default=0.8, ge=0.0, le=1.0)
+    facet_scope: GoalFacetScope = Field(default_factory=GoalFacetScope)
     due_at: str | None = None
+    exam: GoalExamConfig = Field(default_factory=GoalExamConfig)
     created_at: str
     updated_at: str
 
+    @model_validator(mode="before")
+    @classmethod
+    def _convert_legacy_concept_anchors(cls, data):
+        if not isinstance(data, dict):
+            return data
+        anchors = data.get("concept_anchors")
+        scope = data.get("facet_scope")
+        if anchors and not scope:
+            converted = dict(data)
+            converted.pop("concept_anchors")
+            converted["facet_scope"] = {"concepts": list(anchors)}
+            return converted
+        return data
+
 
 class GoalsFile(VaultModel):
-    schema_version: int = 1
+    schema_version: int = 2
     goals: list[Goal] = Field(default_factory=list)
 
 
@@ -108,6 +148,9 @@ class RubricFatalError(VaultModel):
     id: str
     description: str
     max_grade: int
+    # Optional link to a registry belief (spec §1.2): when set, this fatal error
+    # is the signature a holder of the misconception trips. Absent on legacy items.
+    misconception_id: str | None = None
 
 
 class Rubric(VaultModel):
@@ -177,11 +220,36 @@ class PracticeItem(VaultModel):
     transfer_distance: float | None = Field(default=None, ge=0.0, le=1.0)
     scaffold_level: float | None = Field(default=None, ge=0.0, le=1.0)
     surface_family: str | None = None
+    # spec §5.2.2: for generated diagnostics, the categorically-divergent answer a
+    # holder of the targeted belief would give. Round-trips through patches so the
+    # sim gate and review policy can read it off the applied item. None otherwise.
+    misconception_consistent_answer: str | None = None
     repair_targets: list[str] = Field(default_factory=list)
     grading_rubric: Rubric | None = None
     provenance: Provenance = Field(default_factory=Provenance)
     created_at: str
     updated_at: str
+
+
+def discriminates(item: "PracticeItem", rubric: "Rubric | None" = None) -> dict[str, list[str]]:
+    """Item-level view of which misconceptions this item's fatal errors catch.
+
+    Derived (not authored): maps ``misconception_id`` -> [fatal_error_id] from the
+    ``misconception_id`` links on the resolved rubric's fatal errors (spec §1.2).
+    ``rubric`` defaults to the item's own ``grading_rubric``; pass the resolved
+    rubric when the item inherits fatal errors from a default rubric.
+    """
+
+    resolved = rubric if rubric is not None else item.grading_rubric
+    mapping: dict[str, list[str]] = {}
+    if resolved is None:
+        return mapping
+    for fatal_error in resolved.fatal_errors:
+        misconception_id = getattr(fatal_error, "misconception_id", None)
+        if not misconception_id:
+            continue
+        mapping.setdefault(misconception_id, []).append(fatal_error.id)
+    return mapping
 
 
 class ErrorType(VaultModel):

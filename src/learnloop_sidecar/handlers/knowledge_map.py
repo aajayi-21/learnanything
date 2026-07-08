@@ -4,7 +4,7 @@ from collections import deque
 from math import sqrt
 from typing import Any
 
-from learnloop.services.mastery import display_mastery
+from learnloop.services.mastery import display_mastery, sigmoid
 from learnloop.services.probes import resolve_item_irt
 from learnloop.services.recall_coverage import predicted_correctness
 from learnloop.services.scheduler import build_due_queue
@@ -29,6 +29,10 @@ _GRAPH_RELATIONS = {"prerequisite", "related", "part_of"}
 
 _TOP_FACETS = 3
 _TITLE_MAX = 80
+# Nearest neighbors shipped per point, ranked by the *blended* distance matrix
+# (not the lossy 2D embedding) — the chronicle draws these as labeled spokes so
+# unattempted probes show what they are actually similar to.
+_NEIGHBOR_COUNT = 4
 
 
 @method("get_knowledge_map")
@@ -80,6 +84,18 @@ def get_knowledge_map(ctx: SidecarContext, _params) -> dict[str, Any]:
     distances = _blended_distances(items, vectors, concept_of, hops)
     coords, stress = _classical_mds(distances)
 
+    # Top-K neighbors per item from the true blended distances (ties broken by
+    # id so repeat calls stay byte-identical).
+    neighbor_lists: list[list[dict[str, Any]]] = []
+    for i in range(n):
+        order = sorted(
+            (j for j in range(n) if j != i),
+            key=lambda j: (distances[i][j], items[j].id),
+        )
+        neighbor_lists.append(
+            [{"id": items[j].id, "distance": distances[i][j]} for j in order[:_NEIGHBOR_COUNT]]
+        )
+
     facet_count = len({facet for item in items for facet in item.evidence_facets})
     points: list[dict[str, Any]] = []
     for index, item in enumerate(items):
@@ -116,6 +132,7 @@ def get_knowledge_map(ctx: SidecarContext, _params) -> dict[str, Any]:
                 "queued": item.id in queued_ids,
                 "difficulty": item.difficulty,
                 "facets": top_facets,
+                "neighbors": neighbor_lists[index],
             }
         )
 
@@ -129,6 +146,67 @@ def get_knowledge_map(ctx: SidecarContext, _params) -> dict[str, Any]:
                 "facets": facet_count,
             },
             "stress": stress,
+        }
+    )
+
+
+@method("get_knowledge_map_history")
+def get_knowledge_map_history(ctx: SidecarContext, _params) -> dict[str, Any]:
+    """Attempt events + reconstructed mastery trajectories for the chronicle.
+
+    Two parallel feeds, both time-ordered:
+
+    - ``attempts``: every recorded attempt as a discrete event (timestamp,
+      item, correctness, type) — the chronicle plots these as dots in the
+      space-time cube.
+    - ``learning_objects[].series``: per-LO mastery step series reconstructed
+      from ``attempt_surprise.posterior_delta`` (``sigmoid(mu_after)`` is the
+      same display-mean mapping the feedback panel's before/after bars use).
+      Only the *current* mastery state is stored; the surprise log is the
+      canonical record of how it got there, so attempts without a surprise row
+      (legacy imports, non-updating types) contribute an event but no series
+      point.
+
+    The frontend joins attempts to map points by ``practice_item_id`` and
+    series to points by ``learning_object_id``; attempts referencing items
+    since removed from the vault are simply never matched.
+    """
+
+    _vault, repository = ctx.require_vault()
+
+    rows = repository.list_attempt_history()
+    series_by_lo: dict[str, list[dict[str, Any]]] = {}
+    attempts: list[dict[str, Any]] = []
+    for row in rows:
+        attempts.append(
+            {
+                "id": row["id"],
+                "t": row["created_at"],
+                "practice_item_id": row["practice_item_id"],
+                "learning_object_id": row["learning_object_id"],
+                "attempt_type": row["attempt_type"],
+                "correctness": row["correctness"],
+                "rubric_score": row["rubric_score"],
+                "hints_used": row["hints_used"],
+            }
+        )
+        delta = row["posterior_delta"] or {}
+        mu_after = delta.get("mu_after")
+        if mu_after is not None:
+            series_by_lo.setdefault(row["learning_object_id"], []).append(
+                {"t": row["created_at"], "mastery": sigmoid(mu_after)}
+            )
+
+    return versioned(
+        {
+            "attempts": attempts,
+            "learning_objects": [
+                {"id": lo_id, "series": series}
+                for lo_id, series in sorted(series_by_lo.items())
+            ],
+            "range": (
+                {"start": attempts[0]["t"], "end": attempts[-1]["t"]} if attempts else None
+            ),
         }
     )
 

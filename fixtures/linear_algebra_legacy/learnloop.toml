@@ -4,11 +4,10 @@ schema_version = 1
 sqlite_path = "state.sqlite"
 
 [algorithms]
-algorithm_version = "mvp-0.4"
+algorithm_version = "mvp-0.5"
 
 [scheduler]
 forgetting_risk_weight = 1.0
-active_goal_weight = 0.35
 recent_error_weight = 0.50
 probe_eig_weight = 0.25
 short_session_minutes = 20

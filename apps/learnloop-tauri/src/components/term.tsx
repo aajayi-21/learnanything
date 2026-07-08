@@ -73,6 +73,33 @@ export function Pill({
   );
 }
 
+// Practice/probe `practice_mode` is an open vocabulary — the authoring model
+// emits free-text mode labels (short_answer, proof_explanation,
+// worked_calculation, multiple_choice_with_explanation, diagnostic_probe, …),
+// so an exact-match table would send every new label to the fallback. Instead we
+// classify by keyword into semantic families, each anchored to one pill color
+// (the original handoff palette: short_answer→purple, explanation→cyan,
+// proof→amber, worked→green, transfer/probe/teach→pink, recall→slate).
+// First matching rule wins; anything unrecognized falls back to purple.
+const MODE_COLOR_RULES: Array<[RegExp, PillColor]> = [
+  [/teach/, "pink"], // teach-back (learner teaches the AI naive student)
+  [/transfer/, "pink"], // near/far transfer
+  [/probe|diagnostic/, "pink"], // diagnostic probes
+  [/proof|derivation|theorem|justif/, "amber"], // formal argument
+  [/numeric|calculat|worked|algebra|comput|quantit|arithmetic/, "green"], // computation
+  [/explan|explain|compare|contrast|diagram|classif|feature|conceptual/, "cyan"], // conceptual / explanatory
+  [/recall|ordering|ordered|sequence|multiple_choice|match|recogni/, "slate"], // recall / recognition / sequencing
+  [/short_answer|open_response|open_text|constructed|scenario|free_response|application/, "purple"] // short/open constructed answer
+];
+
+export function modePillColor(mode: string | null | undefined): PillColor {
+  const m = (mode ?? "").toLowerCase();
+  for (const [pattern, color] of MODE_COLOR_RULES) {
+    if (pattern.test(m)) return color;
+  }
+  return "purple";
+}
+
 export function SectionHeader({ children, style = {} }: { children: ReactNode; style?: CSSProperties }) {
   return (
     <div

@@ -7,7 +7,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from learnloop.codex.client import GradingContext, HttpCodexClient
 from learnloop.codex.runtime import check_codex_runtime
+from learnloop.codex.schemas import MisconceptionMatch
 from learnloop.config import CodexConfig
+from learnloop.services.misconceptions import MisconceptionMatchContext
 
 
 def test_http_codex_client_health_and_grading_round_trip(tmp_path, caplog):
@@ -54,6 +56,52 @@ def test_http_codex_client_health_and_grading_round_trip(tmp_path, caplog):
     assert response_log["response"]["proposal"]["rubric_score"] == 4
 
 
+def test_http_codex_client_misconception_match_round_trip(tmp_path):
+    server = _CodexServer(
+        {"attempt_id": "attempt_1", "practice_item_id": "pi_1", "rubric_score": 4, "criterion_evidence": [], "grader_confidence": 0.9},
+        misconception_payload={"decision": "same", "misconception_id": "mis_1"},
+    )
+    server.start()
+    try:
+        config = CodexConfig(provider="http", base_url=server.base_url)
+        result = HttpCodexClient(config).run_misconception_match(
+            MisconceptionMatchContext(
+                statement="halves the exponent when differentiating",
+                learning_object_id="lo_1",
+                candidates=[{"id": "mis_1", "statement": "drops the coefficient"}],
+            )
+        )
+    finally:
+        server.stop()
+
+    assert isinstance(result, MisconceptionMatch)
+    assert result.decision == "same"
+    assert result.misconception_id == "mis_1"
+    assert server.requests[0]["path"] == "/misconception-match"
+    assert server.requests[0]["body"]["context"]["statement"] == "halves the exponent when differentiating"
+    assert server.requests[0]["body"]["context"]["candidates"][0]["id"] == "mis_1"
+
+
+def test_http_codex_client_misconception_match_bare_payload(tmp_path):
+    server = _CodexServer(
+        {"attempt_id": "a", "practice_item_id": "p", "rubric_score": 0, "criterion_evidence": [], "grader_confidence": 0.5},
+        misconception_payload={"decision": "new"},
+        misconception_bare=True,
+    )
+    server.start()
+    try:
+        config = CodexConfig(provider="http", base_url=server.base_url)
+        result = HttpCodexClient(config).run_misconception_match(
+            MisconceptionMatchContext(statement="x", learning_object_id="lo_1", candidates=[{"id": "m", "statement": "y"}])
+        )
+    finally:
+        server.stop()
+
+    assert isinstance(result, MisconceptionMatch)
+    assert result.decision == "new"
+    assert result.misconception_id is None
+
+
 def _logged_event(records, event: str) -> dict:
     for record in records:
         if record.getMessage() == event:
@@ -64,8 +112,10 @@ def _logged_event(records, event: str) -> dict:
 
 
 class _CodexServer:
-    def __init__(self, grading_payload: dict):
+    def __init__(self, grading_payload: dict, misconception_payload: dict | None = None, misconception_bare: bool = False):
         self.grading_payload = grading_payload
+        self.misconception_payload = misconception_payload
+        self.misconception_bare = misconception_bare
         self.requests: list[dict] = []
         self._server = HTTPServer(("127.0.0.1", 0), self._handler())
         self.base_url = f"http://127.0.0.1:{self._server.server_port}"
@@ -96,6 +146,12 @@ class _CodexServer:
                 owner.requests.append({"path": self.path, "body": body})
                 if self.path == "/grading-proposal":
                     self._json({"proposal": owner.grading_payload})
+                    return
+                if self.path == "/misconception-match" and owner.misconception_payload is not None:
+                    if owner.misconception_bare:
+                        self._json(owner.misconception_payload)
+                    else:
+                        self._json({"proposal": owner.misconception_payload})
                     return
                 self.send_response(404)
                 self.end_headers()

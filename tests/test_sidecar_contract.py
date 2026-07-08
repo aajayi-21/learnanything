@@ -1024,6 +1024,30 @@ def test_sidecar_vault_tree_and_file_read(tmp_path):
     assert responses[3]["error"]["data"]["code"] == "invalid_path"
 
 
+def test_sidecar_get_recent_ingests_lists_canonical_sources(tmp_path):
+    # The arxiv fixture vault holds canonical_source notes plus the proposal
+    # batches their ingests produced; copy it so loading never mutates it.
+    vault_root = tmp_path / "vault"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "fixtures" / "arxiv", vault_root)
+
+    responses = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "get_recent_ingests"},
+        ]
+    )
+
+    ingests = responses[1]["result"]["ingests"]
+    assert ingests, "fixture vault should expose canonical_source ingests"
+    for entry in ingests:
+        assert entry["noteId"]
+        assert entry["path"]
+        assert entry["purpose"] in {"canonical_ingest", "exam_ingest"}
+    stamps = [entry["createdAt"] or entry["retrievedAt"] or "" for entry in ingests]
+    assert stamps == sorted(stamps, reverse=True)
+    assert any(entry["patchId"] for entry in ingests)
+
+
 def test_sidecar_write_vault_file_round_trips_and_guards(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)
@@ -1576,6 +1600,7 @@ def test_sidecar_get_knowledge_map_shape_on_fixture_vault(tmp_path):
             "queued",
             "difficulty",
             "facets",
+            "neighbors",
         }
         assert -1.0 <= point["x"] <= 1.0
         assert -1.0 <= point["y"] <= 1.0
@@ -1588,6 +1613,14 @@ def test_sidecar_get_knowledge_map_shape_on_fixture_vault(tmp_path):
         assert point["learningObjectId"] == item.learning_object_id
         assert 1 <= len(point["facets"]) <= 3 or not item.evidence_facets
         assert set(point["facets"]) <= set(item.evidence_facets)
+        # Neighbors: true blended distances, ranked ascending, never self.
+        neighbors = point["neighbors"]
+        assert len(neighbors) == min(4, len(points) - 1)
+        assert all(set(n) == {"id", "distance"} for n in neighbors)
+        assert all(n["id"] in loaded.practice_items and n["id"] != point["id"] for n in neighbors)
+        dists = [n["distance"] for n in neighbors]
+        assert all(0.0 <= d <= 1.0 for d in dists)
+        assert dists == sorted(dists)
 
 
 def test_sidecar_get_knowledge_map_deterministic_and_geometric(tmp_path):
@@ -1633,6 +1666,88 @@ def test_sidecar_get_knowledge_map_deterministic_and_geometric(tmp_path):
     # Sanity geometry: items testing the same LO must land closer together than
     # items with disjoint facet vocabularies in different concepts.
     assert dist(*same_lo_pair) < dist(*disjoint_pair)
+
+
+def test_sidecar_get_knowledge_map_history_empty_and_after_attempt(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    seed_due_item(paths)
+
+    # Before any attempts: empty feeds, null range.
+    empty = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "get_knowledge_map_history"},
+        ]
+    )[1]["result"]
+    assert empty["version"] == 1
+    assert empty["attempts"] == []
+    assert empty["learningObjects"] == []
+    assert empty["range"] is None
+
+    session_id = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "start_session", "params": {"energy": "medium"}},
+        ]
+    )[1]["result"]["sessionId"]
+    _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "submit_attempt",
+                "params": {
+                    "sessionId": session_id,
+                    "practiceItemId": "pi_svd_define_001",
+                    "answerMd": "SVD is U Sigma V transpose.",
+                    "attemptType": "independent_attempt",
+                    "hintsUsed": 0,
+                    "selfGrade": {
+                        "criterionPoints": {"correctness": 4},
+                        "confidence": 5,
+                        "notes": "Complete.",
+                    },
+                },
+            },
+        ]
+    )
+
+    history = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "get_knowledge_map_history"},
+        ]
+    )[1]["result"]
+
+    attempts = history["attempts"]
+    assert len(attempts) == 1
+    event = attempts[0]
+    assert set(event) == {
+        "id",
+        "t",
+        "practiceItemId",
+        "learningObjectId",
+        "attemptType",
+        "correctness",
+        "rubricScore",
+        "hintsUsed",
+    }
+    assert event["practiceItemId"] == "pi_svd_define_001"
+    assert event["attemptType"] == "independent_attempt"
+    assert event["correctness"] is None or 0.0 <= event["correctness"] <= 1.0
+
+    # The mastery update recorded a posterior delta, so the LO's trajectory has
+    # a step at the attempt's timestamp with a valid display-space mastery.
+    series_by_lo = {lo["id"]: lo["series"] for lo in history["learningObjects"]}
+    assert event["learningObjectId"] in series_by_lo
+    series = series_by_lo[event["learningObjectId"]]
+    assert len(series) == 1
+    assert series[0]["t"] == event["t"]
+    assert 0.0 <= series[0]["mastery"] <= 1.0
+
+    assert history["range"] == {"start": event["t"], "end": event["t"]}
 
 
 def test_sidecar_set_grading_provider_switch_and_health(tmp_path):

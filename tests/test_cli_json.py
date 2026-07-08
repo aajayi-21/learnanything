@@ -40,6 +40,77 @@ def test_doctor_json_contract(tmp_path):
     assert payload["state_sync"]["practice_item_states_created"] == 1
 
 
+def test_misconception_gate_backfill_json_contract(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    repository.insert_misconception(
+        id="mc_reverse_q",
+        learning_object_id="lo_svd_definition",
+        statement="reverses Q / Q^T",
+        signature="Q^T x is the coordinate vector",
+        facet_ids=["recall"],
+        severity=0.8,
+    )
+    from learnloop.vault.writer import upsert_practice_item
+
+    upsert_practice_item(
+        paths.root,
+        {
+            "id": "pi_keyed_reverse",
+            "learning_object_id": "lo_svd_definition",
+            "subjects": None,
+            "practice_mode": "short_answer",
+            "attempt_types_allowed": ["independent_attempt"],
+            "evidence_facets": ["recall"],
+            "evidence_weights": {"recall": 1.0},
+            "prompt": "Which of Qx / Q^T x is the coordinate vector?",
+            "expected_answer": "Qx is the coordinate vector",
+            "misconception_consistent_answer": "Q^T x is the coordinate vector",
+            "surface_family": "computation",
+            "grading_rubric": {
+                "max_points": 4,
+                "criteria": [{"id": "c1", "points": 4, "description": "correct"}],
+                "fatal_errors": [
+                    {"id": "fe", "description": "d", "misconception_id": "mc_reverse_q", "max_grade": 1}
+                ],
+            },
+            "created_at": "2026-05-19T12:00:00Z",
+            "updated_at": "2026-05-19T12:00:00Z",
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app, ["misconception-gate-backfill", "--vault", str(vault_root), "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert set(payload) == {
+        "version",
+        "backfilled",
+        "skipped_existing",
+        "skipped_unregistered",
+        "summary",
+    }
+    assert payload["summary"] == {
+        "backfilled": 1,
+        "skipped_existing": 0,
+        "skipped_unregistered": 0,
+    }
+    assert payload["backfilled"][0]["practice_item_id"] == "pi_keyed_reverse"
+
+    # Second run respects the existing row.
+    again = json.loads(
+        runner.invoke(
+            app, ["misconception-gate-backfill", "--vault", str(vault_root), "--json"]
+        ).output
+    )
+    assert again["summary"]["skipped_existing"] == 1
+    assert again["summary"]["backfilled"] == 0
+
+
 def test_review_why_attempt_show_json_contracts(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)

@@ -80,6 +80,15 @@ def replay_learning_object(
                 error_attributions=override_attributions,
             )
         )
+    # spec §7: registry links survive replay (persisted misconception_id on the
+    # error events is re-threaded through GradeAttribution). Replay never
+    # re-normalizes, but it re-derives resolution status deterministically from
+    # the replayed attempts so a rebuilt vault matches the live one.
+    from learnloop.services.misconceptions import update_misconception_posteriors_and_resolve
+
+    update_misconception_posteriors_and_resolve(
+        vault, repository, learning_object_id=learning_object_id
+    )
     return ReplayResult(
         learning_object_id=learning_object_id,
         replayed_attempts=len(replayed),

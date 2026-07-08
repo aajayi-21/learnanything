@@ -46,6 +46,48 @@ def test_codex_error_attribution_preserves_target_evidence_families(tmp_path):
     assert validated.error_attributions[0].target_evidence_families == ["numeric"]
 
 
+def test_codex_error_attribution_passes_through_misconception_fields(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    vault = load_vault(vault_root)
+    item = vault.practice_items["pi_svd_define_001"]
+
+    validated = validate_codex_grading_proposal(
+        _proposal(
+            misconception_statement="believes Q maps standard vectors to eigenbasis coefficients",
+            misconception_consistent_answer="Qx is the coordinate vector",
+        ),
+        attempt_id="attempt_1",
+        item=item,
+        vault=vault,
+    )
+
+    attribution = validated.error_attributions[0]
+    assert attribution.misconception_statement == "believes Q maps standard vectors to eigenbasis coefficients"
+    assert attribution.misconception_consistent_answer == "Qx is the coordinate vector"
+
+
+def test_codex_misconception_without_statement_does_not_hard_fail(tmp_path):
+    # Legacy providers omit the structured statement; validation must pass it as
+    # None rather than raising (spec §2.1).
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    vault = load_vault(vault_root)
+    item = vault.practice_items["pi_svd_define_001"]
+
+    validated = validate_codex_grading_proposal(
+        _proposal(is_misconception=True),
+        attempt_id="attempt_1",
+        item=item,
+        vault=vault,
+    )
+
+    attribution = validated.error_attributions[0]
+    assert attribution.is_misconception is True
+    assert attribution.misconception_statement is None
+    assert attribution.misconception_consistent_answer is None
+
+
 def test_codex_error_attribution_maps_target_criterion_to_facet(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)
@@ -291,6 +333,8 @@ def _proposal(
     error_type: str = "conceptual_slip",
     is_misconception: bool = True,
     evidence: str = "Confuses details.",
+    misconception_statement: str | None = None,
+    misconception_consistent_answer: str | None = None,
     target_evidence_families: list[str] | None = None,
     target_criterion_ids: list[str] | None = None,
     repair_suggestions: list[RepairSuggestion] | None = None,
@@ -313,6 +357,8 @@ def _proposal(
                 severity=0.6,
                 evidence=evidence,
                 is_misconception=is_misconception,
+                misconception_statement=misconception_statement,
+                misconception_consistent_answer=misconception_consistent_answer,
                 target_evidence_families=target_evidence_families or [],
                 target_criterion_ids=target_criterion_ids or [],
             )

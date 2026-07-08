@@ -188,6 +188,7 @@ button { color: inherit; }
   white-space: nowrap;
 }
 .pill.slate { background: #363850; color: #b0b0c8; }
+.pill.purple { background: #5a4d8a; color: #dccdf2; }
 .pill.amber { background: #6e5025; color: #f0c890; }
 .pill.green { background: #3a6b4d; color: #b8e8c8; }
 .pill.cyan { background: #2e5d6a; color: #a8e0ed; }
@@ -767,7 +768,7 @@ button { color: inherit; }
 }
 .cli-why-key { color: var(--text); }
 .cli-why-key.forgetting_risk { color: var(--amber); }
-.cli-why-key.active_goal { color: var(--green); }
+.cli-why-key.goal_frontier { color: var(--green); }
 .cli-why-key.recent_error { color: var(--red); }
 .cli-why-key.probe_eig { color: var(--pink); }
 .cli-why-contrib { color: var(--text); }
@@ -981,4 +982,41 @@ button { color: inherit; }
   .split > section { border-right: 0; border-bottom: 1px solid var(--border); max-height: 48vh; }
   .nav-status { display: none; }
   .top-nav { overflow-x: auto; }
+}
+
+/* Visualization SVGs (facet radar + well, knowledge terrain, chronicle graph):
+   their text labels must never be selectable — an accidental drag across the
+   labels (or a drag to orbit) should never highlight text. user-select is set
+   inline too, but this also hides any selection the webview manages to start
+   despite that — a transparent highlight instead of a visible one. */
+.noselect-canvas,
+.noselect-canvas text {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.noselect-canvas ::selection,
+.noselect-canvas text::selection {
+  background: transparent;
+}
+
+/* ── ingest · indeterminate pipeline bar ── */
+.ll-ingest-bar {
+  position: relative;
+  height: 3px;
+  background: #181818;
+  overflow: hidden;
+}
+.ll-ingest-bar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, #e3a063, transparent);
+  animation: ll-ingest-slide 1.4s ease-in-out infinite;
+}
+@keyframes ll-ingest-slide {
+  from { left: -40%; }
+  to { left: 100%; }
 }

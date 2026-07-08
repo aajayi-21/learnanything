@@ -219,11 +219,20 @@ def _rewrite_goals_file(
     for goal in data.get("goals", []):
         if not isinstance(goal, dict):
             continue
+        # Legacy v1 goals key concepts under concept_anchors; v2 under
+        # facet_scope.concepts. Rewrite whichever form the file uses.
         anchors = goal.get("concept_anchors")
         if isinstance(anchors, list):
             rewritten = _rewrite_list(anchors, canonical_id, duplicate_id)
             if rewritten != anchors:
                 goal["concept_anchors"] = rewritten
+                goal["updated_at"] = clock_iso
+                changed = True
+        scope = goal.get("facet_scope")
+        if isinstance(scope, dict) and isinstance(scope.get("concepts"), list):
+            rewritten = _rewrite_list(scope["concepts"], canonical_id, duplicate_id)
+            if rewritten != scope["concepts"]:
+                scope["concepts"] = rewritten
                 goal["updated_at"] = clock_iso
                 changed = True
     _write_yaml_if_changed(path, data, changed_files, dry_run=dry_run, force_changed=changed)

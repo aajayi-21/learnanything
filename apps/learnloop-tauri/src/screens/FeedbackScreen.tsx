@@ -7,9 +7,12 @@ import type {
   FeedbackBundle,
   FollowupGateDiagnosticsDto,
   FollowupGateSignalDto,
+  MasteryDto,
   PracticeItemDetail,
+  ResolvedSourceRefDto,
 } from "../api/dto";
 import { EntityLink, KeyBar, Pill } from "../components/ui";
+import { modePillColor } from "../components/term";
 import { algoConfig, masteryTone } from "../app/algoConfig";
 import { MarkdownMath } from "../render/MarkdownMath";
 
@@ -102,13 +105,11 @@ function ratingPill(r: string): string {
   return r === "easy" ? "green" : r === "good" ? "cyan" : r === "hard" ? "amber" : "red";
 }
 
+// Class-based Pill (ui.tsx) tones are the same names as term's PillColor, so we
+// reuse the shared keyword classifier — keeping mode colors consistent with the
+// Today queue and inspector instead of maintaining a divergent table here.
 function modePillTone(mode: string): string {
-  const m: Record<string, string> = {
-    short_answer: "cyan", explanation: "amber", proof: "slate",
-    worked_problem: "green", free_recall: "slate", transfer: "pink",
-    diagnostic_probe: "red",
-  };
-  return m[mode] ?? "slate";
+  return modePillColor(mode);
 }
 
 // ── ScoreBlock ────────────────────────────────────────────────────────────────
@@ -227,54 +228,234 @@ function ErrorAttribution({ ea, onInspect }: { ea: ErrorEventDto; onInspect: (id
   );
 }
 
+// ── Belief-shift chart ────────────────────────────────────────────────────────
+// Prior and posterior mastery are Gaussian in logit/θ space (the update is a
+// Kalman step there). The bundle only carries display-space mean/variance, so we
+// invert the backend's delta-method transform to recover (μ, σ) in θ-space and
+// draw the two true bell curves. The x-axis stays in θ but is annotated with
+// probability gridlines so it stays readable.
+const SQRT_2PI = Math.sqrt(2 * Math.PI);
+const PROB_TICKS = [0.1, 0.25, 0.5, 0.75, 0.9];
+
+function logit(p: number): number {
+  const c = Math.min(1 - 1e-4, Math.max(1e-4, p));
+  return Math.log(c / (1 - c));
+}
+
+// Display (mean m, variance v) → θ-space (μ, σ). Backend maps θ→display via
+// m = σ(μ) and v = (m(1−m))²·Var(θ) (delta method around the mean); invert both.
+function toLogitSpace(mean: number, variance: number): { mu: number; sd: number } {
+  const m = Math.min(1 - 1e-4, Math.max(1e-4, mean));
+  const slope = m * (1 - m); // dm/dμ at the mean
+  const logitVar = Math.max(1e-4, variance / (slope * slope));
+  return { mu: logit(m), sd: Math.sqrt(logitVar) };
+}
+
+function gaussianPdf(x: number, mu: number, sd: number): number {
+  const z = (x - mu) / sd;
+  return Math.exp(-0.5 * z * z) / (sd * SQRT_2PI);
+}
+
+// The prior (dashed, dim) and posterior (filled, mastery-toned) as true Gaussians
+// in θ-space, drawn to a shared vertical scale so the posterior's narrowing (or
+// forgetting-driven widening) is visible, not just its shift. A directional arrow
+// renders only when the Bayesian surprise crosses τ — the same bar that triggers
+// a re-probe — so its presence is meaningful rather than decorative.
+function BeliefShiftChart({
+  before,
+  after,
+  bayesianSurprise,
+  tau,
+  width = 480,
+  height = 150,
+}: {
+  before: MasteryDto;
+  after: MasteryDto;
+  bayesianSurprise: number;
+  tau: number;
+  width?: number;
+  height?: number;
+}) {
+  const prior = toLogitSpace(before.mean, before.variance);
+  const post = toLogitSpace(after.mean, after.variance);
+
+  const padL = 8;
+  const padR = 8;
+  const padT = 20;
+  const padB = 20;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  // Domain covers both bells (±3.4σ) and always spans the 0.15–0.85 band so the
+  // probability ticks give orientation even when the belief is tight.
+  const lo = Math.min(prior.mu - 3.4 * prior.sd, post.mu - 3.4 * post.sd, logit(0.15));
+  const hi = Math.max(prior.mu + 3.4 * prior.sd, post.mu + 3.4 * post.sd, logit(0.85));
+  const span = Math.max(1e-3, hi - lo);
+  const xOf = (t: number) => padL + ((t - lo) / span) * plotW;
+
+  // Shared vertical scale from the taller (narrower) peak, with headroom.
+  const peak = Math.max(gaussianPdf(prior.mu, prior.mu, prior.sd), gaussianPdf(post.mu, post.mu, post.sd));
+  const yMax = peak * 1.12;
+  const baseY = padT + plotH;
+  const yOf = (d: number) => padT + (1 - Math.min(1, d / yMax)) * plotH;
+
+  const N = 72;
+  const curvePath = (mu: number, sd: number, close: boolean): string => {
+    let d = "";
+    for (let i = 0; i <= N; i++) {
+      const x = lo + (span * i) / N;
+      const y = gaussianPdf(x, mu, sd);
+      d += `${i === 0 ? "M" : "L"} ${xOf(x).toFixed(1)} ${yOf(y).toFixed(1)} `;
+    }
+    if (close) d += `L ${xOf(hi).toFixed(1)} ${baseY.toFixed(1)} L ${xOf(lo).toFixed(1)} ${baseY.toFixed(1)} Z`;
+    return d;
+  };
+
+  const postColor = masteryTone(after.mean, C);
+  const shift = post.mu - prior.mu;
+  const showArrow = bayesianSurprise > tau && Math.abs(shift) > 1e-3;
+  const arrowColor = shift >= 0 ? C.green : C.red;
+  const arrowY = 11;
+  const xPrior = xOf(prior.mu);
+  const xPost = xOf(post.mu);
+  const yPrior = yOf(gaussianPdf(prior.mu, prior.mu, prior.sd));
+  const yPost = yOf(gaussianPdf(post.mu, post.mu, post.sd));
+
+  return (
+    <svg width={width} height={height} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}>
+      {/* probability gridlines (positioned in θ, labeled in p) */}
+      {PROB_TICKS.map((p) => {
+        const t = logit(p);
+        if (t < lo || t > hi) return null;
+        const x = xOf(t);
+        const mid = p === 0.5;
+        return (
+          <g key={p}>
+            <line
+              x1={x}
+              y1={padT}
+              x2={x}
+              y2={baseY}
+              stroke={C.border}
+              strokeWidth={1}
+              strokeDasharray={mid ? "2 3" : "1 4"}
+              opacity={mid ? 0.6 : 0.4}
+            />
+            <text x={x} y={baseY + 12} fill={C.textFaint} fontFamily={MONO} fontSize={9} textAnchor="middle">
+              {Math.round(p * 100)}%
+            </text>
+          </g>
+        );
+      })}
+
+      {/* baseline */}
+      <line x1={padL} y1={baseY} x2={padL + plotW} y2={baseY} stroke={C.border} strokeWidth={1} />
+
+      {/* prior peak drop-line, then the prior bell (dashed, dim) */}
+      <line x1={xPrior} y1={yPrior} x2={xPrior} y2={baseY} stroke={C.textDim} strokeWidth={1} strokeDasharray="2 2" opacity={0.45} />
+      <path d={curvePath(prior.mu, prior.sd, false)} fill="none" stroke={C.textDim} strokeWidth={1} strokeDasharray="3 3" opacity={0.85} />
+
+      {/* posterior peak drop-line, then the posterior bell (filled, mastery-toned) */}
+      <line x1={xPost} y1={yPost} x2={xPost} y2={baseY} stroke={postColor} strokeWidth={1} opacity={0.5} />
+      <path d={curvePath(post.mu, post.sd, true)} fill={postColor} fillOpacity={0.12} stroke={postColor} strokeWidth={1.5} />
+
+      {/* shift arrow — only when the surprise crosses τ */}
+      {showArrow && (
+        <g>
+          <line x1={xPrior} y1={arrowY} x2={xPost} y2={arrowY} stroke={arrowColor} strokeWidth={1.5} />
+          <path
+            d={
+              shift >= 0
+                ? `M ${xPost.toFixed(1)} ${arrowY} L ${(xPost - 5).toFixed(1)} ${arrowY - 3} L ${(xPost - 5).toFixed(1)} ${arrowY + 3} Z`
+                : `M ${xPost.toFixed(1)} ${arrowY} L ${(xPost + 5).toFixed(1)} ${arrowY - 3} L ${(xPost + 5).toFixed(1)} ${arrowY + 3} Z`
+            }
+            fill={arrowColor}
+          />
+        </g>
+      )}
+    </svg>
+  );
+}
+
 // ── MasteryDelta ──────────────────────────────────────────────────────────────
 function MasteryDelta({ f }: { f: FeedbackBundle }) {
   const { masteryBefore: before, masteryAfter: after, surprise } = f;
   if (!before || !after) return null;
 
-  const barColor = (m: number) => masteryTone(m, C);
   // The backend supplies the configured surprise threshold per bundle; the
   // config-level τ covers older bundles that predate the field.
   const tau = surprise.followupThresholdNats ?? algoConfig().tauFollowupNats;
-  const hasSurprise = (surprise.bayesianSurprise ?? 0) > tau;
+  const bayes = surprise.bayesianSurprise ?? 0;
+  const hasSurprise = bayes > tau;
+  const postColor = masteryTone(after.mean, C);
+  const evidence = f.criterionEvidence ?? [];
 
   return (
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 2, padding: "14px 18px" }}>
-      <div style={{ fontSize: 13, color: C.text, marginBottom: 10 }}>
-        <span style={{ color: C.amber, fontWeight: 600 }}>mastery posterior · </span>
-        <Meta>logit-space Kalman update</Meta>
+      <div style={{
+        fontSize: 13, color: C.text, marginBottom: 10,
+        display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap",
+      }}>
+        <span>
+          <span style={{ color: C.amber, fontWeight: 600 }}>mastery posterior · </span>
+          <Meta>logit-space Kalman update</Meta>
+        </span>
+        <span style={{ fontFamily: MONO, fontSize: 11, color: C.textFaint, display: "inline-flex", gap: 14, alignItems: "center" }}>
+          <span><span style={{ color: C.textDim }}>╌╌</span> before</span>
+          <span><span style={{ color: postColor }}>━</span> after</span>
+        </span>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 24px 1fr", gap: 14, alignItems: "center" }}>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 12 }}><Faint>before</Faint></div>
-          <div style={{ marginTop: 4 }}>
-            <BlockBar value={before.mean} width={12} color={barColor(before.mean)} />
-          </div>
-          <div style={{ marginTop: 4, fontFamily: MONO, fontSize: 12 }}>
-            <Dim>{before.mean.toFixed(2)} ± {Math.sqrt(before.variance).toFixed(2)}</Dim>
-          </div>
-        </div>
-        <div style={{ textAlign: "center", color: C.amber, fontSize: 18 }}>→</div>
-        <div>
-          <div style={{ fontSize: 12 }}><Faint>after</Faint></div>
-          <div style={{ marginTop: 4 }}>
-            <BlockBar value={after.mean} width={12} color={barColor(after.mean)} />
-          </div>
-          <div style={{ marginTop: 4, fontFamily: MONO, fontSize: 12 }}>
-            <Dim>{after.mean.toFixed(2)} ± {Math.sqrt(after.variance).toFixed(2)}</Dim>
-          </div>
-        </div>
+
+      <BeliefShiftChart before={before} after={after} bayesianSurprise={bayes} tau={tau} />
+
+      {/* numeric readout of the shift */}
+      <div style={{ display: "flex", justifyContent: "center", alignItems: "baseline", gap: 12, fontFamily: MONO, fontSize: 12, marginTop: 6 }}>
+        <Dim>{before.mean.toFixed(2)} ± {Math.sqrt(before.variance).toFixed(2)}</Dim>
+        <span style={{ color: hasSurprise ? (after.mean >= before.mean ? C.green : C.red) : C.amber, fontSize: 15 }}>→</span>
+        <span style={{ color: postColor }}>{after.mean.toFixed(2)} ± {Math.sqrt(after.variance).toFixed(2)}</span>
       </div>
+
       {hasSurprise && (
         <div style={{
-          marginTop: 14, padding: "8px 12px",
+          marginTop: 12, padding: "8px 12px",
           background: "#221814", borderLeft: `3px solid ${C.amber}`,
           fontSize: 12, color: C.text,
         }}>
           <Pill tone="amber">surprise · {surprise.surpriseDirection ?? "unknown"}</Pill>
           {"  "}
-          bayesian {(surprise.bayesianSurprise ?? 0).toFixed(2)} nats &gt; τ {tau.toFixed(2)}
+          bayesian {bayes.toFixed(2)} nats &gt; τ {tau.toFixed(2)}
           {f.followupQueued ? " — diagnostic follow-up queued." : "."}
+        </div>
+      )}
+
+      {/* evidence from this attempt — the facet observations that drove the shift */}
+      {evidence.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 11, color: C.textFaint, fontFamily: MONO, marginBottom: 6 }}>evidence this attempt</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {evidence.map((row) => {
+              const ok = row.pointsAwarded === row.pointsPossible;
+              const partial = row.pointsAwarded > 0 && row.pointsAwarded < row.pointsPossible;
+              const mark = ok ? "✓" : partial ? "◐" : "✗";
+              const tone = ok ? C.green : partial ? C.amber : C.red;
+              return (
+                <span
+                  key={row.criterionId}
+                  title={row.criterionDescription}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                    border: `1px solid ${C.border}`, borderLeft: `2px solid ${tone}`,
+                    padding: "2px 7px", fontSize: 11, color: C.text, maxWidth: 220,
+                  }}
+                >
+                  <span style={{ color: tone, fontWeight: 700 }}>{mark}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {row.criterionDescription}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -415,12 +596,186 @@ function formatInterventionAction(action: string): string {
     .replace(/_/g, " ");
 }
 
+// ── Source review panel ──────────────────────────────────────────────────────
+// After a miss, show where in the canonical source the item came from: the
+// resolved text section, or (for video sources) the transcript excerpt with a
+// timestamp range, an on-demand embedded player, and an external YouTube link.
+function fmtTimestamp(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  return `${h > 0 ? `${h}:` : ""}${mm}:${String(s).padStart(2, "0")}`;
+}
+
+function timeRangeLabel(video: { startSeconds: number; endSeconds: number | null }): string {
+  return video.endSeconds != null
+    ? `${fmtTimestamp(video.startSeconds)}–${fmtTimestamp(video.endSeconds)}`
+    : fmtTimestamp(video.startSeconds);
+}
+
+function SourceRefCard({ sourceRef, onOpenLibraryFile, onError }: {
+  sourceRef: ResolvedSourceRefDto;
+  onOpenLibraryFile?: (path: string) => void;
+  onError: (message: string) => void;
+}) {
+  // The player is never mounted until asked for: no request leaves the app on
+  // feedback render (privacy + weight), and WebKitGTK codec hiccups stay opt-in.
+  const [playerOpen, setPlayerOpen] = useState(false);
+  const video = sourceRef.video;
+
+  const openExternal = async (url: string) => {
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+    } catch (error) {
+      onError((error as Error).message);
+    }
+  };
+
+  const externalVideoUrl = video
+    ? `https://www.youtube.com/watch?v=${video.videoId}&t=${Math.max(0, Math.floor(video.startSeconds))}s`
+    : sourceRef.externalUrl;
+  // Start the embed a few seconds early: cue boundaries rarely coincide with
+  // the start of the explanation.
+  const embedUrl = video
+    ? `https://www.youtube-nocookie.com/embed/${video.videoId}?start=${Math.max(0, Math.floor(video.startSeconds) - 7)}`
+    : null;
+  // NOTE: tauri.conf.json currently ships csp: null. If a CSP is ever added,
+  // it needs `frame-src https://www.youtube-nocookie.com` or this embed breaks.
+
+  return (
+    <div style={{
+      border: `1px solid ${C.border}`,
+      borderLeft: `3px solid ${C.cyan}`,
+      borderRadius: 2, padding: "12px 16px", marginBottom: 10,
+    }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ color: C.text, fontWeight: 600, fontSize: 13 }}>{sourceRef.title}</span>
+        {video && <Pill tone="cyan">{timeRangeLabel(video)}</Pill>}
+        {sourceRef.headingPath && sourceRef.headingPath.length > 0 && (
+          <Meta>{sourceRef.headingPath.join(" › ")}</Meta>
+        )}
+        <span style={{ flex: 1 }} />
+        {sourceRef.notePath && onOpenLibraryFile && (
+          <span
+            style={{ color: C.amberLink, textDecoration: "underline", cursor: "pointer", fontFamily: MONO, fontSize: 12 }}
+            onClick={() => onOpenLibraryFile(sourceRef.notePath!)}
+          >view in Library</span>
+        )}
+        {externalVideoUrl && (
+          <span
+            style={{ color: C.amberLink, textDecoration: "underline", cursor: "pointer", fontFamily: MONO, fontSize: 12 }}
+            onClick={() => void openExternal(externalVideoUrl)}
+          >
+            {video ? `open on YouTube at ${fmtTimestamp(video.startSeconds)}` : "open source"}
+          </span>
+        )}
+      </div>
+      {sourceRef.sourceChanged && (
+        <div style={{ marginTop: 8, fontFamily: MONO, fontSize: 11, color: C.amber }}>
+          ⚠ the source changed since this question was created
+          {!sourceRef.locatorResolved ? " — showing the original excerpt" : ""}
+        </div>
+      )}
+      {sourceRef.sectionMd && (
+        <div className="markdown" style={{ marginTop: 10, fontSize: 13, lineHeight: 1.6, color: C.text }}>
+          <MarkdownMath value={sourceRef.sectionMd} />
+        </div>
+      )}
+      {embedUrl && (
+        playerOpen ? (
+          <div style={{ marginTop: 10 }}>
+            <iframe
+              src={embedUrl}
+              title={sourceRef.title}
+              style={{ width: "100%", aspectRatio: "16 / 9", border: `1px solid ${C.border}` }}
+              allow="autoplay; encrypted-media; picture-in-picture"
+              allowFullScreen
+            />
+          </div>
+        ) : (
+          <div style={{ marginTop: 10 }}>
+            <span
+              style={{ color: C.amberLink, textDecoration: "underline", cursor: "pointer", fontFamily: MONO, fontSize: 12 }}
+              onClick={() => setPlayerOpen(true)}
+            >▶ play here from {video ? fmtTimestamp(video.startSeconds) : "the start"}</span>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+function SourceReviewPanel({ f, onPrimedRetry, onOpenLibraryFile, onNoteCapture, startingRetry, onError }: {
+  f: FeedbackBundle;
+  onPrimedRetry: () => void;
+  onOpenLibraryFile?: (path: string) => void;
+  onNoteCapture: () => void;
+  startingRetry: boolean;
+  onError: (message: string) => void;
+}) {
+  const refs = (f.sourceRefs ?? []).filter((ref) => ref.sectionMd || ref.video);
+  // Expanded when the miss looks like a knowledge gap (an intervention need was
+  // recorded, or the score was poor); a mere slip gets a collapsed disclosure.
+  const missed = f.rubricScore < f.maxPoints;
+  const [open, setOpen] = useState(Boolean(f.interventionNeed) || f.correctness < 0.5);
+  if (refs.length === 0 || !missed) return null;
+
+  return (
+    <>
+      <FbHeader>Review the source</FbHeader>
+      {open ? (
+        <>
+          {refs.map((ref, index) => (
+            <SourceRefCard
+              key={`${ref.notePath ?? ref.title}:${ref.locator ?? index}`}
+              sourceRef={ref}
+              onOpenLibraryFile={onOpenLibraryFile}
+              onError={onError}
+            />
+          ))}
+          <div style={{ fontFamily: MONO, fontSize: 12, color: C.textDim, marginTop: 4 }}>
+            {startingRetry ? (
+              <span style={{ color: C.amber }}>finding a question to retry… (writing a new one can take a while)</span>
+            ) : (
+              <>
+                <span
+                  style={{ color: C.amberLink, textDecoration: "underline", cursor: "pointer" }}
+                  onClick={onPrimedRetry}
+                >[t] try another question on this</span>
+                {"   "}
+                <span
+                  style={{ color: C.amberLink, textDecoration: "underline", cursor: "pointer" }}
+                  onClick={onNoteCapture}
+                >[j] note something down</span>
+                {"   "}
+                <Faint>the retry is scored as source-fresh (primed) evidence</Faint>
+              </>
+            )}
+          </div>
+        </>
+      ) : (
+        <div style={{ fontFamily: MONO, fontSize: 12 }}>
+          <span
+            style={{ color: C.amberLink, textDecoration: "underline", cursor: "pointer" }}
+            onClick={() => setOpen(true)}
+          >show the source this question came from ({refs.length})</span>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── FeedbackScreen ────────────────────────────────────────────────────────────
 export function FeedbackScreen({
   attemptId,
   onNext,
   onBack,
   onOpenNotes,
+  onPrimedRetry,
+  onOpenLibraryFile,
   onInspect,
   onAsk,
   onError,
@@ -429,6 +784,10 @@ export function FeedbackScreen({
   onNext: () => void;
   onBack: () => void;
   onOpenNotes: () => void;
+  /** Open a sibling practice item as a primed retry. */
+  onPrimedRetry: (practiceItemId: string) => void;
+  /** Open a vault file in the Library (source panel "view in Library"). */
+  onOpenLibraryFile?: (path: string) => void;
   onInspect: (id: string) => void;
   onAsk: (target: { context: "feedback"; attemptId: string; practiceItemId?: string }) => void;
   onError: (message: string) => void;
@@ -520,6 +879,27 @@ export function FeedbackScreen({
       onError((error as Error).message);
     } finally {
       setTriggeringFollowup(false);
+    }
+  };
+
+  // Primed retry: pick (or generate) a sibling item on the same LO and open it
+  // in the practice screen with primed=true. Generation is a real LLM call, so
+  // the button shows a persistent working state.
+  const [startingRetry, setStartingRetry] = useState(false);
+  const handlePrimedRetry = async () => {
+    if (!feedback || startingRetry) return;
+    setStartingRetry(true);
+    try {
+      const result = await api.startPrimedRetry(feedback.attemptId);
+      if (!result.available || !result.practiceItem) {
+        onError(result.reason ?? "No retry question is available for this topic yet.");
+        return;
+      }
+      onPrimedRetry(result.practiceItem.id);
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setStartingRetry(false);
     }
   };
 
@@ -619,6 +999,7 @@ export function FeedbackScreen({
       else if (event.key === "r") { event.preventDefault(); void handleRegrade(); }
       else if (event.key === "D") { event.preventDefault(); void handleTriggerFollowup(); }
       else if (event.key === "a") { event.preventDefault(); setAddingError(true); }
+      else if (event.key === "t") { event.preventDefault(); void handlePrimedRetry(); }
       else if (event.key === "j") { event.preventDefault(); openNoteCapture(); }
       else if (event.key === "o") { event.preventDefault(); onOpenNotes(); }
       else if (event.key === "?") {
@@ -630,7 +1011,7 @@ export function FeedbackScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onNext, onBack, onOpenNotes, onAsk, attemptId, feedback, regrading, triggeringFollowup, ratingFollowup]);
+  }, [onNext, onBack, onOpenNotes, onAsk, attemptId, feedback, regrading, triggeringFollowup, ratingFollowup, startingRetry]);
 
   if (!feedback) {
     return (
@@ -773,6 +1154,16 @@ export function FeedbackScreen({
             ))}
           </>
         )}
+
+        {/* ── review the source ── */}
+        <SourceReviewPanel
+          f={f}
+          onPrimedRetry={() => void handlePrimedRetry()}
+          onOpenLibraryFile={onOpenLibraryFile}
+          onNoteCapture={openNoteCapture}
+          startingRetry={startingRetry}
+          onError={onError}
+        />
 
         {/* ── belief update ── */}
         {(f.masteryBefore != null || f.masteryAfter != null) && (

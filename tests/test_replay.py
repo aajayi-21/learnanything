@@ -356,3 +356,27 @@ def _facet_fields(state) -> dict | None:
     payload = asdict(state)
     payload.pop("id", None)
     return payload
+
+
+def test_replay_error_attributions_preserve_misconception_fields(tmp_path):
+    # Persisted error_events carry the structured belief; replay must reconstruct
+    # it losslessly onto the GradeAttribution (spec §2.1).
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    vault = load_vault(vault_root)
+
+    events = [
+        {
+            "error_type": "conceptual_slip",
+            "is_misconception": True,
+            "misconception_statement": "reverses Q / Q^T roles",
+            "misconception_consistent_answer": "Qx is the coordinate vector",
+            "repair_plan": {"evidence": "used Q where Q^T was required"},
+        }
+    ]
+    attributions = attempt_service._replay_error_attributions(vault, None, error_events=events)
+
+    assert len(attributions) == 1
+    assert attributions[0].misconception_statement == "reverses Q / Q^T roles"
+    assert attributions[0].misconception_consistent_answer == "Qx is the coordinate vector"
+    assert attributions[0].is_misconception is True

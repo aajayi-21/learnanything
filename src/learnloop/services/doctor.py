@@ -178,8 +178,10 @@ def _check_layout(paths: VaultPaths, issues: list[HealthIssue]) -> None:
 
 
 def _check_schema_versions(paths: VaultPaths, issues: list[HealthIssue]) -> None:
-    for file_path in [paths.concepts_path, paths.relations_path, paths.goals_path, paths.error_types_path, paths.facets_path]:
+    for file_path in [paths.concepts_path, paths.relations_path, paths.error_types_path, paths.facets_path]:
         _check_yaml_schema(file_path, issues)
+    # goals.yaml v1 (concept_anchors) still loads via the legacy converter.
+    _check_yaml_schema(paths.goals_path, issues, supported={1, 2})
     for file_path in sorted((paths.root / "subjects").glob("*/concept-graph.yaml")):
         _check_yaml_schema(file_path, issues)
     for folder in ["learning-objects", "practice-items"]:
@@ -187,7 +189,7 @@ def _check_schema_versions(paths: VaultPaths, issues: list[HealthIssue]) -> None
             _check_yaml_schema(file_path, issues)
 
 
-def _check_yaml_schema(path: Path, issues: list[HealthIssue]) -> None:
+def _check_yaml_schema(path: Path, issues: list[HealthIssue], supported: set[int] = frozenset({1})) -> None:
     if not path.exists():
         return
     try:
@@ -196,7 +198,7 @@ def _check_yaml_schema(path: Path, issues: list[HealthIssue]) -> None:
         issues.append(_issue("error", "yaml:invalid", f"{path.name} could not be parsed: {exc}", path))
         return
     schema_version = data.get("schema_version")
-    if schema_version != 1:
+    if schema_version not in supported:
         issues.append(
             _issue(
                 "error",
@@ -359,7 +361,7 @@ def _check_references(vault: LoadedVault, issues: list[HealthIssue]) -> None:
     error_type_ids = set(vault.error_types)
 
     for goal in vault.goals:
-        for concept_id in goal.concept_anchors:
+        for concept_id in goal.facet_scope.concepts:
             if concept_id not in concept_ids:
                 issues.append(_issue("error", "goal:missing_concept", f"{goal.id} references missing concept {concept_id}", entity_id=goal.id))
     for edge in vault.edges:
@@ -709,7 +711,7 @@ def _concept_merge_affected_refs(vault: LoadedVault, canonical_id: str, duplicat
             edge.id for edge in vault.edges if edge.source in concept_ids or edge.target in concept_ids
         ),
         "goals": sorted(
-            goal.id for goal in vault.goals if bool(set(goal.concept_anchors) & concept_ids)
+            goal.id for goal in vault.goals if bool(set(goal.facet_scope.concepts) & concept_ids)
         ),
         "error_types": sorted(
             error_type.id

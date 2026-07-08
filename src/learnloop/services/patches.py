@@ -480,8 +480,8 @@ def _concept_revert_blockers(vault: LoadedVault, concept_id: str) -> list[str]:
         if edge.source == concept_id or edge.target == concept_id:
             blockers.append(f"concept_edge:{edge.id}")
     for goal in vault.goals:
-        if concept_id in goal.concept_anchors:
-            blockers.append(f"goal:{goal.id}.concept_anchors")
+        if concept_id in goal.facet_scope.concepts:
+            blockers.append(f"goal:{goal.id}.facet_scope.concepts")
     for error_type in vault.error_types.values():
         if concept_id in error_type.related_concepts:
             blockers.append(f"error_type:{error_type.id}.related_concepts")

@@ -5,12 +5,18 @@
 # scheduling decisions (queue order / follow-up counts / belief accuracy) in
 # this scenario. Values bracket the shipped defaults (see config.py).
 sweeps:
-  # Scheduler priority weights (defaults: forgetting 1.0, active_goal 0.35,
+  # Scheduler priority weights (defaults: forgetting 1.0,
   # goal_frontier 0.25, recent_error 0.50, probe_eig 0.25).
   - param_path: scheduler.goal_frontier_weight
     values: [0.0, 0.5, 1.0]
-  - param_path: scheduler.active_goal_weight
-    values: [0.0, 0.7]
+  # Goal quota floor (composition gating; decision-relevant unlike the
+  # additive weights). Run the sweep with --goal-due-day to exercise the
+  # ramp to floor_max and read the goal_attainment_at_due /
+  # goal_retention_due_plus_30 deltas (cram-vs-space tradeoff).
+  - param_path: scheduler.goal_quota_floor_min
+    values: [0.0, 0.5]
+  - param_path: scheduler.goal_quota_floor_max
+    values: [0.3, 1.0]
   - param_path: scheduler.recent_error_weight
     values: [0.0, 1.5]
   - param_path: scheduler.forgetting_risk_weight
@@ -55,3 +61,9 @@ sweeps:
   # Mastery EKF observation noise (default 1.0).
   - param_path: mastery.base_observation_variance
     values: [0.5, 2.0]
+
+  # Primed-retry IRT easiness shift (default 2.0). Only moves anything when the
+  # sweep runs with primed retries enabled (`learnloop sim sweep --primed-retries`),
+  # since cold runs never record a primed attempt.
+  - param_path: mastery.irt.priming_b_offset
+    values: [1.0, 2.0, 3.0]

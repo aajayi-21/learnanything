@@ -63,6 +63,76 @@ def test_facet_diagnostic_schema_is_available(tmp_path):
     assert "followup" in decision_type_sql
 
 
+def test_misconception_registry_schema_is_available(tmp_path):
+    sqlite_path = tmp_path / "state.sqlite"
+    apply_migrations(sqlite_path)
+
+    with connect(sqlite_path) as connection:
+        tables = {
+            row["name"]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        error_event_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(error_events)")
+        }
+        discrimination_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(item_misconception_discrimination)")
+        }
+
+    assert {"misconceptions", "item_misconception_discrimination"} <= tables
+    assert {
+        "misconception_id",
+        "misconception_statement",
+        "misconception_consistent_answer",
+    } <= error_event_columns
+    assert {
+        "practice_item_id",
+        "misconception_id",
+        "sensitivity_alpha",
+        "specificity_beta",
+        "n_planted_trials",
+    } <= discrimination_columns
+
+
+def test_misconception_migration_applies_on_pre_025_db(tmp_path):
+    sqlite_path = tmp_path / "state.sqlite"
+    old_migrations = tmp_path / "old_migrations"
+    old_migrations.mkdir()
+    for migration in discover_migrations():
+        if migration.version <= 24:
+            shutil.copy2(migration.path, old_migrations / migration.path.name)
+
+    apply_migrations(sqlite_path, migrations_dir=old_migrations)
+    # Seed a pre-025 error event to confirm the ALTER preserves existing rows.
+    with connect(sqlite_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO error_events(
+              id, attempt_id, learning_object_id, error_type, severity,
+              is_misconception, status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("ee_legacy", None, "lo_svd", "conceptual_slip", 0.5, 1, "active", "2026-05-19T12:00:00Z"),
+        )
+        connection.commit()
+
+    applied = apply_migrations(sqlite_path)
+    assert 25 in [migration.version for migration in applied]
+
+    with connect(sqlite_path) as connection:
+        row = connection.execute(
+            "SELECT error_type, misconception_id FROM error_events WHERE id = ?",
+            ("ee_legacy",),
+        ).fetchone()
+        fk_issues = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert row["error_type"] == "conceptual_slip"
+    assert row["misconception_id"] is None
+    assert fk_issues == []
+
+
 def test_migrations_are_idempotent(tmp_path):
     sqlite_path = tmp_path / "state.sqlite"
     apply_migrations(sqlite_path)

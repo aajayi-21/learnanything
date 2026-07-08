@@ -32,6 +32,7 @@ def build_metrics(
     detection_days: dict[str, dict[str, Any]],
     lo_facet_weights: dict[str, dict[str, float]],
     final_day: float,
+    goal_tracking: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "belief_vs_truth": _belief_vs_truth(
@@ -41,6 +42,7 @@ def build_metrics(
         "misconceptions": _misconceptions(vault, repository, student, attempts, detection_days),
         "fsrs": _fsrs_sanity(attempts),
         "counts": _counts(repository, attempts),
+        "goals": _goals(goal_tracking or {}, day_records),
     }
 
 
@@ -181,6 +183,69 @@ def _final_facet_state(
                 }
             )
     return states
+
+
+# -- goal attainment ----------------------------------------------------------
+
+
+def _goals(
+    goal_tracking: dict[str, dict[str, Any]],
+    day_records: list["SimDayRecord"],
+) -> dict[str, Any]:
+    """Due-date attainment and post-due retention per goal.
+
+    The truth snapshots come from the runner (captured on each goal's due day,
+    see ``_track_goals_end_of_day``): ``truth_at_due`` is the student's *true*
+    facet mastery at the due day; ``truth_due_plus_30`` is the analytic
+    no-practice projection 30 days later — together they expose the
+    cram-vs-space tradeoff a goal quota makes. ``frontier_empty_day`` is the
+    first day the *belief-side* goal frontier reached zero at-risk facets.
+    """
+
+    per_goal: list[dict[str, Any]] = []
+    for goal_id in sorted(goal_tracking):
+        info = goal_tracking[goal_id]
+        target = float(info["target_recall"])
+        truth_at_due: dict[str, float] = info["truth_at_due"]
+        truth_plus_30: dict[str, float] = info["truth_due_plus_30"]
+        total = len(info["scope_facets"])
+        frontier_empty_day = next(
+            (
+                record.day
+                for record in day_records
+                if record.goal_at_risk_facets.get(goal_id) == 0
+            ),
+            None,
+        )
+        belief_total = info["belief_total"]
+        per_goal.append(
+            {
+                "goal_id": goal_id,
+                "due_day": info["due_day"],
+                "snapshot_day": info["snapshot_day"],
+                "target_recall": target,
+                "scope_facet_count": total,
+                "truth_at_target_fraction_at_due": _round(
+                    _fraction_at_target(truth_at_due, target)
+                ),
+                "truth_mean_recall_at_due": _round(_mean(truth_at_due.values())),
+                "truth_at_target_fraction_due_plus_30": _round(
+                    _fraction_at_target(truth_plus_30, target)
+                ),
+                "truth_mean_recall_due_plus_30": _round(_mean(truth_plus_30.values())),
+                "belief_on_track_fraction_at_due": _round(
+                    info["belief_on_track"] / belief_total if belief_total else None
+                ),
+                "frontier_empty_day": frontier_empty_day,
+            }
+        )
+    return {"per_goal": per_goal}
+
+
+def _fraction_at_target(values: dict[str, float], target: float) -> float | None:
+    if not values:
+        return None
+    return sum(1 for value in values.values() if value >= target) / len(values)
 
 
 # -- FSRS sanity --------------------------------------------------------------

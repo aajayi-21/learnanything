@@ -301,11 +301,13 @@ class FeedbackScreen(Screen):
         return "Codex" if provider_name == "codex" else f"AI provider {provider_name}"
 
     def _complete_result(self, result: AttemptResult) -> None:
+        _provider_name, runtime, client = self._grading_provider()
         self.followup_decision = evaluate_attempt_intervention_followup(
             self.state.vault,
             self.state.repository,
             result=result,
             available_minutes=self.available_minutes,
+            ai_client=client if runtime.ready else None,
         )
         self.result = result
         self.app.last_attempt_result = result
@@ -409,7 +411,10 @@ class FeedbackScreen(Screen):
         for i, event in enumerate(events):
             if i:
                 parts.append("\n")
-            parts.append((event.error_type, "$text-error bold"))
+            # spec §7: prefer the normalized belief statement over the coarse
+            # error-type label when the event carries a registry misconception.
+            label = getattr(event, "misconception_statement", None) or event.error_type
+            parts.append((label, "$text-error bold"))
             parts.append(("  severity ", "$text-disabled"))
             parts.append(block_bar(event.severity, 6, "$error"))
             parts.append((f" {event.severity:.2f}", "$text-muted"))

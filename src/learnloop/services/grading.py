@@ -88,6 +88,9 @@ class ValidatedErrorAttribution:
     severity: float
     evidence: str
     is_misconception: bool = False
+    # spec §2.1: passed through, not enforced (None for legacy providers).
+    misconception_statement: str | None = None
+    misconception_consistent_answer: str | None = None
     target_evidence_families: list[str] | None = None
     target_criterion_ids: list[str] | None = None
 
@@ -258,6 +261,8 @@ def validate_codex_grading_proposal(
                 severity=_resolved_error_severity(vault, error_type, attribution.severity),
                 evidence=attribution.evidence,
                 is_misconception=attribution.is_misconception,
+                misconception_statement=attribution.misconception_statement,
+                misconception_consistent_answer=attribution.misconception_consistent_answer,
                 target_evidence_families=target_evidence_families,
                 target_criterion_ids=target_criterion_ids,
             )

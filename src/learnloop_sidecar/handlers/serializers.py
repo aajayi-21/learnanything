@@ -8,6 +8,7 @@ from learnloop.db.repositories import GradingEvidenceRecord, Repository
 from learnloop.services.grading import resolved_rubric
 from learnloop.services.mastery import display_mastery, sigmoid
 from learnloop.services.scheduler import ScheduledItem, explain_practice_item
+from learnloop.services.source_review import resolve_source_refs
 from learnloop.services.tutor_qa import hint_equivalents_for_attempt
 from learnloop.vault.models import ErrorType, LearningObject, LoadedVault, PracticeItem, Rubric
 from learnloop_sidecar.context import mastery_dto
@@ -239,6 +240,10 @@ def feedback_bundle(vault: LoadedVault, repository: Repository, attempt_id: str)
             "feedback_last_shown_at": metadata.get("last_shown_at"),
             "repair_suggestions": metadata.get("repair_suggestions") or [],
             "intervention_need": intervention_need_dto(intervention_need),
+            "primed": bool(attempt.get("primed")),
+            # Canonical-source sections that spawned this item, for the
+            # source-review panel (text section or video timestamp range).
+            "source_refs": resolve_source_refs(vault, item),
             # Non-null when this attempt is itself a follow-up: the rating
             # strip renders and rate_followup joins back to the gate decision.
             "followup_source": ({"gate_attempt_id": gate_attempt_id} if gate_attempt_id is not None else None),

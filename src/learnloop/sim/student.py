@@ -59,6 +59,12 @@ class Misconception:
     error_type: str
     strength: float = 0.85
     severity: float = 0.7
+    # spec §6: optional link to a content-bearing registry belief so the sim
+    # discrimination gate can plant *this* misconception and answer an item with
+    # its consistent answer. Absent on legacy facet-only planted misconceptions.
+    misconception_id: str | None = None
+    statement: str | None = None
+    misconception_consistent_answer: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -66,6 +72,9 @@ class Misconception:
             "error_type": self.error_type,
             "strength": self.strength,
             "severity": self.severity,
+            "misconception_id": self.misconception_id,
+            "statement": self.statement,
+            "misconception_consistent_answer": self.misconception_consistent_answer,
         }
 
 
@@ -96,6 +105,13 @@ class StudentProfile:
     # Teach-back: transfer-tier follow-ups stress-test knowledge beyond the
     # taught surface, so effective P(know) drops by this delta before slip/guess.
     transfer_difficulty_delta: float = 0.2
+    # Primed retry (the student just re-read the canonical source section):
+    # working memory floors effective P(know) at priming_level for that one
+    # attempt, and the re-read decays a tested misconception's strength by
+    # source_remediation_rate (0.0 = sticky misconception that survives the
+    # source; high = shallow gap the source repairs).
+    priming_level: float = 0.85
+    source_remediation_rate: float = 0.5
     misconceptions: list[Misconception] = field(default_factory=list)
     facets: dict[str, FacetParams] = field(default_factory=dict)
 
@@ -115,6 +131,8 @@ class StudentProfile:
             "dont_know_propensity": self.dont_know_propensity,
             "misconception_remediation_rate": self.misconception_remediation_rate,
             "transfer_difficulty_delta": self.transfer_difficulty_delta,
+            "priming_level": self.priming_level,
+            "source_remediation_rate": self.source_remediation_rate,
             "misconceptions": [m.as_dict() for m in self.misconceptions],
             "facets": {
                 facet: {
@@ -220,6 +238,22 @@ class SyntheticStudent:
             state.last_update_day = day
         return state.mastery
 
+    def projected_mastery(self, facet_id: str, day: float, extra_days: float) -> float:
+        """True mastery ``extra_days`` after ``day`` with no intervening practice.
+
+        Computed analytically from the forgetting model rather than by
+        advancing state, so measuring "retention 30 days after the goal due
+        date" cannot disturb the lazy-decay bookkeeping. ``day`` must not be
+        earlier than the facet's last settle (same contract as mastery_at).
+        """
+
+        mastery = self.mastery_at(facet_id, day)
+        state = self._state(facet_id)
+        if extra_days <= 0 or state.halflife <= 0:
+            return mastery
+        floor = min(self.profile.forgetting_floor, mastery)
+        return floor + (mastery - floor) * 2.0 ** (-extra_days / state.halflife)
+
     def learn(self, facet_weights: Mapping[str, float], day: float) -> None:
         """Apply practice gains (feedback was shown) after an attempt."""
 
@@ -242,23 +276,43 @@ class SyntheticStudent:
         item_facet_weights: Mapping[str, float],
         criteria: Sequence[tuple[str, float, Mapping[str, float]]],
         hints_available: int,
+        primed: bool = False,
     ) -> SimOutcome:
         """Generate one attempt outcome.
 
         ``criteria`` is ``[(criterion_id, max_points, facet_weights), ...]``
         where facet weights come from the same criterion->facet mapping the
         belief pipeline uses.
+
+        ``primed`` models a retry right after re-reading the source: effective
+        P(know) is floored at ``profile.priming_level`` (working memory), and
+        tested misconceptions decay by ``profile.source_remediation_rate``
+        *before* the firing draw — a sticky misconception (rate 0) keeps firing
+        even primed, which is exactly the discriminating signal the facet
+        posterior should pick up.
         """
 
         rng = self.rng
         profile = self.profile
         normalized_item_weights = _normalize(item_facet_weights)
+        if primed:
+            # Re-reading the source repairs shallow misconceptions on the
+            # facets this item tests, independent of the outcome draw below.
+            for facet, weight in normalized_item_weights.items():
+                if weight < _MISCONCEPTION_MIN_WEIGHT or facet not in self.misconception_strengths:
+                    continue
+                self.misconception_strengths[facet] = max(
+                    0.0, self.misconception_strengths[facet] * (1.0 - profile.source_remediation_rate)
+                )
         p_know_item = sum(
             weight * self.mastery_at(facet, day)
             for facet, weight in normalized_item_weights.items()
         )
+        if primed:
+            p_know_item = max(p_know_item, profile.priming_level)
 
-        # Don't-know escape hatch: exercised before any guessing.
+        # Don't-know escape hatch: exercised before any guessing. A primed
+        # student never reaches it (the working-memory floor sits above it).
         if p_know_item < profile.dont_know_threshold and rng.random() < profile.dont_know_propensity:
             latency = self._latency(rng, p_know_item)
             return SimOutcome(
@@ -301,6 +355,8 @@ class SyntheticStudent:
                 criterion_points[criterion_id] = 0.0
                 continue
             p_know = sum(weight * self.mastery_at(facet, day) for facet, weight in weights.items())
+            if primed:
+                p_know = max(p_know, profile.priming_level)
             if hints_used:
                 p_know = min(1.0, p_know + 0.15)  # a hint scaffolds the recall
             p_correct = profile.guess + max(0.0, 1.0 - profile.slip - profile.guess) * p_know

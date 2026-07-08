@@ -14,6 +14,7 @@ import type {
   TeachBackTurnDto
 } from "../api/dto";
 import { Card, EntityLink, KeyBar, Pill, SectionHeader } from "../components/ui";
+import { modePillColor } from "../components/term";
 import { MarkdownMath } from "../render/MarkdownMath";
 import { MathLiveEditor } from "../render/MathLiveEditor";
 
@@ -31,10 +32,13 @@ export function PracticeScreen({
   onTeachBackActive,
   onInspect,
   onAsk,
-  onError
+  onError,
+  primed = false
 }: {
   session: SessionSnapshot;
   practiceItemId: string;
+  /** This item is a primed retry launched from the feedback source panel. */
+  primed?: boolean;
   gradingReady: boolean;
   gradingProvider: string;
   restoredAnswer?: string;
@@ -285,6 +289,7 @@ export function PracticeScreen({
         answerMd: answer,
         attemptType: chooseAttemptType(item.attemptTypesAllowed, hintsUsed),
         hintsUsed,
+        primed,
         // Drop attributions for any criterion the learner ultimately left at full
         // credit, so a restored score never ships a stale error tag.
         selfGrade: fallbackRequired ? { ...selfGrade, errorAttributions: prunedAttributions(item, selfGrade) } : null
@@ -354,7 +359,7 @@ export function PracticeScreen({
           <div className="queue-meta">
             <EntityLink id={item.id} onInspect={onInspect} />
             <EntityLink id={item.learningObjectId} onInspect={onInspect}>{item.learningObjectTitle}</EntityLink>
-            <Pill>{item.practiceMode}</Pill>
+            <Pill tone={modePillColor(item.practiceMode)}>{item.practiceMode}</Pill>
             {fallbackRequired ? <Pill tone="amber">self-grade required</Pill> : <Pill tone="green">{gradingProvider} grading</Pill>}
           </div>
           <div className="markdown"><MarkdownMath value={item.prompt} /></div>

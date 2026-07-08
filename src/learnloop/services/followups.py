@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from learnloop.clock import Clock, parse_utc
-from learnloop.db.repositories import Repository
+from learnloop.services.misconceptions import normalize_and_resolve_attempt
+from learnloop.db.repositories import MisconceptionRecord, Repository
 from learnloop.services.facet_diagnostics import candidate_facet_support
 from learnloop.services.gate_score import (
     GateScoreResult,
@@ -14,7 +15,16 @@ from learnloop.services.gate_score import (
     resolve_gate_weights,
 )
 from learnloop.services.predictive_eig import TargetItemModel, build_target_models, predictive_facet_eig
-from learnloop.services.probes import facet_expected_information_gain, probe_posterior, resolve_item_irt
+from learnloop.services.probes import (
+    _BRIDGE_SENSITIVITY,
+    _BRIDGE_SPECIFICITY,
+    build_hypothesis_set,
+    expected_information_gain,
+    facet_expected_information_gain,
+    item_registry_discrimination,
+    probe_posterior,
+    resolve_item_irt,
+)
 from learnloop.services.recall_coverage import familiarity_discount
 from learnloop.services.signal_quantiles import ResolvedThreshold, resolve_followup_thresholds
 from learnloop.vault.models import LoadedVault, PracticeItem
@@ -56,6 +66,14 @@ class InterventionSelection:
     diagnostic_focus: dict[str, Any] | None
     open_facets: list[str]
     slate: list[dict[str, Any]]
+    # spec §4: misconception routing outcomes. ``misconception_gate_blocked`` is
+    # True when an active misconception with no discriminating candidate forced
+    # ``no_suitable_item`` even though a facet-eligible paraphrase existed;
+    # ``eligible_slate_size`` is the count of gate-passing candidates after the
+    # discrimination gate (surfaced as telemetry when < 2).
+    misconception_gate_blocked: bool = False
+    active_misconception_ids: list[str] | None = None
+    eligible_slate_size: int = 0
 
 
 def evaluate_intervention_followup(
@@ -266,6 +284,8 @@ def evaluate_intervention_followup(
         target_facets=target_facets,
         intent=intent,
         max_error_severity=max_error_severity,
+        tau_severe_error=thresholds["tau_severe_error"].value,
+        clock=clock,
     )
     candidate = selection.candidate
     triggered = [f"{INTERVENTION_ACTION}:{reason}:{practice_item_id}" for reason in triggered_reasons]
@@ -303,13 +323,20 @@ def evaluate_intervention_followup(
         repository.update_attempt_surprise_actions(
             attempt_id, triggered_actions=triggered, suppressed_actions=suppressed, gate_diagnostics=gate
         )
+        # spec §4.1/§4.2: distinguish "the misconception discrimination gate demoted
+        # the only facet-eligible candidate" from a plain empty candidate pool.
+        need_outcome = (
+            "created_need_no_discriminator"
+            if selection.misconception_gate_blocked
+            else "created_need_for_generation"
+        )
         _record_followup_decision_features(
             vault,
             repository,
             attempt_id=attempt_id,
             learning_object_id=learning_object_id,
             selection=selection,
-            outcome="created_need_for_generation",
+            outcome=need_outcome,
             need_id=need_id,
             selected_item_id=None,
             manual_trigger=gate if manual_override else None,
@@ -389,6 +416,7 @@ def evaluate_attempt_intervention_followup(
     available_minutes: int | None = None,
     session_id: str | None = None,
     manual_override: bool = False,
+    ai_client: Any = None,
     clock: Clock | None = None,
 ) -> FollowupDecision:
     """Run the full post-attempt intervention policy for one attempt result.
@@ -397,7 +425,21 @@ def evaluate_attempt_intervention_followup(
     payload into the broader intervention gate so severe/repeated failures,
     target facets, probe state, and cold-start evidence are handled consistently
     outside the CLI.
+
+    Registry normalization + resolution (spec §2.2/§4.3/§7) run here first, after
+    error persistence and before evaluation, so a just-diagnosed belief is visible
+    to routing and the hypothesis prior. Replay never re-normalizes (it does not
+    run this path); persisted ``misconception_id`` links survive rebuilds.
     """
+
+    normalize_and_resolve_attempt(
+        vault,
+        repository,
+        attempt_id=result.attempt_id,
+        learning_object_id=result.learning_object_id,
+        ai_client=ai_client,
+        clock=clock,
+    )
 
     debug_payload = result.debug_payload or {}
     target_facets = _target_facets_from_debug(debug_payload)
@@ -794,6 +836,139 @@ def _canonical_target_facets(vault: LoadedVault, facets: list[str]) -> list[str]
     return sorted({vault.canonical_facet_id(facet) for facet in facets})
 
 
+def _active_misconceptions(
+    repository: Repository,
+    learning_object_id: str,
+    *,
+    attempt_id: str | None,
+    gate_facets: set[str],
+    tau_severe_error: float,
+) -> list[MisconceptionRecord]:
+    """Active registry beliefs that gate diagnostic routing (spec §4.1).
+
+    Status ``active``, severity >= ``tau_severe_error``, and ``facet_ids``
+    intersecting the diagnostic gate facets — PLUS any belief attributed on *this*
+    attempt (regardless of facets), because the just-diagnosed slip is exactly the
+    one we must discriminate. Deduped by id, order-stable by insertion.
+    """
+
+    attempt_mc_ids: set[str] = set()
+    if attempt_id:
+        for event in repository.error_events_for_attempt(attempt_id):
+            mc_id = event.get("misconception_id")
+            if mc_id:
+                attempt_mc_ids.add(str(mc_id))
+    selected: dict[str, MisconceptionRecord] = {}
+    for record in repository.misconceptions_for_learning_object(learning_object_id, statuses=("active",)):
+        if record.id in attempt_mc_ids:
+            selected[record.id] = record
+            continue
+        if record.severity < tau_severe_error:
+            continue
+        if gate_facets and not (set(record.facet_ids) & gate_facets):
+            continue
+        selected[record.id] = record
+    return list(selected.values())
+
+
+def _demonstrated_facets(repository: Repository, learning_object_id: str) -> list[str]:
+    """Facets the learner has already passed, snapshotted for review (spec §5.3).
+
+    Deterministic definition (the inverse of :func:`_is_known_gap_state`): a facet
+    whose uncertainty state is ``resolved`` with its ``facet_solid`` hypothesis on
+    top. Read once at need-creation and snapshotted into ``diagnostic_focus`` so
+    the §5.3 review validates identically regardless of when it runs (replay-safe).
+    """
+
+    demonstrated: list[str] = []
+    for state in repository.facet_uncertainty_states(learning_object_id, statuses=("resolved",)):
+        marginal = getattr(state, "hypothesis_marginal", {}) or {}
+        if not marginal:
+            continue
+        top_label = max(marginal, key=marginal.get)
+        if top_label == f"facet_solid:{state.facet_id}":
+            demonstrated.append(state.facet_id)
+    return sorted(set(demonstrated))
+
+
+def _augment_diagnostic_focus_with_misconceptions(
+    diagnostic_focus: dict[str, Any] | None,
+    vault: LoadedVault,
+    repository: Repository,
+    *,
+    active_mcs: list[MisconceptionRecord],
+    learning_object_id: str,
+    source_practice_item_id: str,
+) -> dict[str, Any]:
+    """Snapshot belief + §5.3 prerequisite context into the need's focus (spec §4).
+
+    Additive JSON keys (payload is already JSON): the active misconception ids and
+    statements, their implicated facets, the demonstrated facets, and the source
+    item id + ``surface_family`` — enough for review (§5.3) to validate without any
+    live learner state.
+    """
+
+    focus = dict(diagnostic_focus) if diagnostic_focus else {}
+    focus["misconception_ids"] = [record.id for record in active_mcs]
+    focus["misconception_statements"] = {record.id: record.statement for record in active_mcs}
+    focus["implicated_facets"] = sorted({facet for record in active_mcs for facet in record.facet_ids})
+    focus["demonstrated_facets"] = _demonstrated_facets(repository, learning_object_id)
+    focus["source_practice_item_id"] = source_practice_item_id
+    source_item = vault.practice_items.get(source_practice_item_id)
+    focus["source_surface_family"] = source_item.surface_family if source_item is not None else None
+    return focus
+
+
+def _misconception_discrimination(
+    repository: Repository,
+    vault: LoadedVault,
+    item: PracticeItem,
+    rubric: Any,
+    hypothesis_set: Any,
+    active_mcs: list[MisconceptionRecord],
+    tau_power: float,
+) -> tuple[bool, float, float]:
+    """``(discriminates, best_J_lb, misconception_eig)`` for a candidate (spec §4.1).
+
+    A candidate is diagnostic-eligible iff its Youden-J lower bound against >=1
+    active belief clears ``tau_discrimination_power``. ``J_lb`` reads the estimated
+    discrimination row when present, else the bridge default (a rubric fatal error
+    that links the belief but has no estimated row yet — the same bridge probes.py
+    uses). When eligible, the misconception dimension is fed into the ranking
+    through the calibrated EIG conditionals (§3), NOT a flat bonus, so a 0.9/0.95
+    discriminator outranks a 0.6/0.7 one; the facet-EIG terms are left untouched.
+    """
+
+    from learnloop.vault.models import discriminates
+
+    bridge = discriminates(item, rubric)
+    bridge_j_lb = _BRIDGE_SENSITIVITY + _BRIDGE_SPECIFICITY - 1.0
+    best_j_lb = 0.0
+    for record in active_mcs:
+        row = repository.discrimination_row(item.id, record.id)
+        if row is not None:
+            best_j_lb = max(best_j_lb, row.youden_j_lb(0.25))
+        elif record.id in bridge:
+            best_j_lb = max(best_j_lb, bridge_j_lb)
+    if best_j_lb < tau_power:
+        return False, best_j_lb, 0.0
+    discrimination, discriminated_ids = item_registry_discrimination(
+        repository, vault, item, rubric, hypothesis_set
+    )
+    item_a, item_b, probe_irt = resolve_item_irt(vault, item)
+    mc_eig = expected_information_gain(
+        hypothesis_set,
+        item,
+        rubric,
+        item_a=item_a,
+        item_b=item_b,
+        irt=probe_irt,
+        discrimination=discrimination,
+        discriminated_ids=discriminated_ids,
+    )
+    return True, best_j_lb, mc_eig
+
+
 def _choose_intervention_item(
     vault: LoadedVault,
     repository: Repository,
@@ -804,6 +979,8 @@ def _choose_intervention_item(
     target_facets: list[str],
     intent: str,
     max_error_severity: float,
+    tau_severe_error: float = 0.0,
+    clock: Clock | None = None,
 ) -> InterventionSelection:
     candidates = [
         item
@@ -865,6 +1042,28 @@ def _choose_intervention_item(
             **diagnostic_focus,
             "open_facets": open_facets,
         }
+
+    # spec §4.1: active registry beliefs that gate diagnostic routing for this LO.
+    active_mcs = _active_misconceptions(
+        repository,
+        learning_object_id,
+        attempt_id=attempt_id,
+        gate_facets=gate_reference,
+        tau_severe_error=tau_severe_error,
+    )
+    active_misconception_ids = [record.id for record in active_mcs]
+    if active_mcs:
+        # spec §4.1/§5.3: snapshot the belief ids/statements + the prerequisite
+        # review context (demonstrated facets, source item/surface) into the need.
+        diagnostic_focus = _augment_diagnostic_focus_with_misconceptions(
+            diagnostic_focus,
+            vault,
+            repository,
+            active_mcs=active_mcs,
+            learning_object_id=learning_object_id,
+            source_practice_item_id=exclude_practice_item_id,
+        )
+
     if not candidates:
         return InterventionSelection(
             candidate=None,
@@ -874,6 +1073,9 @@ def _choose_intervention_item(
             diagnostic_focus=diagnostic_focus,
             open_facets=open_facets,
             slate=[],
+            misconception_gate_blocked=False,
+            active_misconception_ids=active_misconception_ids,
+            eligible_slate_size=0,
         )
 
     gate_applies = bool(diagnostic_states) and dominant_target_facet is not None
@@ -987,6 +1189,34 @@ def _choose_intervention_item(
             }
         )
 
+    # spec §4.1: misconception discrimination gate — layered ON TOP of the facet
+    # gates above. A candidate stays eligible only if it discriminates >=1 active
+    # belief (J_lb >= tau_discrimination_power); passing candidates feed their
+    # misconception EIG into the ranking so genuine discriminators outrank
+    # coverage lookalikes. When it demotes the only facet-eligible candidate we
+    # route to no_suitable_item rather than queue a paraphrase (§4.1).
+    misconception_gate_active = bool(active_mcs) and vault.config.scheduler.followup.require_misconception_discrimination
+    misconception_filtered = False
+    if misconception_gate_active:
+        hypothesis_set = build_hypothesis_set(vault, repository, learning_object_id, clock=clock)
+        tau_power = vault.config.scheduler.followup.tau_discrimination_power
+        item_by_id = {item.id: item for item in candidates}
+        for row in slate:
+            item = item_by_id[str(row["practice_item_id"])]
+            rubric = vault.rubric_for_item(item)
+            discriminates_mc, best_j_lb, mc_eig = _misconception_discrimination(
+                repository, vault, item, rubric, hypothesis_set, active_mcs, tau_power
+            )
+            row["discriminates_target_misconception"] = discriminates_mc
+            row["misconception_discrimination_j_lb"] = best_j_lb
+            if discriminates_mc:
+                row["misconception_eig"] = mc_eig
+                row["rank_score"] = float(row["rank_score"]) + mc_eig
+            elif row["gate_passed"]:
+                row["gate_passed"] = False
+                row["filtered_reason"] = "no_misconception_discrimination"
+                misconception_filtered = True
+
     eligible = [row for row in slate if row["gate_passed"]]
     eligible.sort(
         key=lambda row: (
@@ -1004,6 +1234,9 @@ def _choose_intervention_item(
         row["selected"] = row["practice_item_id"] == selected_id
         row["final_rank"] = rank_by_id.get(str(row["practice_item_id"]))
     selected = next((item for item in candidates if item.id == selected_id), None)
+    # The gate "blocked" only when it demoted an otherwise-passing candidate and
+    # left nothing eligible — a plain empty pool is created_need_for_generation.
+    misconception_gate_blocked = misconception_gate_active and selected is None and misconception_filtered
     return InterventionSelection(
         candidate=selected,
         dominant_target_facet=dominant_target_facet,
@@ -1012,6 +1245,9 @@ def _choose_intervention_item(
         diagnostic_focus=diagnostic_focus,
         open_facets=open_facets,
         slate=slate,
+        misconception_gate_blocked=misconception_gate_blocked,
+        active_misconception_ids=active_misconception_ids,
+        eligible_slate_size=len(eligible),
     )
 
 
@@ -1288,9 +1524,23 @@ def _record_followup_decision_features(
             "candidate_slate": selection.slate,
             "decision_outcome": outcome,
             "need_id": need_id,
-            "generation_need_id": need_id if outcome == "created_need_for_generation" else None,
+            "generation_need_id": (
+                need_id
+                if outcome in ("created_need_for_generation", "created_need_no_discriminator")
+                else None
+            ),
             "diagnostic_focus": selection.diagnostic_focus,
             "manual_trigger": manual_trigger,
+            # spec §4.2: surface a thin eligible slate (pool-of-one silently zeroes
+            # predictive_eig) and the active-misconception context when routing gated.
+            **(
+                {
+                    "eligible_slate_size": selection.eligible_slate_size,
+                    "active_misconception_ids": selection.active_misconception_ids or [],
+                }
+                if selection.active_misconception_ids
+                else {}
+            ),
         },
         algorithm_version=vault.config.algorithms.algorithm_version,
         clock=clock,

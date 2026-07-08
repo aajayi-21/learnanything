@@ -98,7 +98,6 @@ def config_dto(vault: LoadedVault) -> dict[str, Any]:
             "storage": {"sqlite_path": config.storage.sqlite_path},
             "scheduler": {
                 "forgetting_risk_weight": config.scheduler.forgetting_risk_weight,
-                "active_goal_weight": config.scheduler.active_goal_weight,
                 "goal_frontier_weight": config.scheduler.goal_frontier_weight,
                 "recent_error_weight": config.scheduler.recent_error_weight,
                 "probe_eig_weight": config.scheduler.probe_eig_weight,

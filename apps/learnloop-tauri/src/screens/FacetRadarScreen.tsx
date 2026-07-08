@@ -4,6 +4,7 @@ import type { FacetMasteryFacet, FacetMasterySnapshot } from "../api/dto";
 import { EntityLink } from "../components/ui";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
 import { masteryTone } from "../app/algoConfig";
+import { FacetWellView } from "./FacetWellView";
 
 // Radar ("spider") view of evidence-facet mastery across the vault. Each axis
 // is one evidence facet; the polygon radius encodes aggregate mastery for that
@@ -11,6 +12,9 @@ import { masteryTone } from "../app/algoConfig";
 // Hover highlights are sticky: the last facet touched stays highlighted until
 // another one is hovered/selected, and highlight changes cross-fade via CSS
 // transitions instead of snapping.
+//
+// The "well" mode swaps the flat radar for FacetWellView's 3D gravity well —
+// same data, same selection state, drag to orbit.
 
 const W = 860;
 const H = 640;
@@ -75,6 +79,8 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
   // Default queue-only: showing every authored item clutters the axes; the
   // due queue is what the selection policy actually chose today.
   const [itemFilter, setItemFilter] = useState<"queue" | "all">("queue");
+  // Flat radar vs 3D gravity well (radial displacement of the facet fabric).
+  const [mode, setMode] = useState<"2d" | "well">("2d");
 
   useEffect(() => {
     let cancelled = false;
@@ -154,6 +160,28 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 12 }}>
                 <span style={{ display: "flex", gap: 4 }}>
+                  <Faint>view:</Faint>
+                  {(["2d", "well"] as const).map((id) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setMode(id)}
+                      style={{
+                        background: mode === id ? "#241d12" : "transparent",
+                        border: `1px solid ${mode === id ? COLOR.amber : COLOR.border}`,
+                        color: mode === id ? COLOR.amber : COLOR.textDim,
+                        font: "inherit",
+                        fontFamily: FONT_MONO,
+                        padding: "1px 8px",
+                        cursor: "pointer",
+                        transition: "border-color 0.22s ease, color 0.22s ease"
+                      }}
+                    >
+                      {id}
+                    </button>
+                  ))}
+                </span>
+                <span style={{ display: "flex", gap: 4 }}>
                   <Faint>items:</Faint>
                   {(["queue", "all"] as const).map((id) => (
                     <button
@@ -187,13 +215,26 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
               </div>
             ) : facets.length < 3 ? (
               <FacetBars facets={facets} selected={selected} onSelect={setSelected} />
+            ) : mode === "well" ? (
+              <div style={{ display: "flex", justifyContent: "center" }}>
+                <FacetWellView
+                  facets={facets}
+                  selected={selected}
+                  hoveredItem={hoveredItem}
+                  itemFilter={itemFilter}
+                  onSelect={setSelected}
+                  onHoverItem={setHoveredItem}
+                  onInspect={onInspect}
+                />
+              </div>
             ) : (
               <div style={{ display: "flex", justifyContent: "center" }}>
                 <svg
+                  className="noselect-canvas"
                   width={W}
                   height={H}
                   viewBox={`0 0 ${W} ${H}`}
-                  style={{ fontFamily: FONT_MONO, maxWidth: "100%", height: "auto", overflow: "visible" }}
+                  style={{ fontFamily: FONT_MONO, maxWidth: "100%", height: "auto", overflow: "visible", userSelect: "none", WebkitUserSelect: "none" }}
                 >
                   {/* concentric rings */}
                   {RINGS.map((ring) => (
@@ -427,6 +468,7 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
         <span style={{ color: COLOR.textDim }}>◎ queued</span>
         <span style={{ color: COLOR.amber, opacity: 0.7 }}>▒ ±uncertainty band</span>
         <Faint>dot radius = difficulty</Faint>
+        {mode === "well" ? <Faint>well depth = mastery pull · ╌ equipotential</Faint> : null}
         <span style={{ flex: 1 }} />
         <Faint>
           {snapshot.counts.facets} facets · {snapshot.counts.learningObjects} learning objects · {snapshot.counts.practiceItems} practice items
@@ -437,7 +479,8 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
         keys={[
           { key: "tab", label: "Next facet" },
           { key: "shift+tab", label: "Prev" },
-          { key: "hover/click", label: "Inspect facet" }
+          { key: "hover/click", label: "Inspect facet" },
+          ...(mode === "well" ? [{ key: "drag", label: "Orbit" }] : [])
         ]}
         right={{ key: "^p", label: "palette" }}
       />

@@ -128,6 +128,8 @@ def profile_from_mapping(payload: Mapping[str, Any]) -> StudentProfile:
         "dont_know_propensity",
         "misconception_remediation_rate",
         "transfer_difficulty_delta",
+        "priming_level",
+        "source_remediation_rate",
     }
     unknown = set(payload) - known - {"misconceptions", "facets"}
     if unknown:
@@ -143,6 +145,15 @@ def profile_from_mapping(payload: Mapping[str, Any]) -> StudentProfile:
                 error_type=str(entry["error_type"]),
                 strength=float(entry.get("strength", 0.85)),
                 severity=float(entry.get("severity", 0.7)),
+                misconception_id=(
+                    str(entry["misconception_id"]) if entry.get("misconception_id") is not None else None
+                ),
+                statement=str(entry["statement"]) if entry.get("statement") is not None else None,
+                misconception_consistent_answer=(
+                    str(entry["misconception_consistent_answer"])
+                    if entry.get("misconception_consistent_answer") is not None
+                    else None
+                ),
             )
         )
     facets: dict[str, FacetParams] = {}

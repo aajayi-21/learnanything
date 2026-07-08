@@ -55,7 +55,8 @@ def test_cli_attempt_json_and_show_attempt(tmp_path):
     assert why.exit_code == 0, why.output
     why_payload = json.loads(why.output)
     assert why_payload["practice_item_id"] == "pi_svd_define_001"
-    assert why_payload["components"]["active_goal"] == 0.8
+    assert "active_goal" not in why_payload["components"]
+    assert why_payload["components"]["goal_frontier"] == 0.8
 
 
 def test_cli_attempt_defaults_to_allowed_open_text_attempt_type(tmp_path):

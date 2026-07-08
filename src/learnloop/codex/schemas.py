@@ -69,6 +69,8 @@ class RubricFatalErrorPayload(BaseModel):
     id: str
     description: str
     max_grade: int = Field(ge=0, le=4)
+    # spec §1.2: authored link from a fatal error to the registry belief it catches.
+    misconception_id: str | None = None
 
 
 class RubricPatchPayload(BaseModel):
@@ -96,6 +98,10 @@ class PracticeItemPatchPayload(BaseModel):
     transfer_distance: float | None = None
     scaffold_level: float | None = None
     surface_family: str | None = None
+    # spec §5.2.2: the categorically-divergent answer a holder of the targeted
+    # belief would give on a diagnostic item. Feeds the sim gate (§6) and the
+    # §5.3 review check; None on ordinary (non-diagnostic) items.
+    misconception_consistent_answer: str | None = None
     repair_targets: list[str] | None = None
     hints: list[str] | None = None
     hint_policy: dict | None = None
@@ -203,6 +209,11 @@ class ErrorAttribution(BaseModel):
     severity: float | None = Field(default=None, ge=0.0, le=1.0)
     evidence: str
     is_misconception: bool = False
+    # spec §2.1 (G1): required when is_misconception=True, but not enforced here so
+    # legacy providers that omit it still validate — the belief in learner-model
+    # terms, and what a holder of the belief would answer on this item.
+    misconception_statement: str | None = None
+    misconception_consistent_answer: str | None = None
     target_evidence_families: list[str] = Field(default_factory=list)
     target_criterion_ids: list[str] = Field(default_factory=list)
 
@@ -251,3 +262,40 @@ class TutorAnswer(BaseModel):
     answer_md: str
     question_type: QuestionType = "other"
     facets: list[str] = Field(default_factory=list)
+
+
+class MisconceptionMatch(BaseModel):
+    """LLM verdict for registry normalization (spec §2.2.2).
+
+    ``decision == "same"`` means the graded belief is the same as the registry
+    row named by ``misconception_id``; ``"new"`` means it is a distinct belief
+    and a fresh row should be inserted. When unsure the model should prefer
+    ``"new"`` (spec §9: avoid over-merging distinct beliefs).
+    """
+
+    decision: Literal["same", "new"]
+    misconception_id: str | None = None
+
+
+class DiagnosticTrialResult(BaseModel):
+    """One simulated student's answer + whether the keyed fatal error fires.
+
+    ``answer`` is the student's natural-language response (never verbatim the
+    canned misconception-consistent string); ``fires`` is the model's judgment of
+    whether a grader would attribute the misconception-keyed fatal error to it.
+    """
+
+    answer: str
+    fires: bool
+
+
+class DiagnosticTrials(BaseModel):
+    """Codex answers-under-belief for the sim discrimination gate (spec §6).
+
+    ``planted`` are learners who genuinely HOLD the targeted belief; ``clean``
+    are competent learners. One structured call returns all trials at once so the
+    gate spends a single provider request regardless of trial count.
+    """
+
+    planted: list[DiagnosticTrialResult] = Field(default_factory=list)
+    clean: list[DiagnosticTrialResult] = Field(default_factory=list)

@@ -39,6 +39,10 @@ class MasteryObservation:
     # Config-resolved evidence mass for attempt_type; None falls back to the
     # canonical defaults (DEFAULT_EVIDENCE) so test constructors keep working.
     attempt_evidence_mass: float | None = None
+    # Primed retry (source just re-read): the belief still updates (with the
+    # priming b-offset applied upstream) but last_evidence_at stays on the last
+    # cold attempt so the spacing/drift clock is not reset.
+    primed: bool = False
 
 
 @dataclass(frozen=True)
@@ -424,7 +428,9 @@ def _ekf_update_mastery(
         logit_mean=mu_after,
         logit_variance=next_variance,
         evidence_count=prior.evidence_count + 1,
-        last_evidence_at=_iso(observation.observed_at),
+        # Primed attempts keep the cold-attempt anchor: advancing it would let a
+        # source-fresh retry suppress drift growth and defer the scheduled review.
+        last_evidence_at=prior.last_evidence_at if observation.primed else _iso(observation.observed_at),
         algorithm_version=algorithm_version,
         updated_at=_iso(observation.observed_at),
     )
@@ -477,7 +483,7 @@ def _legacy_update_mastery(
         logit_mean=next_mean,
         logit_variance=next_variance,
         evidence_count=prior.evidence_count + 1,
-        last_evidence_at=_iso(observation.observed_at),
+        last_evidence_at=prior.last_evidence_at if observation.primed else _iso(observation.observed_at),
         algorithm_version=algorithm_version,
         updated_at=_iso(observation.observed_at),
     )

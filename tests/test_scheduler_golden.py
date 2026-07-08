@@ -73,10 +73,15 @@ def test_scheduler_ties_by_lowest_practice_item_id_and_filters_inactive(tmp_path
     assert [item.practice_item_id for item in queue] == ["pi_svd_define_001"]
 
 
-def test_scheduler_active_goal_follows_allowed_edges_only(tmp_path):
+def test_scheduler_goal_frontier_follows_explicit_scope_only(tmp_path):
+    # Goal scope is now explicit (facet_scope.concepts). The old one-hop
+    # concept-edge expansion is gone: a concept reachable only via a
+    # prerequisite edge is NOT in scope; a concept named in facet_scope is.
     vault_root = tmp_path / "vault"
     paths = create_basic_vault(vault_root)
-    _add_related_concept_lo_and_item(vault_root, relation_type="related")
+    # A prerequisite edge from the goal concept to related_concept exists, but
+    # edges no longer grant goal scope.
+    _add_related_concept_lo_and_item(vault_root, relation_type="prerequisite")
     loaded = load_vault(vault_root)
     repository = Repository(paths.sqlite_path)
     repository.upsert_mastery_state(_mastery("lo_related"))
@@ -84,24 +89,36 @@ def test_scheduler_active_goal_follows_allowed_edges_only(tmp_path):
 
     queue = build_due_queue(loaded, repository, clock=FrozenClock(NOW), persist_explanations=False)
 
+    # Only connected via an edge -> not in scope -> no goal frontier -> not scheduled.
     assert "pi_related_001" not in [item.practice_item_id for item in queue]
 
-    upsert_concept_edge(
-        vault_root,
+    # Naming related_concept in the goal's facet_scope puts the LO in scope.
+    write_yaml(
+        paths.goals_path,
         {
-            "id": "edge_goal_related",
-            "relation_type": "prerequisite",
-            "source": "singular_value_decomposition",
-            "target": "related_concept",
-            "strength": 1.0,
+            "schema_version": 2,
+            "goals": [
+                {
+                    "id": "goal_linear_algebra_ml",
+                    "title": "Linear algebra for ML",
+                    "status": "active",
+                    "priority": 0.8,
+                    "target_recall": 0.8,
+                    "facet_scope": {
+                        "concepts": ["singular_value_decomposition", "related_concept"]
+                    },
+                    "due_at": None,
+                    "created_at": NOW_ISO,
+                    "updated_at": NOW_ISO,
+                }
+            ],
         },
-        clock=FrozenClock(NOW),
     )
     loaded = load_vault(vault_root)
     queue = build_due_queue(loaded, repository, clock=FrozenClock(NOW), persist_explanations=False)
     related = [item for item in queue if item.practice_item_id == "pi_related_001"][0]
 
-    assert related.components["active_goal"] == 0.8
+    assert related.components["goal_frontier"] == pytest.approx(0.8)
 
 
 def test_scheduler_recent_error_decays_by_exp_days_over_seven(tmp_path):

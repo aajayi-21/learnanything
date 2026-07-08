@@ -5,7 +5,7 @@ from typing import Any
 from learnloop_sidecar.context import SidecarContext
 from learnloop_sidecar.dto import ParamsModel
 from learnloop_sidecar.errors import SidecarError
-from learnloop_sidecar.handlers.serializers import attempt_detail, feedback_bundle
+from learnloop_sidecar.handlers.serializers import attempt_detail, feedback_bundle, practice_item_detail
 from learnloop_sidecar.logging import log_event
 from learnloop_sidecar.registry import method
 
@@ -163,6 +163,117 @@ def trigger_followup(ctx: SidecarContext, params: TriggerFollowupInput) -> dict[
         triggered_actions=decision.triggered_actions,
     )
     return feedback_bundle(vault, repository, params.attempt_id)
+
+
+class StartPrimedRetryInput(ParamsModel):
+    attempt_id: str
+
+
+@method("start_primed_retry", StartPrimedRetryInput)
+def start_primed_retry(ctx: SidecarContext, params: StartPrimedRetryInput) -> dict[str, Any]:
+    """Serve a sibling item for a primed retry from the source-review panel.
+
+    Picks another item on the missed attempt's learning object (preferring the
+    intervention need's target facets, then never/least-recently attempted).
+    When the LO has no sibling, generates one on demand through the authoring
+    proposal pipeline and auto-accepts it — the retry deliberately stays a real
+    vault item so attempt provenance keeps working. The frontend submits the
+    resulting attempt with primed=true.
+    """
+
+    from learnloop.services.practice_generation import (
+        PracticeExpansionError,
+        generate_diagnostic_practice_proposal,
+        generate_post_probe_practice_proposal,
+    )
+    from learnloop.codex.client import CodexUnavailable
+    from learnloop.services.patches import PatchApplicationError
+    from learnloop.services.proposals import accept_items
+    from learnloop_sidecar.handlers.ai_providers import provider_label, ready_grading_provider
+
+    vault, repository = ctx.require_vault()
+    attempt = repository.fetch_practice_attempt(params.attempt_id)
+    if attempt is None:
+        raise SidecarError("not_found", f"Attempt {params.attempt_id} not found.")
+    learning_object_id = attempt["learning_object_id"]
+    need = repository.intervention_need_for_attempt(params.attempt_id)
+    generated = False
+
+    sibling = _pick_primed_sibling(vault, repository, attempt, need)
+    if sibling is None:
+        provider_name, runtime, client = ready_grading_provider(vault, override=ctx.grading_provider_override)
+        if not runtime.ready or client is None:
+            return _primed_retry_unavailable(
+                params, attempt, f"{provider_label(provider_name)} is unavailable; no other item exists for this topic yet."
+            )
+        try:
+            if need is not None and need.get("status") == "pending":
+                result = generate_diagnostic_practice_proposal(
+                    vault.root, client, learning_object_id=learning_object_id, max_needs=1
+                )
+                patch_id = result.patch_id
+            else:
+                patch_id = generate_post_probe_practice_proposal(
+                    vault.root, client, learning_object_ids=[learning_object_id], max_new_per_lo=1
+                ).patch_id
+            accept_items(vault.root, patch_id)
+        except (PracticeExpansionError, PatchApplicationError, CodexUnavailable, TimeoutError) as exc:
+            return _primed_retry_unavailable(params, attempt, str(exc))
+        # Acceptance wrote vault files; refresh the in-memory vault (offline, no
+        # Codex probe) and re-run selection over the now-larger item pool.
+        ctx.reload(maintenance=False)
+        vault, repository = ctx.require_vault()
+        generated = True
+        sibling = _pick_primed_sibling(vault, repository, attempt, need)
+        if sibling is None:
+            return _primed_retry_unavailable(params, attempt, "Generation produced no item for this learning object.")
+
+    log_event(
+        "primed_retry_started",
+        session_id=attempt.get("session_id"),
+        attempt_id=params.attempt_id,
+        learning_object_id=learning_object_id,
+        source_practice_item_id=attempt["practice_item_id"],
+        practice_item_id=sibling.id,
+        generated=generated,
+    )
+    return {
+        "available": True,
+        "generated": generated,
+        "practice_item": practice_item_detail(vault, repository, sibling.id),
+    }
+
+
+def _pick_primed_sibling(vault, repository, attempt: dict[str, Any], need: dict[str, Any] | None):
+    """Sibling items on the same LO, best-first: target-facet coverage, then freshness."""
+
+    target_facets = {
+        vault.canonical_facet_id(facet) for facet in ((need or {}).get("target_facets") or [])
+    }
+    candidates = []
+    for item in vault.practice_items.values():
+        if item.learning_object_id != attempt["learning_object_id"] or item.id == attempt["practice_item_id"]:
+            continue
+        state = repository.practice_item_state(item.id)
+        if state is not None and not state.active:
+            continue
+        covers = bool(target_facets & {vault.canonical_facet_id(facet) for facet in item.evidence_facets})
+        last_attempt_at = state.last_attempt_at if state is not None else None
+        candidates.append((0 if covers else 1, last_attempt_at or "", item.id, item))
+    if not candidates:
+        return None
+    return min(candidates)[3]
+
+
+def _primed_retry_unavailable(params: StartPrimedRetryInput, attempt: dict[str, Any], reason: str) -> dict[str, Any]:
+    log_event(
+        "primed_retry_unavailable",
+        session_id=attempt.get("session_id"),
+        attempt_id=params.attempt_id,
+        learning_object_id=attempt["learning_object_id"],
+        reason=reason,
+    )
+    return {"available": False, "generated": False, "reason": reason, "practice_item": None}
 
 
 @method("rate_followup", RateFollowupInput)

@@ -8,7 +8,9 @@ import pytest
 
 from learnloop.clock import FrozenClock
 from learnloop.codex.client import CanonicalIngestContext
+from learnloop.config import PdfIngestConfig
 from learnloop.codex.schemas import AuthoringProposal
+from learnloop.services.pdf_extraction import PdfExtractionError, extract_pdf_markdown
 from learnloop.services.source_ingestion import (
     FetchResult,
     SourceIngestionError,
@@ -17,7 +19,6 @@ from learnloop.services.source_ingestion import (
     fetch_source,
     ingest_canonical_source,
     normalize_source,
-    _extract_pdf_markdown,
     _fetch_youtube_transcript,
 )
 from learnloop.vault.loader import load_vault
@@ -80,8 +81,17 @@ def test_pdf_source_is_normalized_to_markdown(tmp_path):
     )
 
     assert detect_source_kind(str(pdf_path)) == "website_page"
-    fetched = fetch_source(tmp_path, str(pdf_path), kind="website_page", allow_auto_captions=False)
+    # Pin pypdf so unit tests stay hermetic when marker (real model inference)
+    # is installed in the environment.
+    fetched = fetch_source(
+        tmp_path,
+        str(pdf_path),
+        kind="website_page",
+        allow_auto_captions=False,
+        pdf_config=PdfIngestConfig(engine="pypdf"),
+    )
     assert fetched.original_uri.endswith("glossary.pdf")
+    assert fetched.source_bytes == pdf_path.read_bytes()
 
     normalized = normalize_source(fetched, "website_page")
     assert "Ulnar" in normalized.markdown
@@ -91,9 +101,20 @@ def test_pdf_source_is_normalized_to_markdown(tmp_path):
     assert any(chunk.chunk_kind == "prose" and chunk.text.strip() for chunk in chunks)
 
 
-def test_pdf_without_text_layer_raises():
+def test_pdf_without_text_layer_raises(tmp_path):
+    with pytest.raises(PdfExtractionError):
+        extract_pdf_markdown(b"%PDF-1.4 not-really-a-pdf")
+
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"%PDF-1.4 not-really-a-pdf")
     with pytest.raises(SourceIngestionError):
-        _extract_pdf_markdown(b"%PDF-1.4 not-really-a-pdf")
+        fetch_source(
+            tmp_path,
+            str(broken),
+            kind="website_page",
+            allow_auto_captions=False,
+            pdf_config=PdfIngestConfig(engine="pypdf"),
+        )
 
 
 def test_arxiv_html_normalizer_captures_descriptor_fields():

@@ -37,6 +37,7 @@ from learnloop.services.attempts import (
 )
 from learnloop.services.facet_diagnostics import mastery_diagnostic_view
 from learnloop.services.followups import evaluate_attempt_intervention_followup
+from learnloop.services.goal_projection import goal_report, resolve_goal_scope
 from learnloop.services.fsrs import forgetting_curve
 from learnloop.services.grading import resolved_rubric
 from learnloop.services.mastery import display_mastery
@@ -59,6 +60,8 @@ from learnloop.vault.paths import VaultPaths
 
 SIM_START = datetime(2026, 1, 5, 9, 0, 0, tzinfo=UTC)
 _ATTEMPT_SPACING_SECONDS = 180
+# A primed retry lands right after feedback + re-reading the source section.
+_PRIMED_RETRY_DELAY_SECONDS = 90
 
 # Recording attempt types the student can produce, in preference order.
 _PREFERRED_ATTEMPT_TYPES = (
@@ -80,7 +83,7 @@ class SimAttemptRecord:
     practice_item_id: str
     learning_object_id: str
     attempt_type: str
-    source: str  # "queue" | "intro"
+    source: str  # "queue" | "intro" | "primed_retry"
     predicted_correctness: float | None
     observed_correctness: float
     truth_p_know: float
@@ -93,6 +96,7 @@ class SimAttemptRecord:
     followup_reason: str
     error_types: list[str]
     misconception_fired: str | None
+    primed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +105,7 @@ class SimAttemptRecord:
             "learning_object_id": self.learning_object_id,
             "attempt_type": self.attempt_type,
             "source": self.source,
+            "primed": self.primed,
             "predicted_correctness": self.predicted_correctness,
             "observed_correctness": self.observed_correctness,
             "truth_p_know": self.truth_p_know,
@@ -122,6 +127,9 @@ class SimDayRecord:
     queue_item_ids: list[str]  # full queue order that day
     practiced_item_ids: list[str]
     belief_mae: float | None  # LO-level |belief - truth| mean at end of day
+    # Belief-side goal frontier size at end of day, per active goal
+    # (facets not on track for target_recall at the goal's horizon).
+    goal_at_risk_facets: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -129,6 +137,7 @@ class SimDayRecord:
             "queue_item_ids": list(self.queue_item_ids),
             "practiced_item_ids": list(self.practiced_item_ids),
             "belief_mae": self.belief_mae,
+            "goal_at_risk_facets": dict(self.goal_at_risk_facets),
         }
 
 
@@ -140,6 +149,7 @@ class SimReport:
     items_per_day: int
     config_overrides: dict[str, Any]
     vault_root: str
+    goal_due_day: int | None = None
     attempts: list[SimAttemptRecord] = field(default_factory=list)
     day_records: list[SimDayRecord] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
@@ -152,6 +162,7 @@ class SimReport:
             "days": self.days,
             "items_per_day": self.items_per_day,
             "config_overrides": dict(self.config_overrides),
+            "goal_due_day": self.goal_due_day,
             "vault_root": self.vault_root,
             "attempts": [attempt.as_dict() for attempt in self.attempts],
             "days_detail": [record.as_dict() for record in self.day_records],
@@ -253,11 +264,20 @@ def run_simulation(
     seed: int = 42,
     config_overrides: Mapping[str, Any] | None = None,
     start: datetime | None = None,
+    primed_retries: bool = False,
+    goal_due_day: int | None = None,
 ) -> SimReport:
     """Run one synthetic student against the vault at ``vault_root``.
 
     ``vault_root`` is written to (SQLite state): callers own isolation --
     the CLI and sweep always pass a fresh copy (see :func:`prepare_run_vault`).
+
+    ``primed_retries`` models the feedback screen's source-review loop: after a
+    failed attempt the student re-reads the source (see
+    ``StudentProfile.priming_level`` / ``source_remediation_rate``) and
+    immediately retries a sibling item, recorded with ``primed=True`` so the
+    mastery update applies the ``mastery.irt.priming_b_offset`` easiness shift
+    and skips the ``last_evidence_at`` refresh.
     """
 
     vault = load_vault(vault_root)
@@ -268,6 +288,15 @@ def run_simulation(
     profile = _resolve_auto_misconceptions(vault, profile)
     student = SyntheticStudent(profile, seed)
     start = start or SIM_START
+    if goal_due_day is not None:
+        # Give every active goal a due date N sim-days in, so the run exercises
+        # the projection horizon and the ramping goal quota (in memory only —
+        # the run vault's goals.yaml is untouched).
+        due_iso = (start + timedelta(days=goal_due_day)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        vault.goals = [
+            goal.model_copy(update={"due_at": due_iso}) if goal.status == "active" else goal
+            for goal in vault.goals
+        ]
 
     lo_facet_weights = _lo_facet_weights(vault)
     attempted: set[str] = set()
@@ -280,6 +309,8 @@ def run_simulation(
     planted_facet_los = _los_for_facets(
         vault, [m.facet_id for m in profile.misconceptions]
     )
+    goal_snapshot_days = _goal_snapshot_days(vault, start=start, days=days)
+    goal_tracking: dict[str, dict[str, Any]] = {}
 
     for day in range(days):
         day_base = start + timedelta(days=day)
@@ -331,14 +362,46 @@ def run_simulation(
             )
             attempts.append(record)
             attempted.add(item_id)
+            if (
+                primed_retries
+                and item.practice_mode != TEACH_BACK_PRACTICE_MODE
+                and record.observed_correctness < 0.5
+            ):
+                sibling = _primed_retry_sibling(vault, item)
+                if sibling is not None:
+                    retry_instant = instant + timedelta(seconds=_PRIMED_RETRY_DELAY_SECONDS)
+                    record = _simulate_one_attempt(
+                        vault,
+                        repository,
+                        student,
+                        sibling,
+                        day=day,
+                        day_f=day_f + _PRIMED_RETRY_DELAY_SECONDS / 86400.0,
+                        clock=FrozenClock(retry_instant),
+                        session_id=session_id,
+                        source="primed_retry",
+                        primed=True,
+                    )
+                    attempts.append(record)
+                    attempted.add(sibling.id)
 
         belief_mae = _belief_mae(vault, repository, student, lo_facet_weights, day_f=day + 1.0)
+        goal_at_risk = _track_goals_end_of_day(
+            vault,
+            repository,
+            student,
+            day=day,
+            day_base=day_base,
+            snapshot_days=goal_snapshot_days,
+            tracking=goal_tracking,
+        )
         day_records.append(
             SimDayRecord(
                 day=day,
                 queue_item_ids=queue_ids,
                 practiced_item_ids=list(selected),
                 belief_mae=belief_mae,
+                goal_at_risk_facets=goal_at_risk,
             )
         )
         _update_detection_days(
@@ -352,6 +415,7 @@ def run_simulation(
         items_per_day=items_per_day,
         config_overrides=overrides,
         vault_root=str(vault_root),
+        goal_due_day=goal_due_day,
     )
     report.attempts = attempts
     report.day_records = day_records
@@ -364,8 +428,89 @@ def run_simulation(
         detection_days=detection_days,
         lo_facet_weights=lo_facet_weights,
         final_day=float(days),
+        goal_tracking=goal_tracking,
     )
     return report
+
+
+# -- goal attainment tracking -----------------------------------------------
+
+
+def _goal_snapshot_days(vault: LoadedVault, *, start: datetime, days: int) -> dict[str, int]:
+    """Sim day (end of day) at which each active goal's attainment is measured.
+
+    The due day when it falls inside the run, otherwise the final day (open-ended
+    goals and due dates beyond the run measure "as of run end").
+    """
+
+    snapshot_days: dict[str, int] = {}
+    for goal in vault.goals:
+        if goal.status != "active":
+            continue
+        due_at = parse_utc(goal.due_at)
+        snapshot_day = days - 1
+        if due_at is not None:
+            due_day = int((due_at - start).total_seconds() // 86400)
+            snapshot_day = min(max(due_day, 0), days - 1)
+        snapshot_days[goal.id] = snapshot_day
+    return snapshot_days
+
+
+def _track_goals_end_of_day(
+    vault: LoadedVault,
+    repository: Repository,
+    student: SyntheticStudent,
+    *,
+    day: int,
+    day_base: datetime,
+    snapshot_days: dict[str, int],
+    tracking: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    """Belief-side at-risk counts per goal; truth snapshot on each goal's due day.
+
+    Truth at the due day is captured *during* the run because the synthetic
+    student's forgetting is lazily settled forward — it cannot be re-read for a
+    past day afterwards. Retention 30 days post-due is projected analytically
+    from the same snapshot (no practice in between, by construction).
+    """
+
+    if not snapshot_days:
+        return {}
+    end_of_day_clock = FrozenClock(day_base + timedelta(days=1))
+    day_f_end = day + 1.0
+    at_risk_by_goal: dict[str, int] = {}
+    for goal in vault.goals:
+        if goal.id not in snapshot_days:
+            continue
+        report = goal_report(vault, repository, goal, clock=end_of_day_clock)
+        at_risk_by_goal[goal.id] = report.total - report.on_track_count
+        if day != snapshot_days[goal.id]:
+            continue
+        scope = resolve_goal_scope(vault, goal, repository)
+        facet_ids = sorted({facet for facets in scope.values() for facet in facets})
+        truth_at_due = {facet: student.mastery_at(facet, day_f_end) for facet in facet_ids}
+        truth_due_plus_30 = {
+            facet: student.projected_mastery(facet, day_f_end, 30.0) for facet in facet_ids
+        }
+        due_at = parse_utc(goal.due_at)
+        due_day = (
+            int((due_at - (day_base - timedelta(days=day))).total_seconds() // 86400)
+            if due_at is not None
+            else None
+        )
+        tracking[goal.id] = {
+            "snapshot_day": day,
+            "due_day": due_day,
+            "target_recall": goal.target_recall,
+            "scope_facets": facet_ids,
+            "truth_at_due": {facet: round(value, 6) for facet, value in truth_at_due.items()},
+            "truth_due_plus_30": {
+                facet: round(value, 6) for facet, value in truth_due_plus_30.items()
+            },
+            "belief_on_track": report.on_track_count,
+            "belief_total": report.total,
+        }
+    return at_risk_by_goal
 
 
 def _simulate_one_attempt(
@@ -379,6 +524,7 @@ def _simulate_one_attempt(
     clock: FrozenClock,
     session_id: str,
     source: str,
+    primed: bool = False,
 ) -> SimAttemptRecord:
     rubric = resolved_rubric(vault, item)
     criterion_weights = criterion_facet_weights_for_item(item, rubric)
@@ -391,6 +537,7 @@ def _simulate_one_attempt(
             for criterion in rubric.criteria
         ],
         hints_available=len(item.hints),
+        primed=primed,
     )
 
     retrievability_prior = _retrievability_prior(repository, item.id, clock)
@@ -458,6 +605,7 @@ def _simulate_one_attempt(
         hints_used=outcome.hints_used,
         latency_seconds=outcome.latency_seconds,
         session_id=session_id,
+        primed=primed,
     )
     result = apply_attempt(
         vault,
@@ -495,7 +643,22 @@ def _simulate_one_attempt(
         followup_reason=_strip_ulids(decision.reason),
         error_types=[attribution.error_type for attribution in attributions],
         misconception_fired=outcome.misconception_fired,
+        primed=primed,
     )
+
+
+def _primed_retry_sibling(vault: LoadedVault, item: PracticeItem) -> PracticeItem | None:
+    """First (deterministic) other non-teach-back item on the same LO."""
+
+    for item_id in sorted(vault.practice_items):
+        sibling = vault.practice_items[item_id]
+        if (
+            sibling.learning_object_id == item.learning_object_id
+            and sibling.id != item.id
+            and sibling.practice_mode != TEACH_BACK_PRACTICE_MODE
+        ):
+            return sibling
+    return None
 
 
 # -- teach-back ---------------------------------------------------------------

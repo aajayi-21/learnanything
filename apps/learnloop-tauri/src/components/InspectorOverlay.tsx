@@ -21,7 +21,7 @@ import type {
   SchedulerComponents,
   SchedulerExplanationDto
 } from "../api/dto";
-import { BlockBar, COLOR, Dim, Divider, Faint, FONT_MONO, Meta, Pill, SectionHeader, type PillColor } from "./term";
+import { BlockBar, COLOR, Dim, Divider, Faint, FONT_MONO, Meta, modePillColor, Pill, SectionHeader, type PillColor } from "./term";
 import { MarkdownMath } from "../render/MarkdownMath";
 
 // ── kind → header pill ──────────────────────────────────────────────────
@@ -31,19 +31,6 @@ const KIND_PILL: Record<string, { color: PillColor; label: string }> = {
   attempt: { color: "amber", label: "attempt" },
   error_event: { color: "red", label: "error_event" }
 };
-
-function modePillColor(mode: string): PillColor {
-  return (
-    {
-      short_answer: "purple",
-      explanation: "cyan",
-      proof: "amber",
-      worked_problem: "green",
-      transfer: "pink",
-      free_recall: "slate"
-    } as Record<string, PillColor>
-  )[mode] ?? "purple";
-}
 
 function masteryColor(mastery: number): string {
   return masteryTone(mastery, COLOR);
@@ -780,7 +767,7 @@ function NotFoundBody({
 // ── component-by-component scheduler `why` ──────────────────────────────────
 const WHY_ROWS: Array<{ key: keyof SchedulerComponents; label: string; color: string }> = [
   { key: "forgettingRisk", label: "forgetting_risk", color: COLOR.amber },
-  { key: "activeGoal", label: "active_goal", color: COLOR.green },
+  { key: "goalFrontier", label: "goal_frontier", color: COLOR.green },
   { key: "recentError", label: "recent_error", color: COLOR.red },
   { key: "probeEig", label: "probe_eig", color: COLOR.pink },
   { key: "interventionFollowup", label: "intervention_followup", color: COLOR.green }

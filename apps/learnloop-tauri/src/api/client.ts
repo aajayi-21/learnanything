@@ -7,13 +7,16 @@ import type {
   ConceptGraphSnapshot,
   FacetMasterySnapshot,
   FeedbackBundle,
+  PrimedRetryResultDto,
   GradingProviderResult,
   InspectorEntity,
+  KnowledgeMapHistory,
   KnowledgeMapSnapshot,
   PracticeItemDetail,
   ProposalsSnapshot,
   QueueInput,
   QueueSnapshot,
+  RecentIngestsSnapshot,
   RuntimeHealth,
   SchedulerExplanationDto,
   SessionEndSummary,
@@ -34,7 +37,19 @@ import type {
   StartTeachBackInput,
   StartTeachBackResult,
   SubmitTeachBackTurnInput,
-  TeachBackTurnResult
+  TeachBackTurnResult,
+  CreateGoalInput,
+  CreateGoalResult,
+  ExamAnswerResult,
+  ExamReportSnapshot,
+  ExamSessionSnapshot,
+  ExamStatusSnapshot,
+  GoalDto,
+  GoalFeasibilityInput,
+  GoalFeasibilityResult,
+  GoalReportSnapshot,
+  GoalSeriesSnapshot,
+  GoalsListSnapshot,
 } from "./dto";
 
 async function call<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -104,9 +119,12 @@ export const api = {
     call<FeedbackBundle>("trigger_followup", { input: { attemptId } }),
   rateFollowup: (attemptId: string, useful: boolean) =>
     call<FeedbackBundle>("rate_followup", { input: { attemptId, useful } }),
+  startPrimedRetry: (attemptId: string) =>
+    call<PrimedRetryResultDto>("start_primed_retry", { input: { attemptId } }),
   inspectEntity: (id: string) => call<InspectorEntity>("inspect_entity", { id }),
   getConceptGraph: () => call<ConceptGraphSnapshot>("get_concept_graph"),
   getVaultTree: () => call<VaultTreeSnapshot>("get_vault_tree"),
+  getRecentIngests: () => call<RecentIngestsSnapshot>("get_recent_ingests"),
   readVaultFile: (path: string) => call<VaultFileContent>("read_vault_file", { path }),
   writeVaultFile: (path: string, body: string) => call<VaultFileContent>("write_vault_file", { path, body }),
   createVaultFile: (path: string, body = "") =>
@@ -161,6 +179,7 @@ export const api = {
     }),
   getFacetMastery: () => call<FacetMasterySnapshot>("get_facet_mastery"),
   getKnowledgeMap: () => call<KnowledgeMapSnapshot>("get_knowledge_map"),
+  getKnowledgeMapHistory: () => call<KnowledgeMapHistory>("get_knowledge_map_history"),
   setGradingProvider: (provider: string) =>
     call<GradingProviderResult>("set_grading_provider", { provider }),
   askTutorQuestion: (input: AskTutorQuestionInput) =>
@@ -176,5 +195,19 @@ export const api = {
   startTeachBack: (input: StartTeachBackInput) =>
     call<StartTeachBackResult>("start_teach_back", { input }),
   submitTeachBackTurn: (input: SubmitTeachBackTurnInput) =>
-    call<TeachBackTurnResult>("submit_teach_back_turn", { input })
+    call<TeachBackTurnResult>("submit_teach_back_turn", { input }),
+  goalsList: () => call<GoalsListSnapshot>("goals_list"),
+  getGoalReport: (goalId: string) => call<GoalReportSnapshot>("get_goal_report", { goalId }),
+  getGoalReportSeries: (goalId: string, opts?: { intervalDays?: number; maxPoints?: number }) =>
+    call<GoalSeriesSnapshot>("get_goal_report_series", { input: { goalId, ...(opts ?? {}) } }),
+  goalFeasibility: (input: GoalFeasibilityInput) =>
+    call<GoalFeasibilityResult>("goal_feasibility", { input }),
+  createGoal: (input: CreateGoalInput) => call<CreateGoalResult>("create_goal", { input }),
+  updateGoalStatus: (goalId: string, status: GoalDto["status"]) =>
+    call<CreateGoalResult>("update_goal_status", { input: { goalId, status } }),
+  getExamStatus: (goalId: string) => call<ExamStatusSnapshot>("get_exam_status", { goalId }),
+  startExam: (goalId: string) => call<ExamSessionSnapshot>("start_exam", { input: { goalId } }),
+  submitExamAnswer: (sessionId: string, practiceItemId: string, answerMd: string) =>
+    call<ExamAnswerResult>("submit_exam_answer", { input: { sessionId, practiceItemId, answerMd } }),
+  finishExam: (sessionId: string) => call<ExamReportSnapshot>("finish_exam", { input: { sessionId } })
 };

@@ -110,12 +110,17 @@ export function LibraryScreen({
   onError,
   focus = null,
   onFocusConsumed,
+  focusFilePath = null,
+  onFileFocusConsumed,
   onAsk,
   onNoteSelected
 }: {
   onError: (message: string) => void;
   focus?: { patchId: string; itemId: string } | null;
   onFocusConsumed?: () => void;
+  /** Vault-relative file to select on open (feedback "View in Library" jump). */
+  focusFilePath?: string | null;
+  onFileFocusConsumed?: () => void;
   onAsk?: (target: { context: "library"; noteId: string }) => void;
   onNoteSelected?: (noteId: string | null) => void;
 }) {
@@ -168,6 +173,14 @@ export function LibraryScreen({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onError]);
+
+  // Honor a handoff from the feedback source panel: select that vault file.
+  useEffect(() => {
+    if (!focusFilePath || !snapshot) return;
+    setSelected({ kind: "file", path: focusFilePath });
+    onFileFocusConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusFilePath, snapshot]);
 
   // Honor a handoff from the Proposals screen: select that payload doc.
   useEffect(() => {

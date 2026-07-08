@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -8,7 +9,13 @@ from math import exp, log
 
 from learnloop.clock import Clock, SystemClock, parse_utc, utc_now_iso
 from learnloop.config import ProbeIRTConfig, ProbeSelfTagConfig
-from learnloop.db.repositories import ActiveErrorEvent, ProbeStateRecord, Repository
+from learnloop.db.repositories import (
+    ActiveErrorEvent,
+    ItemMisconceptionDiscrimination,
+    MisconceptionRecord,
+    ProbeStateRecord,
+    Repository,
+)
 from learnloop.services.mastery import (
     covering_learner_claim,
     initial_mastery_state_for_learning_object,
@@ -20,6 +27,25 @@ from learnloop.vault.models import LoadedVault, PracticeItem, Rubric
 SCORE_BUCKETS = ("low", "mid", "high")
 Outcome = tuple[str, str | None]
 
+# Crockford base32 ULID (26 chars, excludes I, L, O, U). See spec §1.4.
+_ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
+
+
+def parse_misconception_label(label: str) -> tuple[str, bool]:
+    """Split a ``misconception:<suffix>`` hypothesis label (spec §1.4).
+
+    Returns ``(suffix, is_registry_id)`` where ``is_registry_id`` is True iff the
+    suffix is a 26-char Crockford ULID (a registry misconception id). A non-ULID
+    suffix is a legacy error-type-keyed hypothesis and takes the back-compat path.
+    The suffix is empty when the label is not a ``misconception:`` label.
+    """
+
+    prefix = "misconception:"
+    if not label.startswith(prefix):
+        return "", False
+    suffix = label[len(prefix) :]
+    return suffix, bool(_ULID_RE.match(suffix))
+
 
 @dataclass(frozen=True)
 class Hypothesis:
@@ -28,6 +54,19 @@ class Hypothesis:
     source_error_event_id: str | None = None
     source_concept_id: str | None = None
     severity_at_entry: float = 0.0
+    # spec §3: registry-keyed hypotheses carry a misconception id instead of an
+    # error type; `misconception:<ulid>`. Legacy hypotheses leave this None.
+    misconception_id: str | None = None
+
+    @property
+    def channel_key(self) -> str | None:
+        """The error-dimension key this hypothesis owns in the outcome space (§3).
+
+        Legacy hypotheses key on ``error_type``; registry hypotheses key on
+        ``misconception_id`` (the fire channel for their keyed fatal error).
+        """
+
+        return self.error_type if self.error_type is not None else self.misconception_id
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -36,6 +75,7 @@ class Hypothesis:
             "source_error_event_id": self.source_error_event_id,
             "source_concept_id": self.source_concept_id,
             "severity_at_entry": self.severity_at_entry,
+            "misconception_id": self.misconception_id,
         }
 
 
@@ -48,10 +88,13 @@ class HypothesisSet:
 
     @property
     def known_error_types(self) -> list[str]:
+        """Error-channel keys across the set: legacy error types and registry ids (§3)."""
+
         seen: list[str] = []
         for hypothesis in self.hypotheses:
-            if hypothesis.error_type is not None and hypothesis.error_type not in seen:
-                seen.append(hypothesis.error_type)
+            key = hypothesis.channel_key
+            if key is not None and key not in seen:
+                seen.append(key)
         return sorted(seen)
 
     @classmethod
@@ -63,6 +106,7 @@ class HypothesisSet:
                 source_error_event_id=entry.get("source_error_event_id"),
                 source_concept_id=entry.get("source_concept_id"),
                 severity_at_entry=float(entry.get("severity_at_entry", 0.0)),
+                misconception_id=entry.get("misconception_id"),
             )
             for entry in record.get("hypotheses", [])
         ]
@@ -103,9 +147,60 @@ def build_hypothesis_set(
 
     misconceptions: list[tuple[float, Hypothesis, float]] = []  # (decayed_weight, hypothesis, severity)
     seen_error_types: set[str] = set()
+    seen_misconception_ids: set[str] = set()
 
+    # spec §3: registry rows first — each active/resolving belief becomes a
+    # `misconception:<id>` hypothesis with its own severity and decay. Two
+    # distinct conceptual slips coexist rather than collapsing to one error type.
+    for record in repository.misconceptions_for_learning_object(
+        learning_object_id, statuses=("active", "resolving")
+    ):
+        if record.id in seen_misconception_ids:
+            continue
+        seen_misconception_ids.add(record.id)
+        weight = record.severity * _decay(record.updated_at or record.created_at, now)
+        misconceptions.append(
+            (
+                weight,
+                Hypothesis(
+                    label=f"misconception:{record.id}",
+                    error_type=None,
+                    misconception_id=record.id,
+                    severity_at_entry=record.severity,
+                ),
+                record.severity,
+            )
+        )
+
+    # Registry rows on confusable-neighbor concepts, mastery-gated like the legacy
+    # neighbor path (spec §3 neighbor propagation).
+    for neighbor_concept, record in _neighbor_registry_misconceptions(
+        vault, repository, learning_object.concept, now
+    ):
+        if record.id in seen_misconception_ids:
+            continue
+        seen_misconception_ids.add(record.id)
+        weight = record.severity * _decay(record.updated_at or record.created_at, now)
+        misconceptions.append(
+            (
+                weight,
+                Hypothesis(
+                    label=f"misconception:{record.id}",
+                    error_type=None,
+                    misconception_id=record.id,
+                    source_concept_id=neighbor_concept,
+                    severity_at_entry=record.severity,
+                ),
+                record.severity,
+            )
+        )
+
+    # Legacy raw error-event path: only misconception events with NO registry link
+    # (old vaults). Events already normalized into a registry row above are skipped.
     for error in repository.active_errors_by_learning_object(learning_object_id):
         if not error.is_misconception:
+            continue
+        if error.misconception_id is not None:
             continue
         if error.error_type in seen_error_types:
             continue
@@ -125,6 +220,8 @@ def build_hypothesis_set(
         )
 
     for neighbor_concept, neighbor_error in _neighbor_misconceptions(vault, repository, learning_object.concept, now):
+        if neighbor_error.misconception_id is not None:
+            continue
         if neighbor_error.error_type in seen_error_types:
             continue
         seen_error_types.add(neighbor_error.error_type)
@@ -145,7 +242,7 @@ def build_hypothesis_set(
 
     # Cap at hypothesis_set_max_size; drop lowest-severity misconceptions first.
     max_size = vault.config.probe.hypothesis_set_max_size
-    misconceptions.sort(key=lambda entry: (-entry[2], entry[1].error_type or ""))
+    misconceptions.sort(key=lambda entry: (-entry[2], entry[1].label))
     misconceptions = misconceptions[: max(0, max_size - len(hypotheses))]
 
     for decayed_weight, hypothesis, _severity in misconceptions:
@@ -389,6 +486,8 @@ def conditional_distribution(
     irt: ProbeIRTConfig | None = None,
     fatal_error_ids: set[str],
     known_error_types: list[str],
+    discrimination: dict[str, ItemMisconceptionDiscrimination] | None = None,
+    discriminated_ids: set[str] | None = None,
 ) -> dict[Outcome, float]:
     """``P(score_bucket, error_type | h, item)`` under the difficulty-aware model.
 
@@ -402,13 +501,49 @@ def conditional_distribution(
     making ``(low, E)`` the diagnostic outcome that confirms the misconception. On an
     item that does *not* probe ``E`` the misconception is not elicited, so the learner
     performs capably (``theta_mastered``, null errors), like ``mastered`` here.
+
+    Registry-keyed hypotheses (spec §3): when the item carries a discrimination row
+    (or a bridge fatal link) for a registry misconception, the ``(low, <mc_id>)``
+    fire outcome takes ``E[sens]`` mass under the belief that owns it and
+    ``1 − E[spec]`` under every clean hypothesis, so EIG prefers genuinely
+    discriminating items over coverage lookalikes. An item with no discrimination
+    for a registry belief contributes coverage only (unfamiliar-anchored base).
     """
 
     irt = irt or ProbeIRTConfig()
+    discrimination = discrimination or {}
+    discriminated_ids = set(discriminated_ids or ())
     error_types: list[str | None] = [None, *known_error_types]
     distribution: dict[Outcome, float] = {
         (bucket, error_type): 0.0 for bucket in SCORE_BUCKETS for error_type in error_types
     }
+
+    # spec §3: discriminating item — overlay the registry fire channel on every
+    # hypothesis (belief holder vs clean learner separate on the fire outcome).
+    if discriminated_ids:
+        return _fire_overlay_distribution(
+            hypothesis,
+            distribution,
+            discriminated_ids=discriminated_ids,
+            discrimination=discrimination,
+            item_a=item_a,
+            item_b=item_b,
+            irt=irt,
+        )
+
+    # spec §3: registry belief on an item with no discrimination link — the item
+    # does not probe the belief, so its holder performs capably (the motivating
+    # paraphrase is answerable perfectly while holding the belief). No separation
+    # from `mastered`: a non-discriminating item earns no EIG against the belief
+    # and a clean success on it is not evidence the belief is gone.
+    if hypothesis.misconception_id is not None:
+        low, mid, high = _graded_marginals(
+            item_a * (irt.theta_mastered - item_b), irt.cut_mid, irt.cut_high
+        )
+        distribution[("low", None)] = low
+        distribution[("mid", None)] = mid
+        distribution[("high", None)] = high
+        return distribution
 
     probes_item = hypothesis.error_type is not None and hypothesis.error_type in fatal_error_ids
 
@@ -449,6 +584,95 @@ def conditional_distribution(
     return distribution
 
 
+# Bridge default (spec §3): an item whose rubric fatal error links a misconception
+# but has no estimated discrimination row yet is treated as a mild discriminator.
+_BRIDGE_SENSITIVITY = 0.6
+_BRIDGE_SPECIFICITY = 0.9
+
+
+def _fire_probabilities(
+    fire_channel: str,
+    discrimination: dict[str, ItemMisconceptionDiscrimination],
+) -> tuple[float, float]:
+    """``(E[sens], E[spec])`` for the item's fire channel, with the bridge default."""
+
+    row = discrimination.get(fire_channel)
+    if row is None:
+        return _BRIDGE_SENSITIVITY, _BRIDGE_SPECIFICITY
+    return row.sensitivity_mean, row.specificity_mean
+
+
+def _fire_overlay_distribution(
+    hypothesis: Hypothesis,
+    distribution: dict[Outcome, float],
+    *,
+    discriminated_ids: set[str],
+    discrimination: dict[str, ItemMisconceptionDiscrimination],
+    item_a: float,
+    item_b: float,
+    irt: ProbeIRTConfig,
+) -> dict[Outcome, float]:
+    """Overlay the registry fire channel for a discriminating item (spec §3).
+
+    A single fire channel drives the split (the lexically-first discriminated
+    misconception when an item catches several — real diagnostics catch one). The
+    belief that owns the channel fires with ``E[sens]``; every other (clean)
+    hypothesis false-fires with ``1 − E[spec]``. The remaining mass follows the
+    hypothesis's own graded distribution: the belief holder and ``unfamiliar``
+    anchor low, ``mastered``/``facet_solid``/other beliefs anchor at mastery.
+    """
+
+    fire_channel = sorted(discriminated_ids)[0]
+    sens, spec = _fire_probabilities(fire_channel, discrimination)
+    is_belief = hypothesis.misconception_id == fire_channel
+    if is_belief:
+        p_fire = sens
+        anchor = irt.theta_unfamiliar
+    else:
+        p_fire = 1.0 - spec
+        anchor = irt.theta_unfamiliar if hypothesis.label == "unfamiliar" else irt.theta_mastered
+    low, mid, high = _graded_marginals(item_a * (anchor - item_b), irt.cut_mid, irt.cut_high)
+    scale = 1.0 - p_fire
+    distribution[("low", fire_channel)] = p_fire
+    distribution[("low", None)] = low * scale
+    distribution[("mid", None)] = mid * scale
+    distribution[("high", None)] = high * scale
+    return distribution
+
+
+def item_registry_discrimination(
+    repository: Repository,
+    vault: LoadedVault,
+    item: PracticeItem,
+    rubric: Rubric | None,
+    hypothesis_set: HypothesisSet,
+) -> tuple[dict[str, ItemMisconceptionDiscrimination], set[str]]:
+    """``(discrimination_rows, discriminated_ids)`` for an item vs the set (spec §3).
+
+    ``discriminated_ids`` are the registry misconception ids the item catches —
+    those with a discrimination row, plus a bridge for a rubric fatal error linking
+    a registry belief in the set that has no row yet (so old links aren't lost).
+    """
+
+    from learnloop.vault.models import discriminates
+
+    registry_ids = {h.misconception_id for h in hypothesis_set.hypotheses if h.misconception_id is not None}
+    if not registry_ids:
+        return {}, set()
+    rows: dict[str, ItemMisconceptionDiscrimination] = {}
+    discriminated: set[str] = set()
+    for mc_id in registry_ids:
+        row = repository.discrimination_row(item.id, mc_id)
+        if row is not None:
+            rows[mc_id] = row
+            discriminated.add(mc_id)
+    bridge = discriminates(item, rubric)
+    for mc_id in bridge:
+        if mc_id in registry_ids:
+            discriminated.add(mc_id)  # row absent -> bridge default in _fire_probabilities
+    return rows, discriminated
+
+
 def expected_information_gain(
     hypothesis_set: HypothesisSet,
     item: PracticeItem,
@@ -457,6 +681,8 @@ def expected_information_gain(
     item_a: float = 1.0,
     item_b: float = 0.0,
     irt: ProbeIRTConfig | None = None,
+    discrimination: dict[str, ItemMisconceptionDiscrimination] | None = None,
+    discriminated_ids: set[str] | None = None,
 ) -> float:
     fatal_error_ids = _fatal_error_ids(item, rubric)
     known_error_types = hypothesis_set.known_error_types
@@ -468,6 +694,8 @@ def expected_information_gain(
             irt=irt,
             fatal_error_ids=fatal_error_ids,
             known_error_types=known_error_types,
+            discrimination=discrimination,
+            discriminated_ids=discriminated_ids,
         )
         for hypothesis in hypothesis_set.hypotheses
     }
@@ -721,6 +949,9 @@ def _observation_likelihoods(
     item_b: float = 0.0,
     irt: ProbeIRTConfig | None = None,
     self_tag_weight: float | None = None,
+    discrimination: dict[str, ItemMisconceptionDiscrimination] | None = None,
+    discriminated_ids: set[str] | None = None,
+    fired_channel: str | None = None,
 ) -> dict[str, float]:
     """`P(observed | h, item)` per hypothesis for one attempt outcome.
 
@@ -733,10 +964,28 @@ def _observation_likelihoods(
     misconception the item's rubric does not assert (spec §12.2): the likelihood
     becomes the trust-weighted mixture ``w·P_probe + (1−w)·P_marg`` so the score
     bucket is taken at face value while the label is only partially trusted.
+
+    Registry channels (spec §7 first bullet): on a discriminating item the fire is
+    observed from the attempt's error events (``fired_channel``), not the score
+    bucket, so a fired keyed fatal reads ``(low, <mc_id>)`` and a clean attempt
+    reads the null channel at its bucket. Items with no discrimination link leave
+    the fire channel untouched — registry beliefs get only bucket-marginal evidence.
     """
 
     fatal_error_ids = _fatal_error_ids(item, rubric)
     known_error_types = hypothesis_set.known_error_types
+    discriminated_ids = set(discriminated_ids or ())
+    if discriminated_ids:
+        return _registry_observation_likelihoods(
+            hypothesis_set,
+            bucket,
+            fired_channel,
+            discrimination=discrimination or {},
+            discriminated_ids=discriminated_ids,
+            item_a=item_a,
+            item_b=item_b,
+            irt=irt,
+        )
     if self_tag_weight is not None and error_type is not None:
         return _self_tag_likelihoods(
             hypothesis_set,
@@ -767,6 +1016,49 @@ def _observation_likelihoods(
             likelihoods[hypothesis.label] = sum(
                 probability for (outcome_bucket, _), probability in conditional.items() if outcome_bucket == bucket
             )
+    return likelihoods
+
+
+def _registry_observation_likelihoods(
+    hypothesis_set: HypothesisSet,
+    bucket: str,
+    fired_channel: str | None,
+    *,
+    discrimination: dict[str, ItemMisconceptionDiscrimination],
+    discriminated_ids: set[str],
+    item_a: float,
+    item_b: float,
+    irt: ProbeIRTConfig | None,
+) -> dict[str, float]:
+    """Fire-keyed observation on a discriminating item (spec §7).
+
+    The fire is read from the attempt's error events: a keyed fatal on the item's
+    fire channel takes the ``(low, <channel>)`` mass of the §3 overlay; otherwise
+    the null-channel mass at the observed bucket carries the (informative) clean
+    signal. Both are computed straight from ``conditional_distribution`` so EIG,
+    the mixture, and this update stay internally consistent.
+    """
+
+    fire_channel = sorted(discriminated_ids)[0]
+    observed_fire = fired_channel is not None and fired_channel in discriminated_ids
+    likelihoods: dict[str, float] = {}
+    for hypothesis in hypothesis_set.hypotheses:
+        conditional = conditional_distribution(
+            hypothesis,
+            item_a=item_a,
+            item_b=item_b,
+            irt=irt,
+            fatal_error_ids=set(),
+            known_error_types=hypothesis_set.known_error_types,
+            discrimination=discrimination,
+            discriminated_ids=discriminated_ids,
+        )
+        if observed_fire:
+            likelihoods[hypothesis.label] = conditional.get((bucket, fire_channel), 0.0) or conditional.get(
+                ("low", fire_channel), 0.0
+            )
+        else:
+            likelihoods[hypothesis.label] = conditional.get((bucket, None), 0.0)
     return likelihoods
 
 
@@ -882,6 +1174,17 @@ def probe_posterior(
         error_type = attempt.get("error_type")
         item_a, item_b, probe_irt = resolve_item_irt(vault, item)
         tag_weight = _resolve_self_tag_weight(vault, item, rubric, hypothesis_set, error_type, bucket)
+        discrimination, discriminated_ids = item_registry_discrimination(
+            repository, vault, item, rubric, hypothesis_set
+        )
+        fired_channel = None
+        if discriminated_ids:
+            fired = {
+                str(evt.get("misconception_id"))
+                for evt in repository.error_events_for_attempt(str(attempt.get("id")))
+                if evt.get("misconception_id")
+            } & discriminated_ids
+            fired_channel = sorted(fired)[0] if fired else None
         posterior = _apply_observation(
             hypothesis_set,
             item,
@@ -893,6 +1196,9 @@ def probe_posterior(
             item_b=item_b,
             irt=probe_irt,
             self_tag_weight=tag_weight,
+            discrimination=discrimination,
+            discriminated_ids=discriminated_ids,
+            fired_channel=fired_channel,
         )
 
     size = len(hypothesis_set.hypotheses)
@@ -920,6 +1226,9 @@ def _apply_observation(
     item_b: float = 0.0,
     irt: ProbeIRTConfig | None = None,
     self_tag_weight: float | None = None,
+    discrimination: dict[str, ItemMisconceptionDiscrimination] | None = None,
+    discriminated_ids: set[str] | None = None,
+    fired_channel: str | None = None,
 ) -> dict[str, float]:
     likelihoods = _observation_likelihoods(
         hypothesis_set,
@@ -931,6 +1240,9 @@ def _apply_observation(
         item_b=item_b,
         irt=irt,
         self_tag_weight=self_tag_weight,
+        discrimination=discrimination,
+        discriminated_ids=discriminated_ids,
+        fired_channel=fired_channel,
     )
     updated = {label: posterior[label] * likelihoods.get(label, 0.0) for label in posterior}
     total = sum(updated.values())
@@ -999,8 +1311,10 @@ def persist_probe_beliefs(
 ) -> None:
     """Persist the misconception marginals of the posterior to `learner_state_beliefs`.
 
-    Only `misconception:E` hypotheses map to the table's allowed scope types; the
-    `mastered`/`unfamiliar` base hypotheses carry no error type and are skipped.
+    Both legacy `misconception:<error_type>` and registry `misconception:<id>`
+    hypotheses persist under scope_type `misconception`; the registry rows key the
+    belief on their misconception id (spec §3/§7). The `mastered`/`unfamiliar` base
+    hypotheses carry no channel and are skipped.
     """
 
     now = utc_now_iso(clock)
@@ -1008,13 +1322,14 @@ def persist_probe_beliefs(
     subject = learning_object.subjects[0] if learning_object is not None and learning_object.subjects else None
     algorithm_version = vault.config.algorithms.algorithm_version
     for hypothesis in posterior.hypothesis_set.hypotheses:
-        if hypothesis.error_type is None:
+        scope_id = hypothesis.channel_key
+        if scope_id is None:
             continue
         probability = posterior.posterior.get(hypothesis.label, 0.0)
         prior_probability = posterior.prior.get(hypothesis.label, 0.0)
         repository.upsert_state_belief(
             scope_type="misconception",
-            scope_id=hypothesis.error_type,
+            scope_id=scope_id,
             belief_key=learning_object_id,
             mean=probability,
             variance=max(probability * (1.0 - probability), 0.0),
@@ -1146,4 +1461,52 @@ def _neighbor_misconceptions(
             continue
         most_severe = max(candidate_errors, key=lambda error: error.severity)
         results.append((neighbor, most_severe))
+    return results
+
+
+def _neighbor_registry_misconceptions(
+    vault: LoadedVault,
+    repository: Repository,
+    concept_id: str,
+    now: datetime,
+) -> list[tuple[str, "MisconceptionRecord"]]:
+    """Registry rows on confusable-neighbor concepts, gated by neighbor mastery ≥ 0.7.
+
+    Mirrors ``_neighbor_misconceptions`` (spec §3 neighbor propagation) but over the
+    normalized registry rather than raw error events; ``source_concept_id`` is set
+    on the resulting hypotheses so telemetry can attribute the propagation.
+    """
+
+    neighbors: list[str] = []
+    for edge in vault.edges:
+        if edge.relation_type != "confusable_with":
+            continue
+        if edge.source == concept_id:
+            neighbors.append(edge.target)
+        elif edge.target == concept_id:
+            neighbors.append(edge.source)
+    if not neighbors:
+        return []
+
+    mastery_states = repository.mastery_states()
+    concept_to_los: dict[str, list[str]] = {}
+    for lo_id, learning_object in vault.learning_objects.items():
+        concept_to_los.setdefault(learning_object.concept, []).append(lo_id)
+
+    results: list[tuple[str, "MisconceptionRecord"]] = []
+    seen: set[str] = set()
+    for neighbor in neighbors:
+        neighbor_los = concept_to_los.get(neighbor, [])
+        neighbor_mastery = 0.0
+        for lo_id in neighbor_los:
+            state = mastery_states.get(lo_id)
+            if state is not None:
+                neighbor_mastery = max(neighbor_mastery, sigmoid(state.logit_mean))
+        if neighbor_mastery < 0.7:
+            continue
+        for record in repository.misconceptions_for_concepts([neighbor], statuses=("active", "resolving")):
+            if record.id in seen:
+                continue
+            seen.add(record.id)
+            results.append((neighbor, record))
     return results

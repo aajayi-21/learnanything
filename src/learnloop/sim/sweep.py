@@ -33,6 +33,7 @@ DEFAULT_SWEEP_SPEC_PATH = Path(__file__).with_name("default_sweep.yaml")
 _TOPK_OVERLAP_RELEVANCE = 0.98
 _KENDALL_RELEVANCE = 0.95
 _MAE_RELEVANCE = 0.005
+_GOAL_RELEVANCE = 0.01  # min |delta| in goal attainment/retention fractions
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,8 @@ def run_sweep(
     work_dir: Path,
     reset_state: bool = True,
     base_overrides: Mapping[str, Any] | None = None,
+    primed_retries: bool = False,
+    goal_due_day: int | None = None,
 ) -> SweepReport:
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -99,6 +102,8 @@ def run_sweep(
             items_per_day=items_per_day,
             seed=seed,
             config_overrides=overrides,
+            primed_retries=primed_retries,
+            goal_due_day=goal_due_day,
         )
 
     baseline = _run("baseline", base_overrides)
@@ -168,6 +173,21 @@ def _compare(
             _first_detection_day(baseline),
             _first_detection_day(variant),
         ),
+        # The cram-vs-space tradeoff a goal quota makes: due-date attainment
+        # (fraction of goal facets at true mastery >= target on the due day)
+        # against retention 30 no-practice days later.
+        "goal_attainment_at_due": _delta(
+            _goal_metric_mean(baseline, "truth_at_target_fraction_at_due"),
+            _goal_metric_mean(variant, "truth_at_target_fraction_at_due"),
+        ),
+        "goal_retention_due_plus_30": _delta(
+            _goal_metric_mean(baseline, "truth_at_target_fraction_due_plus_30"),
+            _goal_metric_mean(variant, "truth_at_target_fraction_due_plus_30"),
+        ),
+        "goal_frontier_empty_day": _delta(
+            _goal_metric_mean(baseline, "frontier_empty_day"),
+            _goal_metric_mean(variant, "frontier_empty_day"),
+        ),
     }
 
     queue_moved = (mean_topk is not None and mean_topk < _TOPK_OVERLAP_RELEVANCE) or (
@@ -178,7 +198,11 @@ def _compare(
         metric_deltas["belief_mae"] is not None
         and abs(metric_deltas["belief_mae"]) > _MAE_RELEVANCE
     )
-    decision_relevant = queue_moved or counts_moved or beliefs_moved
+    goals_moved = any(
+        metric_deltas[key] is not None and abs(metric_deltas[key]) > _GOAL_RELEVANCE
+        for key in ("goal_attainment_at_due", "goal_retention_due_plus_30")
+    )
+    decision_relevant = queue_moved or counts_moved or beliefs_moved or goals_moved
     return {
         "param_path": param_path,
         "value": value,
@@ -191,8 +215,17 @@ def _compare(
             "queue_moved": queue_moved,
             "counts_moved": counts_moved,
             "beliefs_moved": bool(beliefs_moved),
+            "goals_moved": bool(goals_moved),
         },
     }
+
+
+def _goal_metric_mean(report: SimReport, key: str) -> float | None:
+    per_goal = report.metrics.get("goals", {}).get("per_goal", [])
+    values = [entry.get(key) for entry in per_goal if entry.get(key) is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def _run_summary(report: SimReport) -> dict[str, Any]:

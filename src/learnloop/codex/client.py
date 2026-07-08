@@ -12,7 +12,7 @@ from dataclasses import asdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from typing import Literal, Protocol
+from typing import Literal, Mapping, Protocol
 
 from pydantic import BaseModel
 
@@ -20,11 +20,20 @@ from learnloop.config import CodexConfig
 from learnloop.codex.prompts import (
     AUTHORING_PROMPT_VERSION,
     CANONICAL_INGEST_PROMPT_VERSION,
+    DIAGNOSTIC_TRIALS_PROMPT_VERSION,
     GRADING_PROMPT_VERSION,
+    MISCONCEPTION_MATCH_PROMPT_VERSION,
     TEACH_BACK_PROMPT_VERSION,
     TUTOR_QA_PROMPT_VERSION,
 )
-from learnloop.codex.schemas import AuthoringProposal, GradingProposal, TeachBackQuestion, TutorAnswer
+from learnloop.codex.schemas import (
+    AuthoringProposal,
+    DiagnosticTrials,
+    GradingProposal,
+    MisconceptionMatch,
+    TeachBackQuestion,
+    TutorAnswer,
+)
 
 LOG = logging.getLogger(__name__)
 EVENT_FIELDS_ATTR = "event_fields"
@@ -190,6 +199,9 @@ class CodexClient(Protocol):
     def run_teach_back_question(self, context: TeachBackQuestionContext) -> TeachBackQuestion:
         ...
 
+    def run_misconception_match(self, context: Any) -> MisconceptionMatch:
+        ...
+
 
 class CodexUnavailable(RuntimeError):
     pass
@@ -241,6 +253,15 @@ class HttpCodexClient:
     def run_teach_back_question(self, context: TeachBackQuestionContext) -> TeachBackQuestion:
         payload = self._post(self.config.teach_back_path, {"context": asdict(context)}, purpose="teach_back")
         return TeachBackQuestion.model_validate(payload.get("proposal", payload))
+
+    def run_misconception_match(self, context: Any) -> MisconceptionMatch:
+        context_payload = context if isinstance(context, dict) else asdict(context)
+        payload = self._post(
+            self.config.misconception_match_path,
+            {"context": context_payload},
+            purpose="misconception_match",
+        )
+        return MisconceptionMatch.model_validate(payload.get("proposal", payload))
 
     def _post(self, path: str, payload: dict, *, purpose: str) -> dict:
         url = _url(self.config.base_url, path)
@@ -392,6 +413,29 @@ class SdkCodexClient:
             purpose="teach_back",
         )
         return TeachBackQuestion.model_validate_json(text)
+
+    def run_misconception_match(self, context: Any) -> MisconceptionMatch:
+        text = self._run_structured(
+            _misconception_match_prompt(context),
+            _codex_output_schema(MisconceptionMatch),
+            purpose="misconception_match",
+        )
+        return MisconceptionMatch.model_validate_json(text)
+
+    def run_diagnostic_trials(self, context: Any) -> DiagnosticTrials:
+        """Codex answers-under-belief for the sim discrimination gate (spec §6).
+
+        Deliberately NOT on the ``CodexClient`` Protocol / ``HttpCodexClient`` —
+        the gate discovers it via ``getattr(client, "run_diagnostic_trials",
+        None)`` so providers without it degrade to the deterministic path.
+        """
+
+        text = self._run_structured(
+            _diagnostic_trials_prompt(context),
+            _codex_output_schema(DiagnosticTrials),
+            purpose="diagnostic_trials",
+        )
+        return DiagnosticTrials.model_validate_json(text)
 
     def _run_structured(self, prompt: str, output_schema: dict[str, Any], *, purpose: str) -> str:
         _ensure_sdk_importable(self.sdk_python_path)
@@ -559,6 +603,14 @@ def _grading_prompt(context: GradingContext) -> str:
                 "For each repair_suggestion, also fill `target_evidence_families` "
                 "with the narrow item evidence facet(s) the learner-facing repair "
                 "rationale is meant to diagnose or repair. "
+                "When an error_attribution sets `is_misconception=true`, "
+                "`misconception_statement` is REQUIRED: state the learner's belief "
+                "in learner-model terms (what the learner thinks is true), NOT a "
+                "description of the wrong answer — e.g. \"believes Q maps standard "
+                "vectors to eigenbasis coefficients (reverses Q / Q^T)\", not "
+                "\"used Q instead of Q^T\". Also fill "
+                "`misconception_consistent_answer` when you can: the answer a holder "
+                "of that belief would give on this specific item. "
                 "Use the supplied `error_taxonomy.selection_policy` and "
                 "`error_taxonomy.targeting_policy` exactly."
             ),
@@ -648,6 +700,75 @@ def _tutor_qa_prompt(context: TutorQAContext) -> str:
         {
             "task": _TUTOR_QA_SHARED + " " + task,
             "context": asdict(context),
+        },
+    )
+
+
+def _misconception_match_prompt(context: Any) -> str:
+    """Registry belief-match prompt (spec §2.2.2).
+
+    Asks whether a freshly graded belief is the same as any existing registry row
+    for the learning object; the model returns ``same:<id>`` or ``new`` and errs
+    toward ``new`` when unsure (spec §9, avoid over-merging distinct beliefs).
+    """
+
+    return _json_prompt(
+        "learnloop misconception match",
+        MISCONCEPTION_MATCH_PROMPT_VERSION,
+        {
+            "task": (
+                "Decide whether the learner belief in `statement` is the SAME "
+                "underlying misconception as one of the `candidates` (return "
+                "decision 'same' with that candidate's misconception_id) or a "
+                "genuinely DISTINCT belief (return decision 'new'). Compare the "
+                "beliefs themselves, never their error-type labels. When unsure, "
+                "prefer 'new'."
+            ),
+            "statement": getattr(context, "statement", ""),
+            "learning_object_id": getattr(context, "learning_object_id", ""),
+            "candidates": getattr(context, "candidates", []),
+        },
+    )
+
+
+def _diagnostic_trials_prompt(context: Any) -> str:
+    """Answers-under-belief prompt for the sim discrimination gate (spec §6).
+
+    Asks codex to ROLE-PLAY ``n_trials`` planted students (who genuinely hold the
+    stated belief) and ``n_trials`` clean students on one item, then judge whether
+    the misconception-keyed fatal error would fire on each. One call, all trials.
+    """
+
+    def _get(key: str, default: Any = None) -> Any:
+        if isinstance(context, Mapping):
+            return context.get(key, default)
+        return getattr(context, key, default)
+
+    n_trials = int(_get("n_trials", 0) or 0)
+    max_words = int(_get("max_answer_words", 40) or 40)
+    return _json_prompt(
+        "learnloop diagnostic trials",
+        DIAGNOSTIC_TRIALS_PROMPT_VERSION,
+        {
+            "task": (
+                f"Role-play {n_trials} DISTINCT `planted` students who GENUINELY "
+                "HOLD the belief in `misconception_statement` and answer "
+                "`item_prompt` accordingly (natural, varied phrasing — NEVER copy "
+                "`misconception_consistent_answer` verbatim), and "
+                f"{n_trials} DISTINCT `clean` students who are competent (correct "
+                "substance; wording may vary or carry minor slips). For EACH "
+                "answer set `fires` = true iff a grader would attribute the "
+                "misconception-keyed fatal error described in `keyed_fatal_errors` "
+                "— i.e. the answer is substantively consistent with the belief AND "
+                f"categorically wrong. Keep every `answer` <= {max_words} words."
+            ),
+            "n_trials": n_trials,
+            "max_answer_words": max_words,
+            "item_prompt": _get("item_prompt", ""),
+            "expected_answer": _get("expected_answer", ""),
+            "misconception_statement": _get("misconception_statement", ""),
+            "misconception_consistent_answer": _get("misconception_consistent_answer", ""),
+            "keyed_fatal_errors": _get("keyed_fatal_errors", []),
         },
     )
 

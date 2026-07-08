@@ -553,7 +553,7 @@ def test_ingest_does_not_link_goal_to_pending_proposed_concept(tmp_path):
     loaded = load_vault(vault_root)
     assert "concept_ingested_pending" not in loaded.concepts
     assert all(
-        "concept_ingested_pending" not in goal.concept_anchors
+        "concept_ingested_pending" not in goal.facet_scope.concepts
         for goal in loaded.goals
     )
 

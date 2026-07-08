@@ -8,6 +8,7 @@ use sidecar::SidecarManager;
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(SidecarManager::new())
         .invoke_handler(tauri::generate_handler![
             select_vault,
@@ -34,9 +35,11 @@ fn main() {
             add_error_event,
             trigger_followup,
             rate_followup,
+            start_primed_retry,
             inspect_entity,
             get_concept_graph,
             get_vault_tree,
+            get_recent_ingests,
             read_vault_file,
             write_vault_file,
             create_vault_file,
@@ -56,13 +59,24 @@ fn main() {
             run_cli_command,
             get_facet_mastery,
             get_knowledge_map,
+            get_knowledge_map_history,
             set_grading_provider,
             ask_tutor_question,
             rate_tutor_answer,
             save_tutor_answer_note,
             get_tutor_transcript,
             start_teach_back,
-            submit_teach_back_turn
+            submit_teach_back_turn,
+            goals_list,
+            get_goal_report,
+            get_goal_report_series,
+            goal_feasibility,
+            create_goal,
+            update_goal_status,
+            get_exam_status,
+            start_exam,
+            submit_exam_answer,
+            finish_exam
         ])
         .run(tauri::generate_context!())
         .expect("error while running LearnLoop");

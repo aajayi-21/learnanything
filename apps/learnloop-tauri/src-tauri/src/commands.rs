@@ -211,6 +211,11 @@ pub async fn get_vault_tree(sidecar: State<'_, SidecarManager>) -> Result<Value,
 }
 
 #[tauri::command]
+pub async fn get_recent_ingests(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_recent_ingests", json!({})).await
+}
+
+#[tauri::command]
 pub async fn read_vault_file(
     path: String,
     sidecar: State<'_, SidecarManager>,
@@ -369,6 +374,14 @@ pub async fn rate_followup(
 }
 
 #[tauri::command]
+pub async fn start_primed_retry(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "start_primed_retry", input).await
+}
+
+#[tauri::command]
 pub async fn run_cli_command(
     input: Value,
     sidecar: State<'_, SidecarManager>,
@@ -384,6 +397,11 @@ pub async fn get_facet_mastery(sidecar: State<'_, SidecarManager>) -> Result<Val
 #[tauri::command]
 pub async fn get_knowledge_map(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
     blocking_sidecar_call(sidecar, "get_knowledge_map", json!({})).await
+}
+
+#[tauri::command]
+pub async fn get_knowledge_map_history(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_knowledge_map_history", json!({})).await
 }
 
 #[tauri::command]
@@ -440,4 +458,81 @@ pub async fn submit_teach_back_turn(
     sidecar: State<'_, SidecarManager>,
 ) -> Result<Value, CommandError> {
     blocking_sidecar_call(sidecar, "submit_teach_back_turn", input).await
+}
+
+#[tauri::command]
+pub async fn goals_list(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "goals_list", json!({})).await
+}
+
+#[tauri::command]
+pub async fn get_goal_report(
+    goal_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_goal_report", json!({"goalId": goal_id})).await
+}
+
+#[tauri::command]
+pub async fn get_goal_report_series(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_goal_report_series", input).await
+}
+
+#[tauri::command]
+pub async fn goal_feasibility(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "goal_feasibility", input).await
+}
+
+#[tauri::command]
+pub async fn create_goal(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "create_goal", input).await
+}
+
+#[tauri::command]
+pub async fn update_goal_status(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "update_goal_status", input).await
+}
+
+#[tauri::command]
+pub async fn get_exam_status(
+    goal_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_exam_status", json!({"goalId": goal_id})).await
+}
+
+#[tauri::command]
+pub async fn start_exam(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "start_exam", input).await
+}
+
+#[tauri::command]
+pub async fn submit_exam_answer(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "submit_exam_answer", input).await
+}
+
+#[tauri::command]
+pub async fn finish_exam(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "finish_exam", input).await
 }

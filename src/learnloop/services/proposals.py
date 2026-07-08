@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 from math import ceil
@@ -14,9 +14,14 @@ from learnloop.ai.client import AIProviderClient
 from learnloop.clock import Clock, utc_now_iso
 from learnloop.codex.client import AuthoringContext, CodexClient, CodexUnavailable
 from learnloop.codex.client import _authoring_prompt, _codex_output_schema
-from learnloop.codex.prompts import AUTHORING_PROMPT_VERSION
+from learnloop.codex.prompts import (
+    AUTHORING_PROMPT_VERSION,
+    DIAGNOSTIC_AUTHORING_PROMPT,
+    DIAGNOSTIC_AUTHORING_PROMPT_VERSION,
+)
 from learnloop.codex.schemas import AuthoringProposal, AuthoringProposalItem, SourceRef
-from learnloop.db.repositories import Repository
+from learnloop.db.repositories import MisconceptionRecord, Repository
+from learnloop.services.diagnostic_gate import GateResult, run_discrimination_gate
 from learnloop.ids import new_ulid
 from learnloop.services.patches import PatchApplyResult, apply_accepted_items, reject_applied_items
 from learnloop.vault.loader import load_vault
@@ -95,7 +100,7 @@ def build_authoring_context(
         for concept_id, concept in sorted(vault.concepts.items())
     ]
     goals = [
-        {"id": goal.id, "title": goal.title, "concept_anchors": goal.concept_anchors}
+        {"id": goal.id, "title": goal.title, "concept_anchors": goal.facet_scope.concepts}
         for goal in vault.goals
         if goal.status == "active"
     ]
@@ -177,18 +182,126 @@ def authoring_context_hash(context: AuthoringContext) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class DiagnosticTarget:
+    """Relational review context for a diagnostic-authoring proposal (spec §5.3).
+
+    Resolved from the intervention need at review time. ``demonstrated_facets`` and
+    ``source_surface_family`` are read from the need's ``diagnostic_focus`` snapshot
+    (taken at need-creation), never from live learner state, so a proposal validates
+    identically regardless of when it is reviewed. ``implicated_facets`` (the union
+    of the targeted beliefs' facets) backs the soft footprint warning.
+    """
+
+    need_id: str
+    misconception_ids: list[str]
+    misconception_statements: dict[str, str]
+    source_practice_item_id: str | None
+    source_surface_family: str | None
+    demonstrated_facets: list[str]
+    implicated_facets: list[str] = field(default_factory=list)
+
+
+def diagnostic_target_from_need(need: dict[str, Any]) -> DiagnosticTarget:
+    """Build a :class:`DiagnosticTarget` from an intervention need row (spec §5.3)."""
+
+    focus = need.get("diagnostic_focus") if isinstance(need.get("diagnostic_focus"), dict) else {}
+    focus = focus or {}
+    return DiagnosticTarget(
+        need_id=str(need["id"]),
+        misconception_ids=[str(mc) for mc in (focus.get("misconception_ids") or [])],
+        misconception_statements={
+            str(k): str(v) for k, v in (focus.get("misconception_statements") or {}).items()
+        },
+        source_practice_item_id=focus.get("source_practice_item_id") or need.get("practice_item_id"),
+        source_surface_family=focus.get("source_surface_family"),
+        demonstrated_facets=[str(f) for f in (focus.get("demonstrated_facets") or [])],
+        implicated_facets=[str(f) for f in (focus.get("implicated_facets") or [])],
+    )
+
+
+def _diagnostic_payload_fatal_misconception_ids(payload: dict[str, Any]) -> set[str]:
+    rubric = payload.get("grading_rubric")
+    if not isinstance(rubric, dict):
+        return set()
+    ids: set[str] = set()
+    for fatal_error in rubric.get("fatal_errors", []) or []:
+        if isinstance(fatal_error, dict) and fatal_error.get("misconception_id"):
+            ids.add(str(fatal_error["misconception_id"]))
+    return ids
+
+
+def diagnostic_review_errors(item: AuthoringProposalItem, context: DiagnosticTarget | None) -> list[str]:
+    """Hard §5.3 validation errors for a diagnostic-authoring item.
+
+    A missing context on a diagnostic item is itself a hard error (the relational
+    checks must not silently soften). With context: no fatal error keyed to one of
+    the target misconception ids; missing ``misconception_consistent_answer``;
+    ``surface_family`` equal to the source item's.
+    """
+
+    if context is None:
+        return ["missing_diagnostic_target_context"]
+    if item.item_type != "practice_item":
+        return []
+    payload = item.payload.model_dump(mode="json", exclude_none=True)
+    errors: list[str] = []
+    fatal_mc_ids = _diagnostic_payload_fatal_misconception_ids(payload)
+    if not (fatal_mc_ids & set(context.misconception_ids)):
+        errors.append("diagnostic_missing_keyed_fatal_error")
+    if _missing(payload.get("misconception_consistent_answer")):
+        errors.append("diagnostic_missing_misconception_consistent_answer")
+    surface_family = payload.get("surface_family")
+    if (
+        surface_family is not None
+        and context.source_surface_family is not None
+        and surface_family == context.source_surface_family
+    ):
+        errors.append("diagnostic_surface_family_matches_source")
+    return errors
+
+
+def diagnostic_review_warnings(item: AuthoringProposalItem, context: DiagnosticTarget | None) -> list[str]:
+    """Soft §5.3 warnings: footprint exceeds implicated set / hits demonstrated facets."""
+
+    if context is None or item.item_type != "practice_item":
+        return []
+    payload = item.payload.model_dump(mode="json", exclude_none=True)
+    evidence_facets = set(_string_list(payload.get("evidence_facets")))
+    warnings: list[str] = []
+    implicated = set(context.implicated_facets)
+    if implicated and not evidence_facets <= implicated:
+        warnings.append("diagnostic_footprint_exceeds_implicated_facets")
+    intersecting = sorted(evidence_facets & set(context.demonstrated_facets))
+    for facet in intersecting:
+        warnings.append(f"diagnostic_footprint_hits_demonstrated_facet:{facet}")
+    return warnings
+
+
 def evaluate_review_policy(
     item: AuthoringProposalItem,
     vault: LoadedVault,
     *,
     source_refs: list[SourceRef] | None = None,
+    context: DiagnosticTarget | None = None,
 ) -> str:
     """Resolve an item's effective review route under the auto-apply-low-risk policy.
 
     Returns one of ``auto_apply``, ``review_required``, or ``reject``. Auto-apply
     is only returned for direct, source-grounded creation of Learning Objects /
     Practice Items with resolvable source refs and no id collision.
+
+    When ``context`` is supplied (a diagnostic-authoring item, spec §5.3) the
+    relational checks run: any hard :func:`diagnostic_review_errors` route to
+    ``reject``; otherwise a diagnostic item is never auto-applied — the sim gate
+    (§6) is the only thing that can later promote it — so it is ``review_required``.
+    ``context=None`` keeps today's behavior for ordinary authoring proposals.
     """
+
+    if context is not None:
+        if diagnostic_review_errors(item, context):
+            return "reject"
+        return "review_required"
 
     if item.review_route == "reject":
         return "reject"
@@ -298,6 +411,275 @@ def generate_authoring_proposal(
         rows,
     )
     _auto_apply_rows(root, patch_id, rows)
+    return patch_id
+
+
+def build_diagnostic_authoring_context(
+    vault: LoadedVault,
+    repository: Repository,
+    need: dict[str, Any],
+) -> AuthoringContext:
+    """Package ⟨belief, learner answer, grader evidence, source item⟩ for authoring (spec §5.1).
+
+    Reuses :class:`AuthoringContext` (least invasive): the §5.2 constraints plus a
+    ``DIAGNOSTIC_TARGET`` JSON block ride in the ``instructions`` field, so the
+    existing ``run_authoring_proposal`` path and fake clients work unchanged. The
+    demonstrated facets come from the need's ``diagnostic_focus`` snapshot, not live
+    state (§5.3).
+    """
+
+    target = diagnostic_target_from_need(need)
+    learning_object_id = need.get("learning_object_id")
+    records = [repository.misconception(mc_id) for mc_id in target.misconception_ids]
+    misconception_blocks = [
+        {"id": r.id, "statement": r.statement, "signature": r.signature, "facet_ids": r.facet_ids}
+        for r in records
+        if r is not None
+    ]
+    attempt = repository.fetch_practice_attempt(str(need.get("attempt_id") or "")) or {}
+    learner_answer_md = attempt.get("learner_answer_md")
+    grader_evidence: list[dict[str, Any]] = []
+    for event in repository.error_events_for_attempt(str(need.get("attempt_id") or "")):
+        event_mc = event.get("misconception_id")
+        if event_mc is not None and event_mc not in target.misconception_ids:
+            continue
+        grader_evidence.append(
+            {
+                "misconception_id": event_mc,
+                "statement": event.get("misconception_statement"),
+                "misconception_consistent_answer": event.get("misconception_consistent_answer"),
+                "repair_plan": event.get("repair_plan"),
+            }
+        )
+    source_item = vault.practice_items.get(str(target.source_practice_item_id or ""))
+    source_block = None
+    if source_item is not None:
+        expected = source_item.expected_answer
+        source_block = {
+            "id": source_item.id,
+            "prompt": _excerpt(source_item.prompt, 400),
+            "expected_answer": expected if isinstance(expected, str) else "(structured answer)",
+            "surface_family": source_item.surface_family,
+            "evidence_facets": list(source_item.evidence_facets),
+        }
+    target_payload = {
+        "learning_object_id": learning_object_id,
+        "misconceptions": misconception_blocks,
+        "learner_answer_md": learner_answer_md,
+        "grader_evidence": grader_evidence,
+        "source_item": source_block,
+        "demonstrated_facets": target.demonstrated_facets,
+        "implicated_facets": target.implicated_facets,
+    }
+    instructions = (
+        DIAGNOSTIC_AUTHORING_PROMPT
+        + "\n\nDIAGNOSTIC_TARGET:\n"
+        + json.dumps(target_payload, sort_keys=True, ensure_ascii=False)
+    )
+    learning_object = vault.learning_objects.get(str(learning_object_id or ""))
+    subjects = list(learning_object.subjects) if learning_object is not None else None
+    return build_authoring_context(vault, subjects=subjects, instructions=instructions)
+
+
+def _diagnostic_proposal_item_row(
+    item: AuthoringProposalItem,
+    now: str,
+    *,
+    vault: LoadedVault,
+    proposal: AuthoringProposal,
+    provider: str,
+    context: DiagnosticTarget,
+) -> dict[str, Any]:
+    """Persisted row for a diagnostic-authoring item: base validation + §5.3 checks.
+
+    Diagnostic items are never auto-applied (the sim gate is the only promoter);
+    the relational §5.3 errors/warnings are surfaced exactly like the ordinary
+    ``_validation_errors``/``_validation_warnings`` on the row.
+    """
+
+    row = _proposal_item_row(item, now, vault=vault, proposal=proposal, provider=provider)
+    row["_auto_apply"] = False
+    if item.item_type != "practice_item":
+        return row
+    errors = _dedupe_preserve_order(
+        _validation_errors(item, vault, proposal.source_refs, proposal=proposal)
+        + diagnostic_review_errors(item, context)
+    )
+    warnings = _dedupe_preserve_order(
+        _validation_warnings(item, vault, proposal=proposal) + diagnostic_review_warnings(item, context)
+    )
+    if errors:
+        row["validation_status"] = "invalid"
+        row["validation_errors"] = errors
+    elif warnings:
+        row["validation_status"] = "warning"
+        row["validation_errors"] = warnings
+    else:
+        row["validation_status"] = "valid"
+        row["validation_errors"] = []
+    return row
+
+
+def _gate_target_record(
+    payload: dict[str, Any],
+    target: DiagnosticTarget,
+    records_by_id: dict[str, MisconceptionRecord],
+) -> MisconceptionRecord | None:
+    """The registry belief a generated item is gated against (its keyed fatal, else first)."""
+
+    fatal_mc_ids = _diagnostic_payload_fatal_misconception_ids(payload)
+    for mc_id in target.misconception_ids:
+        if mc_id in fatal_mc_ids and mc_id in records_by_id:
+            return records_by_id[mc_id]
+    for mc_id in target.misconception_ids:
+        if mc_id in records_by_id:
+            return records_by_id[mc_id]
+    return None
+
+
+def _reopen_need_after_gate_failure(
+    repository: Repository,
+    *,
+    need_id: str,
+    patch_id: str,
+    item_id: str | None,
+    results: list[GateResult],
+    need: dict[str, Any],
+) -> None:
+    """Reopen the need with the sim estimates attached (spec §6 reopen).
+
+    Mirrors ``_reopen_diagnostic_needs_for_rejected_items``' blocked_reason
+    convention (``diagnostic_proposal_rejected:<patch>:<item>``) and appends
+    ``last_gate_result`` into ``diagnostic_focus`` so the next generation round
+    sees the (sens, spec) estimates + failure reason.
+    """
+
+    blocked_reason = f"diagnostic_proposal_rejected:{patch_id}"
+    if item_id:
+        blocked_reason = f"{blocked_reason}:{item_id}"
+    focus = dict(need.get("diagnostic_focus") or {})
+    focus["last_gate_result"] = [result.as_dict() for result in results]
+    repository.update_intervention_need_diagnostic_focus(need_id, focus)
+    repository.update_intervention_need_status(need_id, status="pending", blocked_reason=blocked_reason)
+
+
+def generate_diagnostic_proposal(
+    root: Path,
+    client: CodexClient | AIProviderClient,
+    *,
+    need_id: str,
+    model: str | None = None,
+    clock: Clock | None = None,
+) -> str:
+    """Author a discriminating diagnostic from a pending misconception need (spec §5/§6).
+
+    Builds the §5.1 context, runs generation, validates each item against the
+    §5.3 ``DiagnosticTarget``, persists (never auto-applying — review_required at
+    most), links the need (``diagnostic_proposal_queued:<patch>[:<item>]``), then
+    runs the §6 sim discrimination gate per generated item. Gate pass seeds the
+    discrimination row and leaves the item for review; gate failure rejects the
+    item and reopens the need with the estimates attached.
+    """
+
+    vault = load_vault(root)
+    repository = Repository(VaultPaths(vault.root, vault.config).sqlite_path)
+    need = repository.intervention_need(need_id)
+    if need is None:
+        raise ValueError(f"Intervention need {need_id} not found")
+    target = diagnostic_target_from_need(need)
+    if not target.misconception_ids:
+        raise ValueError(f"Intervention need {need_id} carries no misconception_ids for diagnostic authoring")
+    records_by_id: dict[str, MisconceptionRecord] = {}
+    for mc_id in target.misconception_ids:
+        record = repository.misconception(mc_id)
+        if record is not None:
+            records_by_id[mc_id] = record
+
+    context = build_diagnostic_authoring_context(vault, repository, need)
+    now = utc_now_iso(clock)
+    provider_fields = _agent_provider_fields(client, model=model, provider_revision=None)
+    agent_run_id = repository.insert_agent_run(
+        {
+            "id": new_ulid(),
+            "purpose": "diagnostic_authoring",
+            **provider_fields,
+            "prompt_template": "diagnostic_authoring",
+            "prompt_version": DIAGNOSTIC_AUTHORING_PROMPT_VERSION,
+            "input_context_hash": authoring_context_hash(context),
+            "output_schema": "AuthoringProposal",
+            "started_at": now,
+            "status": "running",
+        }
+    )
+    try:
+        proposal = client.run_authoring_proposal(context)
+    except (CodexUnavailable, TimeoutError, ValueError) as exc:
+        repository.complete_agent_run(agent_run_id, status="failed", error_message=str(exc), clock=clock)
+        raise
+    repository.complete_agent_run(agent_run_id, status="completed", clock=clock)
+
+    provider = provider_fields["provider"] or "codex"
+    proposal_payload = proposal.model_dump(mode="json", exclude_none=False)
+    rows = [
+        _diagnostic_proposal_item_row(
+            item, now, vault=vault, proposal=proposal, provider=provider, context=target
+        )
+        for item in proposal.items
+    ]
+    practice_rows = [
+        (row, item) for row, item in zip(rows, proposal.items) if item.item_type == "practice_item"
+    ]
+    primary_item_id = practice_rows[0][0]["payload"].get("id") if practice_rows else None
+    patch_id = repository.persist_proposal_batch(
+        {
+            "id": new_ulid(),
+            "agent_run_id": agent_run_id,
+            "purpose": "diagnostic_authoring",
+            "source_refs": proposal_payload["source_refs"],
+            "summary": proposal.summary,
+            "created_at": now,
+            "updated_at": now,
+        },
+        rows,
+    )
+
+    blocked_reason = f"diagnostic_proposal_queued:{patch_id}"
+    if primary_item_id:
+        blocked_reason = f"{blocked_reason}:{primary_item_id}"
+    repository.update_intervention_need_status(need_id, status="fulfilled", blocked_reason=blocked_reason)
+
+    # spec §6: sim discrimination gate, post-generation / pre-queue. Rejects any
+    # item whose planted/clean simulation does not clear the lower-bound thresholds.
+    failed_row_ids: list[str] = []
+    failure_results: list[GateResult] = []
+    failed_item_ids: list[str] = []
+    for row, _item in practice_rows:
+        payload = row["payload"]
+        record = _gate_target_record(payload, target, records_by_id)
+        if record is None:
+            continue
+        result = run_discrimination_gate(
+            vault,
+            repository,
+            item=payload,
+            misconception=record,
+            grading_client=client,
+            clock=clock,
+        )
+        if not result.accepted:
+            failed_row_ids.append(row["id"])
+            failure_results.append(result)
+            failed_item_ids.append(str(payload.get("id") or ""))
+    if failed_row_ids:
+        repository.set_proposal_item_decision(patch_id, "rejected", failed_row_ids)
+        _reopen_need_after_gate_failure(
+            repository,
+            need_id=need_id,
+            patch_id=patch_id,
+            item_id=failed_item_ids[0] if failed_item_ids else None,
+            results=failure_results,
+            need=need,
+        )
     return patch_id
 
 

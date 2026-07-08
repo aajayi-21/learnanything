@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { ConceptGraphEdge, ConceptGraphNode, ConceptGraphSnapshot } from "../api/dto";
+import type {
+  CommandError,
+  ConceptGraphEdge,
+  ConceptGraphNode,
+  ConceptGraphSnapshot,
+  GoalDto,
+  GoalReportSnapshot
+} from "../api/dto";
 import { EntityLink } from "../components/ui";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
 import { masteryTone } from "../app/algoConfig";
@@ -127,6 +134,41 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
   const [snapshot, setSnapshot] = useState<ConceptGraphSnapshot | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
+  // Goal overlay: tint concept nodes by whether they fall in the active goal's
+  // scope and are at risk. Off by default → exactly the prior rendering.
+  const [goalOverlay, setGoalOverlay] = useState(false);
+  const [goal, setGoal] = useState<GoalDto | null>(null);
+  const [goalReport, setGoalReport] = useState<GoalReportSnapshot | null>(null);
+  const [goalError, setGoalError] = useState<string | null>(null);
+
+  // Lazily load the active goal + its at-risk report the first time the overlay
+  // is switched on. Failures degrade to a dim legend note (never crash).
+  useEffect(() => {
+    if (!goalOverlay || goal) return;
+    let cancelled = false;
+    setGoalError(null);
+    api
+      .goalsList()
+      .then((snap) => {
+        if (cancelled) return null;
+        const active = snap.goals.find((g) => g.status === "active") ?? snap.goals[0] ?? null;
+        if (!active) {
+          setGoalError("no goals defined");
+          return null;
+        }
+        setGoal(active);
+        return api.getGoalReport(active.id);
+      })
+      .then((report) => {
+        if (!cancelled && report) setGoalReport(report);
+      })
+      .catch((error) => {
+        if (!cancelled) setGoalError((error as CommandError).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [goalOverlay, goal]);
 
   useEffect(() => {
     let cancelled = false;
@@ -150,6 +192,28 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
     () => (snapshot ? layoutConcepts(snapshot.concepts, snapshot.edges) : { positions: {}, width: 0, height: 0 }),
     [snapshot]
   );
+
+  // Per-concept goal status: a concept is in-scope if it's named in the goal's
+  // facet scope or owns a learning object with an at-risk facet; "at risk" if any
+  // owned LO has an at-risk (non-solid) facet, else "on track". Concepts outside
+  // the scope get no entry (rendered dimmed while the overlay is on).
+  const goalScope = useMemo(() => {
+    if (!goalOverlay || !goal || !snapshot) return null;
+    const scopeConcepts = new Set(goal.facetScope.concepts);
+    const atRiskLos = new Set(
+      (goalReport?.report.atRisk ?? []).filter((f) => f.label !== "solid").map((f) => f.learningObjectId)
+    );
+    const status = new Map<string, "atRisk" | "onTrack">();
+    let atRiskCount = 0;
+    for (const concept of snapshot.concepts) {
+      const risky = concept.learningObjects.some((lo) => atRiskLos.has(lo.id));
+      const inScope = scopeConcepts.has(concept.id) || risky;
+      if (!inScope) continue;
+      status.set(concept.id, risky ? "atRisk" : "onTrack");
+      if (risky) atRiskCount += 1;
+    }
+    return { status, atRiskCount, total: status.size, title: goal.title };
+  }, [goalOverlay, goal, goalReport, snapshot]);
 
   useEffect(() => {
     if (view !== "map") return;
@@ -270,8 +334,40 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
               <span style={{ color: COLOR.amber, fontSize: 13 }}>concept-graph</span>{" "}
               <Meta>{snapshot.subjects.join(", ") || "all subjects"}</Meta>
             </div>
-            <div style={{ fontSize: 12 }}>
-              <Faint>tab/shift+tab</Faint> <Dim>walk concepts</Dim>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 12 }}>
+              {goalOverlay ? (
+                <span>
+                  {goalError ? (
+                    <Faint>goal: {goalError}</Faint>
+                  ) : goalScope ? (
+                    <span style={{ color: COLOR.textDim }}>
+                      goal: <span style={{ color: COLOR.amber }}>{goalScope.title}</span> —{" "}
+                      <span style={{ color: COLOR.amber }}>{goalScope.atRiskCount}</span> at risk /{" "}
+                      {goalScope.total}
+                    </span>
+                  ) : (
+                    <Faint>goal: loading…</Faint>
+                  )}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setGoalOverlay((on) => !on)}
+                style={{
+                  background: goalOverlay ? "#241d12" : "transparent",
+                  border: `1px solid ${goalOverlay ? COLOR.amber : COLOR.border}`,
+                  color: goalOverlay ? COLOR.amber : COLOR.textDim,
+                  fontFamily: FONT_MONO,
+                  fontSize: 12,
+                  padding: "2px 10px",
+                  cursor: "pointer"
+                }}
+              >
+                goal overlay
+              </button>
+              <span>
+                <Faint>tab/shift+tab</Faint> <Dim>walk concepts</Dim>
+              </span>
             </div>
           </div>
 
@@ -346,6 +442,14 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
               const isSelected = selected === concept.id;
               const isHovered = hovered === concept.id;
               const hoverAccent = isMisc ? "rgba(224,126,126,0.6)" : "rgba(255, 161, 67, 0.6)";
+              // Goal overlay: ring on-scope concepts (amber = at risk, green = on
+              // track), dim off-goal ones. Null when the overlay is off → no change.
+              const gstat = goalScope?.status.get(concept.id) ?? null;
+              const dimmed = goalScope != null && gstat == null;
+              const goalRing =
+                gstat === "atRisk" ? `0 0 0 2px ${COLOR.amber}` : gstat === "onTrack" ? `0 0 0 2px ${COLOR.green}` : null;
+              const boxShadow =
+                [isSelected ? `0 0 0 1px ${COLOR.amber}` : null, goalRing].filter(Boolean).join(", ") || "none";
               return (
                 <div
                   key={concept.id}
@@ -368,11 +472,12 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
                     fontFamily: FONT_MONO,
                     fontSize: 12,
                     cursor: "pointer",
-                    boxShadow: isSelected ? `0 0 0 1px ${COLOR.amber}` : "none",
+                    boxShadow,
+                    opacity: dimmed ? 0.4 : 1,
                     filter: isHovered
                       ? `drop-shadow(0 0 10px ${isMisc ? "rgba(224,126,126,0.27)" : "rgba(227,160,99,0.24)"})`
                       : "none",
-                    transition: "border-color 0.12s ease, background 0.12s ease, color 0.12s ease, filter 0.15s ease",
+                    transition: "border-color 0.12s ease, background 0.12s ease, color 0.12s ease, filter 0.15s ease, opacity 0.15s ease",
                     zIndex: isHovered ? 4 : isSelected ? 3 : 2
                   }}
                 >

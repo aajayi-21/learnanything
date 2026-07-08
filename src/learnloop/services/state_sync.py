@@ -4,9 +4,10 @@ from dataclasses import dataclass
 
 from learnloop.clock import Clock, utc_now_iso
 from learnloop.db.repositories import Repository
+from learnloop.services.goal_projection import resolve_goal_scope
 from learnloop.services.mastery import initial_mastery_state_for_learning_object
 from learnloop.vault.hashes import practice_item_hash
-from learnloop.vault.models import ConceptEdge, Goal, LoadedVault
+from learnloop.vault.models import LoadedVault
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,13 @@ def _enter_initial_probes(
     clock: Clock | None,
 ) -> None:
     mastery_states = repository.mastery_states()
+    # Explicit goal scope (no concept-edge expansion): an LO is in scope when any
+    # active goal's resolved facet scope names it. Computed once per sync.
+    goal_scope_los: set[str] = set()
+    for goal in vault.goals:
+        if goal.status != "active":
+            continue
+        goal_scope_los |= set(resolve_goal_scope(vault, goal, repository))
     for learning_object_id, learning_object in vault.learning_objects.items():
         if learning_object.status != "active":
             continue
@@ -127,7 +135,7 @@ def _enter_initial_probes(
         if _has_active_local_item(vault, repository, learning_object_id):
             _enter_initial_probe_if_possible(vault, repository, learning_object_id, clock=clock)
             continue
-        if _active_goal_score(learning_object.concept, vault.goals, vault.edges) > 0:
+        if learning_object_id in goal_scope_los:
             _enter_initial_probe_if_possible(vault, repository, learning_object_id, clock=clock)
 
 
@@ -171,23 +179,3 @@ def _has_active_local_item(vault: LoadedVault, repository: Repository, learning_
         if state is None or state.active:
             return True
     return False
-
-
-def _active_goal_score(concept_id: str, goals: list[Goal], edges: list[ConceptEdge]) -> float:
-    reachable = _goal_reachable_concepts(goals, edges)
-    score = 0.0
-    for goal in goals:
-        if goal.status == "active" and concept_id in reachable.get(goal.id, set()):
-            score = max(score, goal.priority)
-    return score
-
-
-def _goal_reachable_concepts(goals: list[Goal], edges: list[ConceptEdge]) -> dict[str, set[str]]:
-    reachable: dict[str, set[str]] = {}
-    for goal in goals:
-        concepts = set(goal.concept_anchors)
-        for edge in edges:
-            if edge.relation_type in {"prerequisite", "part_of"} and edge.source in goal.concept_anchors:
-                concepts.add(edge.target)
-        reachable[goal.id] = concepts
-    return reachable

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from learnloop.clock import FrozenClock
 from learnloop.config import LearnLoopConfig
 from learnloop.db.repositories import MasteryState, Repository
@@ -50,14 +52,15 @@ def test_scheduler_scores_due_goal_item(tmp_path):
     write_yaml(
         paths.goals_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "goals": [
                 {
                     "id": "goal_linear_algebra_ml",
                     "title": "Linear algebra for ML",
                     "status": "active",
                     "priority": 0.8,
-                    "concept_anchors": ["singular_value_decomposition"],
+                    "target_recall": 0.8,
+                    "facet_scope": {"concepts": ["singular_value_decomposition"]},
                     "due_at": None,
                     "created_at": NOW_ISO,
                     "updated_at": NOW_ISO,
@@ -141,7 +144,10 @@ def test_scheduler_scores_due_goal_item(tmp_path):
 
     assert [item.practice_item_id for item in queue] == ["pi_svd_define_001"]
     assert queue[0].components["forgetting_risk"] > 0
-    assert queue[0].components["active_goal"] == 0.8
+    # Facet "recall" is unexamined -> on the goal frontier; the goal scope names
+    # the LO's concept with priority 0.8 (no active_goal component anymore).
+    assert queue[0].components["goal_frontier"] == pytest.approx(0.8)
+    assert "active_goal" not in queue[0].components
 
 
 def test_scheduler_persists_bounded_reward_debug_and_rejected_candidates(tmp_path):

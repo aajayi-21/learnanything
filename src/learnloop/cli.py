@@ -13,6 +13,7 @@ import typer
 from pydantic import BaseModel
 
 from learnloop.attempt_types import default_attempt_type
+from learnloop.clock import utc_now_iso
 from learnloop.ai.client import make_ai_provider_client
 from learnloop.ai.routing import fallback_provider_for, provider_for_task
 from learnloop.ai.runtime import check_ai_runtime
@@ -35,6 +36,19 @@ from learnloop.services.exam_seeding import (
     parse_exam_outcomes,
     seed_exam_attempts,
 )
+from learnloop.services.exam_pool import reserve_exam_pool
+from learnloop.services.exam_session import (
+    ExamSessionError,
+    exam_availability,
+    exam_report as exam_report_service,
+    finish_exam,
+    record_exam_answer,
+    start_exam,
+)
+from learnloop.services.exam_calibration import calibration_report as exam_calibration_report
+from learnloop.services.grading import confidence_to_grader_confidence, resolved_rubric
+from learnloop.services.attempts import GradeAttribution, ResolvedGrade, _rubric_score
+from learnloop.ids import new_ulid
 from learnloop.services.concepts import ConceptMergeError, merge_concepts
 from learnloop.services.doctor import run_doctor
 from learnloop.services.followups import evaluate_attempt_intervention_followup
@@ -69,6 +83,11 @@ from learnloop.services.proposals import (
     list_proposals,
     persist_authoring_proposal,
     reject_items,
+)
+from learnloop.services.diagnostic_gate import (
+    BACKFILL_SKIPPED_EXISTING,
+    BACKFILL_SKIPPED_UNREGISTERED,
+    backfill_discrimination_rows,
 )
 from learnloop.services.scheduler import SchedulerSession, build_due_queue, explain_practice_item
 from learnloop.services.source_ingestion import SourceIngestionError, ingest_canonical_source
@@ -246,9 +265,12 @@ def _resolve_focus(
             else:
                 typer.echo(message, err=True)
             raise typer.Exit(code=1)
-        for anchor in goal.concept_anchors:
+        for anchor in goal.facet_scope.concepts:
             if anchor not in concepts:
                 concepts.append(anchor)
+        for facet in goal.facet_scope.facets:
+            if facet not in facets:
+                facets.append(facet)
     return (concepts or None, facets or None)
 
 
@@ -498,6 +520,14 @@ def ingest(
     ] = None,
     instructions: Annotated[str | None, typer.Option("--instructions", help="Extra canonical-ingestor instructions.")] = None,
     ai_provider: Annotated[str | None, typer.Option("--ai-provider", help="AI provider profile to use for ingestion.")] = None,
+    pdf_engine: Annotated[
+        str | None,
+        typer.Option("--pdf-engine", help="PDF extraction engine override: auto, marker, or pypdf."),
+    ] = None,
+    pdf_llm: Annotated[
+        bool | None,
+        typer.Option("--pdf-llm/--no-pdf-llm", help="Toggle marker's VLM boost for difficult scans/math (see [ingest.pdf])."),
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
     vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
 ) -> None:
@@ -510,6 +540,8 @@ def ingest(
         allow_auto_captions=allow_auto_captions,
         instructions=instructions,
         ai_provider=ai_provider,
+        pdf_engine=pdf_engine,
+        pdf_use_llm=pdf_llm,
         json_output=json_output,
         vault=vault,
     )
@@ -533,6 +565,14 @@ def ingest_exam(
         typer.Option("--instructions", help="Extra instructions appended to the exam-ingest instructions."),
     ] = None,
     ai_provider: Annotated[str | None, typer.Option("--ai-provider", help="AI provider profile to use for ingestion.")] = None,
+    pdf_engine: Annotated[
+        str | None,
+        typer.Option("--pdf-engine", help="PDF extraction engine override: auto, marker, or pypdf."),
+    ] = None,
+    pdf_llm: Annotated[
+        bool | None,
+        typer.Option("--pdf-llm/--no-pdf-llm", help="Toggle marker's VLM boost for difficult scans/math (see [ingest.pdf])."),
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
     vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
 ) -> None:
@@ -554,6 +594,8 @@ def ingest_exam(
         allow_auto_captions=None,
         instructions=exam_ingest_instructions(instructions),
         ai_provider=ai_provider,
+        pdf_engine=pdf_engine,
+        pdf_use_llm=pdf_llm,
         json_output=json_output,
         vault=vault,
         purpose="exam_ingest",
@@ -583,6 +625,8 @@ def _run_canonical_ingest_command(
     vault: Path | None,
     purpose: str = "canonical_ingest",
     spinner_label: str = "Ingesting canonical source",
+    pdf_engine: str | None = None,
+    pdf_use_llm: bool | None = None,
 ):
     vault_root = _root(vault)
     loaded = _load_vault_or_exit(vault_root, json_output=json_output)
@@ -622,6 +666,8 @@ def _run_canonical_ingest_command(
                 retry_model=getattr(retry_client, "model", None) if retry_client is not None else None,
                 retry_provider_revision=getattr(retry_runtime, "actual_revision", None) if retry_runtime is not None else None,
                 purpose=purpose,
+                pdf_engine=pdf_engine,
+                pdf_use_llm=pdf_use_llm,
             )
     except typer.Exit:
         raise
@@ -1789,6 +1835,78 @@ def misconception_candidates(
         )
 
 
+@app.command("misconception-gate-backfill")
+def misconception_gate_backfill(
+    force: Annotated[bool, typer.Option("--force", help="Re-run and overwrite existing discrimination rows.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Backfill sim discrimination rows for keyed (item, misconception) pairs (spec §6).
+
+    Deterministic grader only (no AI provider). By default respects existing rows;
+    ``--force`` re-runs every pair.
+    """
+
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    sync_vault_state(loaded, repository)
+    results = backfill_discrimination_rows(loaded, repository, force=force)
+
+    backfilled: list[Any] = []
+    skipped_existing: list[Any] = []
+    skipped_unregistered: list[Any] = []
+    for result in results:
+        if BACKFILL_SKIPPED_UNREGISTERED in result.reasons:
+            skipped_unregistered.append(result)
+        elif BACKFILL_SKIPPED_EXISTING in result.reasons:
+            skipped_existing.append(result)
+        else:
+            backfilled.append(result)
+
+    summary = {
+        "backfilled": len(backfilled),
+        "skipped_existing": len(skipped_existing),
+        "skipped_unregistered": len(skipped_unregistered),
+    }
+    if json_output:
+        typer.echo(
+            _dump(
+                {
+                    "version": 1,
+                    "backfilled": [r.as_dict() for r in backfilled],
+                    "skipped_existing": [r.as_dict() for r in skipped_existing],
+                    "skipped_unregistered": [r.as_dict() for r in skipped_unregistered],
+                    "summary": summary,
+                }
+            )
+        )
+        return
+    if not results:
+        typer.echo("No keyed (item, misconception) pairs found.")
+        return
+    for result in backfilled:
+        verdict = "accepted" if result.accepted else "rejected"
+        typer.echo(
+            f"{result.practice_item_id} / {result.misconception_id}: {verdict} "
+            f"[sens_lb={result.sensitivity_lb():.2f} spec_lb={result.specificity_lb():.2f}]"
+        )
+    for result in skipped_existing:
+        typer.echo(
+            f"{result.practice_item_id} / {result.misconception_id}: skipped (existing row) "
+            f"[sens_lb={result.sensitivity_lb():.2f} spec_lb={result.specificity_lb():.2f}]"
+        )
+    for result in skipped_unregistered:
+        typer.echo(
+            f"{result.practice_item_id} / {result.misconception_id}: skipped (misconception not registered)"
+        )
+    typer.echo(
+        f"Backfilled {summary['backfilled']}, "
+        f"skipped {summary['skipped_existing']} existing, "
+        f"{summary['skipped_unregistered']} unregistered."
+    )
+
+
 @app.command()
 def attempt(
     practice_item_id: Annotated[str, typer.Argument(help="Practice item id.")],
@@ -1870,6 +1988,7 @@ def attempt(
         result=result,
         available_minutes=available_minutes,
         session_id=session_id,
+        ai_client=client if runtime.ready else None,
     )
     if json_output:
         typer.echo(_dump({"version": 1, "attempt": result.as_dict()}))
@@ -1916,6 +2035,225 @@ def eval_command(
         typer.echo(_dump({"version": 1, "eval": report.as_dict()}))
         return
     typer.echo(report.format_text())
+
+
+exam_app = typer.Typer(no_args_is_help=True, help="Held-out practice-exam pool, session, and calibration.")
+app.add_typer(exam_app, name="exam")
+
+
+def _goal_or_exit(loaded, goal_id: str, *, json_output: bool):
+    for goal in loaded.goals:
+        if goal.id == goal_id:
+            return goal
+    message = f"No goal found for {goal_id}."
+    if json_output:
+        typer.echo(_dump({"version": 1, "error": "unknown_goal", "message": message}))
+    else:
+        typer.echo(message, err=True)
+    raise typer.Exit(code=1)
+
+
+def _resolve_self_grade(loaded, item, points: dict[str, float], *, confidence: int, fatal_errors, error_type):
+    """Resolve a CLI self-grade into a ResolvedGrade (no mastery writes).
+
+    Mirrors ``complete_self_graded_attempt`` so ``exam answer`` reuses the same
+    self-grade rubric input as ``learnloop attempt``, but hands the resolved
+    grade to the exam session instead of applying it immediately.
+    """
+
+    rubric = resolved_rubric(loaded, item)
+    criterion_points = {criterion.id: float(points.get(criterion.id, 0.0)) for criterion in rubric.criteria}
+    fatal = list(fatal_errors or [])
+    rubric_score = _rubric_score(rubric, criterion_points, fatal)
+    grader_confidence = confidence_to_grader_confidence(confidence)
+    attributions = []
+    if error_type:
+        error = loaded.error_types.get(error_type)
+        attributions.append(
+            GradeAttribution(
+                error_type=error_type,
+                severity=error.severity_default if error is not None else 0.5,
+                is_misconception=error.is_misconception if error is not None else False,
+            )
+        )
+    evidence_rows = [
+        {
+            "id": new_ulid(),
+            "criterion_id": criterion.id,
+            "points_awarded": criterion_points[criterion.id],
+            "evidence": f"Exam self-grade awarded {criterion_points[criterion.id]:g}/{criterion.points:g}.",
+            "notes": None,
+            "local_grader_id": "self",
+            "grader_tier": 1,
+            "learner_confidence": "hedged" if confidence <= 2 else "confident",
+            "created_at": utc_now_iso(None),
+        }
+        for criterion in rubric.criteria
+    ]
+    return ResolvedGrade(
+        rubric_score=rubric_score,
+        criterion_points=criterion_points,
+        evidence_rows=evidence_rows,
+        error_attributions=attributions,
+        grader_confidence=grader_confidence,
+        confidence=confidence,
+        manual_review_reason="low_self_confidence" if grader_confidence < 0.4 else None,
+        fatal_errors=fatal,
+    )
+
+
+@exam_app.command("reserve")
+def exam_reserve_command(
+    goal: Annotated[str, typer.Option("--goal", help="Goal id to reserve a held-out exam pool for.")],
+    item_count: Annotated[int | None, typer.Option("--item-count", help="Override the goal's exam item_count.")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    sync_vault_state(loaded, repository)
+    goal_obj = _goal_or_exit(loaded, goal, json_output=json_output)
+    report = reserve_exam_pool(loaded, repository, goal_obj, item_count=item_count)
+    if json_output:
+        typer.echo(_dump({"version": 1, "exam_pool": report.as_dict()}))
+        return
+    typer.echo(
+        f"Reserved {len(report.reserved_item_ids)} items for {goal} "
+        f"(already_reserved={report.already_reserved}); "
+        f"covered {len(report.covered_facets)} facets, uncovered {report.uncovered_facets}."
+    )
+
+
+@exam_app.command("start")
+def exam_start_command(
+    goal: Annotated[str, typer.Option("--goal", help="Goal id to start a held-out exam for.")],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    sync_vault_state(loaded, repository)
+    _goal_or_exit(loaded, goal, json_output=json_output)
+    try:
+        session = start_exam(loaded, repository, goal)
+    except ExamSessionError as exc:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": "exam_session_error", "message": str(exc)}))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(_dump({"version": 1, "exam_session": session}))
+        return
+    typer.echo(
+        f"Exam session {session['session_id']} ({session['status']}) with "
+        f"{len(session['item_order'])} items; already_started={session['already_started']}."
+    )
+
+
+@exam_app.command("answer")
+def exam_answer_command(
+    session: Annotated[str, typer.Option("--session", help="Exam session id.")],
+    practice_item_id: Annotated[str, typer.Argument(help="Practice item id being answered.")],
+    answer: Annotated[str | None, typer.Option("--answer", help="Learner answer markdown.")] = None,
+    criterion_points: Annotated[str | None, typer.Option("--criterion-points", help="Comma-separated criterion=points pairs.")] = None,
+    fatal_errors: Annotated[str | None, typer.Option("--fatal-errors", help="Comma-separated fatal rubric error ids.")] = None,
+    confidence: Annotated[int, typer.Option("--confidence", min=1, max=5, help="Self-grade confidence 1..5.")] = 3,
+    error_type: Annotated[str | None, typer.Option("--error-type", help="Optional error taxonomy id or literal.")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    sync_vault_state(loaded, repository)
+    item = loaded.practice_items.get(practice_item_id)
+    if item is None:
+        typer.echo(f"No Practice Item found for {practice_item_id}.", err=True)
+        raise typer.Exit(code=1)
+    answer_text = answer if answer is not None else typer.prompt("Answer", default="")
+    points = _parse_points(criterion_points)
+    rubric = loaded.rubric_for_item(item)
+    if not points and rubric is not None:
+        for criterion in rubric.criteria:
+            raw = typer.prompt(f"{criterion.id} points", default="0")
+            try:
+                points[criterion.id] = float(raw)
+            except ValueError:
+                typer.echo(f"{criterion.id} points must be numeric.", err=True)
+                raise typer.Exit(code=1)
+    try:
+        grade = _resolve_self_grade(
+            loaded, item, points, confidence=confidence, fatal_errors=_split_items(fatal_errors), error_type=error_type
+        )
+        result = record_exam_answer(
+            loaded, repository, session, practice_item_id, answer_md=answer_text, resolved_grade=grade
+        )
+    except (ExamSessionError, ValueError) as exc:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": "exam_answer_error", "message": str(exc)}))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(_dump({"version": 1, "exam_answer": result}))
+        return
+    typer.echo(
+        f"Recorded exam answer for {practice_item_id}: score={result['rubric_score']} "
+        f"correctness={result['correctness']:.2f}"
+    )
+
+
+@exam_app.command("finish")
+def exam_finish_command(
+    session: Annotated[str, typer.Option("--session", help="Exam session id to finish.")],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    sync_vault_state(loaded, repository)
+    try:
+        report = finish_exam(loaded, repository, session)
+    except ExamSessionError as exc:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": "exam_session_error", "message": str(exc)}))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(_dump({"version": 1, "exam_report": report}))
+        return
+    typer.echo(
+        f"Exam {session} finished: answered={report['answered_count']}/{report['item_count']} "
+        f"overall_score={report['overall_score']} brier={report['brier']}"
+    )
+
+
+@app.command("exam-calibration")
+def exam_calibration_command(
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Report exam prediction/outcome calibration (Brier, log loss, reliability bins)."""
+
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    sync_vault_state(loaded, repository)
+    report = exam_calibration_report(loaded, repository)
+    if json_output:
+        typer.echo(_dump({"version": 1, "exam_calibration": report}))
+        return
+    items = report["items"]
+    facets = report["facets"]
+    typer.echo(
+        f"Item predictions: n={items['n']} brier={items['brier']} log_loss={items['log_loss']}"
+    )
+    typer.echo(f"Facet projections: n={facets['n']} brier={facets['brier']}")
 
 
 fit_app = typer.Typer(no_args_is_help=True, help="Fit algorithm parameters from logged attempts.")
@@ -2174,6 +2512,8 @@ def sim_run_command(
     fresh_copy: Annotated[bool, typer.Option("--fresh-copy/--in-place", help="Copy the vault to a tmp run dir (default) or simulate in place.")] = True,
     reset_state: Annotated[bool, typer.Option("--reset-state/--keep-state", help="Drop derived SQLite state in the run copy (default: reset).")] = True,
     sets: Annotated[list[str] | None, typer.Option("--set", help="Config override param.path=value (repeatable).")] = None,
+    primed_retries: Annotated[bool, typer.Option("--primed-retries/--no-primed-retries", help="After each failed attempt, re-read the source and retry a sibling item as a primed attempt.")] = False,
+    goal_due_day: Annotated[int | None, typer.Option("--goal-due-day", help="Set every active goal's due date N sim-days in (exercises the projection horizon and ramping goal quota).")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit the full JSON report.")] = False,
     output: Annotated[Path | None, typer.Option("--output", "-o", help="Write the full JSON report to a file.")] = None,
 ) -> None:
@@ -2193,6 +2533,8 @@ def sim_run_command(
             items_per_day=items_per_day,
             seed=seed,
             config_overrides=_parse_sim_sets(sets),
+            primed_retries=primed_retries,
+            goal_due_day=goal_due_day,
         )
     except (ProfileError, SimulationError, ConfigLoadError) as exc:
         if json_output:
@@ -2241,6 +2583,14 @@ def sim_run_command(
     false_positives = metrics.get("misconceptions", {}).get("false_positive_misconception_types", [])
     if false_positives:
         typer.echo(f"False-positive misconception types: {', '.join(false_positives)}")
+    for goal_entry in metrics.get("goals", {}).get("per_goal", []):
+        typer.echo(
+            f"Goal {goal_entry['goal_id']} (due day {goal_entry['due_day']}): "
+            f"truth at target {goal_entry['truth_at_target_fraction_at_due']} at due, "
+            f"{goal_entry['truth_at_target_fraction_due_plus_30']} at due+30d; "
+            f"belief on-track {goal_entry['belief_on_track_fraction_at_due']}; "
+            f"frontier empty day {goal_entry['frontier_empty_day']}"
+        )
 
 
 @sim_app.command("sweep")
@@ -2253,6 +2603,8 @@ def sim_sweep_command(
     seed: Annotated[int, typer.Option("--seed", help="Student RNG seed (shared by all runs).")] = 42,
     reset_state: Annotated[bool, typer.Option("--reset-state/--keep-state", help="Drop derived SQLite state in each run copy (default: reset).")] = True,
     sets: Annotated[list[str] | None, typer.Option("--set", help="Baseline config override param.path=value (repeatable).")] = None,
+    primed_retries: Annotated[bool, typer.Option("--primed-retries/--no-primed-retries", help="Enable primed source-review retries in every run (needed for the priming_b_offset sweep).")] = False,
+    goal_due_day: Annotated[int | None, typer.Option("--goal-due-day", help="Set every active goal's due date N sim-days in for all runs (needed for the goal quota sweeps).")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit the full JSON report.")] = False,
     output: Annotated[Path | None, typer.Option("--output", "-o", help="Write the full JSON report to a file.")] = None,
 ) -> None:
@@ -2279,6 +2631,8 @@ def sim_sweep_command(
             work_dir=work_dir,
             reset_state=reset_state,
             base_overrides=_parse_sim_sets(sets),
+            primed_retries=primed_retries,
+            goal_due_day=goal_due_day,
         )
     except (ProfileError, SimulationError, SweepSpecError, ConfigLoadError) as exc:
         if json_output:

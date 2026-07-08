@@ -14,6 +14,7 @@ AttemptType: TypeAlias = Literal[
     "open_text",
     "exam_evidence",
     "teach_back",
+    "exam_attempt",
 ]
 
 SUPPORTED_ATTEMPT_TYPES: tuple[AttemptType, ...] = (
@@ -34,6 +35,11 @@ SUPPORTED_ATTEMPT_TYPES: tuple[AttemptType, ...] = (
     # AI naive student asks follow-ups, and the whole transcript is graded
     # against the asked rubric criteria only (recording type).
     "teach_back",
+    # Held-out practice-exam answer on a fresh, never-practiced item. Recorded
+    # through the deterministic attempt path at exam-finish time. Full evidence
+    # mass: a proctored fresh-item answer is the highest-quality evidence in the
+    # system (unlike the discounted `exam_evidence` import type).
+    "exam_attempt",
 )
 
 NON_RECORDING_ATTEMPT_TYPES: frozenset[AttemptType] = frozenset({"guided_walkthrough", "skip"})

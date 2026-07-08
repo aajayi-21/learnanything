@@ -169,7 +169,11 @@ def test_state_sync_ignores_weak_learner_claim_for_initial_mastery(tmp_path):
     assert mastery.logit_variance == 1.0
 
 
-def test_state_sync_logs_probe_gap_when_active_goal_lo_has_no_items(tmp_path):
+def test_state_sync_no_probe_gap_for_item_less_goal_lo(tmp_path):
+    # Behavior change with facet-based goal scope: a goal's scope is resolved
+    # from the evidence facets its LOs' practice items require, so an LO with no
+    # practice items is never in scope. The old concept-membership branch used to
+    # log a probe gap for such LOs; that path is now unreachable.
     vault_root = tmp_path / "vault"
     paths = create_basic_vault(vault_root)
     paths.practice_item_path("linear-algebra", "pi_svd_define_001").unlink()
@@ -190,4 +194,4 @@ def test_state_sync_logs_probe_gap_when_active_goal_lo_has_no_items(tmp_path):
     sync_vault_state(load_vault(vault_root), repository, clock=FrozenClock(NOW))
 
     events = repository.elicitation_events()
-    assert any(event["trigger"] == "probe_phase_local_pi_inadequate" for event in events)
+    assert not any(event["trigger"] == "probe_phase_local_pi_inadequate" for event in events)

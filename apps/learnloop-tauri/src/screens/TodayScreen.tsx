@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type {
+  GoalDto,
   PracticeItemDetail,
   QueueSection,
   QueueSnapshot,
@@ -10,24 +11,14 @@ import type {
   SessionSnapshot
 } from "../api/dto";
 import { EmptyPlaceholder, EntityLink } from "../components/ui";
-import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
+import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, modePillColor, Pill, SectionHeader } from "../components/term";
+import { GoalBanner } from "../components/GoalBanner";
+import { GoalWizard } from "../components/GoalWizard";
+import { GoalReviewCard, type ReviewReason } from "../components/GoalReviewCard";
 import { masteryTone } from "../app/algoConfig";
 import { MarkdownMath } from "../render/MarkdownMath";
 
 const HOTKEYS = "123456789abcdef";
-
-function modePillColor(mode: string): PillColor {
-  return (
-    {
-      short_answer: "purple",
-      explanation: "cyan",
-      proof: "amber",
-      worked_problem: "green",
-      transfer: "pink",
-      free_recall: "slate"
-    } as Record<string, PillColor>
-  )[mode] ?? "purple";
-}
 
 function masteryColor(mastery: number): string {
   return masteryTone(mastery, COLOR);
@@ -42,6 +33,7 @@ export function TodayScreen({
   onPaletteEntities,
   onEndSession,
   onInspect,
+  onTakeExam,
   onError
 }: {
   session: SessionSnapshot | null;
@@ -52,6 +44,8 @@ export function TodayScreen({
   onPaletteEntities?: (ids: { inspectIds: string[]; practiceItemIds: string[] }) => void;
   onEndSession: (summary: SessionEndSummary) => void;
   onInspect: (id: string) => void;
+  /** Wired by App.tsx to launch the ExamScreen for a goal; banner hides the exam button when absent. */
+  onTakeExam?: (goalId: string) => void;
   onError: (message: string) => void;
 }) {
   const [queue, setQueue] = useState<QueueSnapshot | null>(null);
@@ -60,8 +54,47 @@ export function TodayScreen({
   const [detail, setDetail] = useState<PracticeItemDetail | null>(null);
   const [bannerOpen, setBannerOpen] = useState(true);
   const [ending, setEnding] = useState(false);
+  const [goals, setGoals] = useState<GoalDto[] | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [dismissedReview, setDismissedReview] = useState<Set<string>>(() => new Set());
   const queueRequestRef = useRef<{ key: string; promise: Promise<QueueSnapshot> } | null>(null);
   const now = useNowMinute();
+
+  const refreshGoals = useCallback(() => {
+    api
+      .goalsList()
+      .then((snap) => setGoals(snap.goals))
+      .catch((error) => onError((error as Error).message));
+  }, [onError]);
+
+  useEffect(() => {
+    refreshGoals();
+  }, [refreshGoals]);
+
+  // Active goals ordered for the banner: nearest due first, ties by higher priority.
+  const activeGoals = useMemo(() => {
+    const active = (goals ?? []).filter((g) => g.status === "active");
+    return active.slice().sort((a, b) => {
+      const da = a.dueAt ? Date.parse(a.dueAt) : Infinity;
+      const db = b.dueAt ? Date.parse(b.dueAt) : Infinity;
+      if (da !== db) return da - db;
+      return b.priority - a.priority;
+    });
+  }, [goals]);
+
+  // First active goal that needs a weekly-review decision (and isn't session-dismissed).
+  const reviewCandidate = useMemo((): { goal: GoalDto; reason: ReviewReason } | null => {
+    for (const goal of activeGoals) {
+      if (dismissedReview.has(goal.id)) continue;
+      const duePassed = goal.dueAt != null && !Number.isNaN(Date.parse(goal.dueAt)) && Date.parse(goal.dueAt) < Date.now();
+      const stale = Date.now() - Date.parse(goal.updatedAt) > 7 * 86_400_000;
+      const frontierClear = goal.report != null && goal.report.atRiskCount === 0 && goal.report.total > 0;
+      if (duePassed) return { goal, reason: "due_passed" };
+      if (frontierClear) return { goal, reason: "frontier_clear" };
+      if (stale) return { goal, reason: "stale" };
+    }
+    return null;
+  }, [activeGoals, dismissedReview]);
 
   const items = useMemo(() => queue?.sections.flatMap((section) => section.items) ?? [], [queue]);
   const flatIds = useMemo(() => items.map((item) => item.practiceItemId), [items]);
@@ -198,6 +231,42 @@ export function TodayScreen({
         ending={ending}
         onFinish={finishSession}
       />
+
+      {goals != null ? (
+        activeGoals.length > 0 ? (
+          <GoalBanner
+            goals={activeGoals}
+            onError={onError}
+            onPracticeAtRisk={() => {
+              const first = flatIds[0];
+              if (first) setFocusedId(first);
+            }}
+            onTakeExam={onTakeExam}
+            onNewGoal={() => setWizardOpen(true)}
+          />
+        ) : (
+          <div style={{ margin: "16px 24px 0", fontSize: 12, color: COLOR.textFaint, fontFamily: FONT_MONO }}>
+            no active goal —{" "}
+            <span onClick={() => setWizardOpen(true)} style={{ color: COLOR.amberLink, cursor: "pointer" }}>
+              set one ↵
+            </span>
+          </div>
+        )
+      ) : null}
+
+      {reviewCandidate ? (
+        <GoalReviewCard
+          goal={reviewCandidate.goal}
+          reason={reviewCandidate.reason}
+          onKeep={(id) => setDismissedReview((prev) => new Set(prev).add(id))}
+          onChanged={refreshGoals}
+          onError={onError}
+        />
+      ) : null}
+
+      {wizardOpen ? (
+        <GoalWizard onClose={() => setWizardOpen(false)} onCreated={refreshGoals} onError={onError} />
+      ) : null}
 
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* Master list */}
@@ -625,7 +694,7 @@ function SurpriseInsertionBanner({
 
 const WHY_ROWS: Array<{ key: keyof SchedulerComponents; label: string; color: string }> = [
   { key: "forgettingRisk", label: "forgetting_risk", color: COLOR.amber },
-  { key: "activeGoal", label: "active_goal", color: COLOR.green },
+  { key: "goalFrontier", label: "goal_frontier", color: COLOR.green },
   { key: "recentError", label: "recent_error", color: COLOR.red },
   { key: "probeEig", label: "probe_eig", color: COLOR.pink }
 ];
@@ -766,7 +835,7 @@ function QueueRankingStrip({ algorithmVersion }: { algorithmVersion: string }) {
         queue ranking · priority = Σ wᵢ · componentᵢ
       </span>
       <div style={{ marginTop: 8, fontFamily: FONT_MONO }}>
-        forgetting_risk × 1.00 {"  +  "}active_goal × 0.35 {"  +  "}recent_error × 0.50 {"  +  "}probe_eig × 0.25
+        forgetting_risk × 1.00 {"  +  "}goal_frontier × 0.25 {"  +  "}recent_error × 0.50 {"  +  "}probe_eig × 0.25
       </div>
       <div style={{ marginTop: 6 }}>
         <Faint>algorithm</Faint> <Dim>{algorithmVersion}</Dim>

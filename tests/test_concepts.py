@@ -29,7 +29,7 @@ def test_merge_concepts_rewrites_vault_references(tmp_path):
     assert loaded.learning_objects["lo_svd_alias"].concept == "singular_value_decomposition"
     assert loaded.learning_objects["lo_svd_alias"].prerequisites == ["singular_value_decomposition"]
     assert loaded.learning_objects["lo_svd_alias"].confusables == ["singular_value_decomposition"]
-    assert loaded.goals[0].concept_anchors == ["singular_value_decomposition"]
+    assert loaded.goals[0].facet_scope.concepts == ["singular_value_decomposition"]
     assert loaded.error_types["conceptual_slip"].related_concepts == ["singular_value_decomposition"]
     assert loaded.notes["note_svd_alias"].related_concepts == ["singular_value_decomposition"]
     assert all(edge.source != "svd" and edge.target != "svd" for edge in loaded.edges)
@@ -146,7 +146,7 @@ def _add_duplicate_svd_concept(paths) -> None:
         },
     )
     goals = read_yaml(paths.goals_path)
-    goals["goals"][0]["concept_anchors"] = ["singular_value_decomposition", "svd"]
+    goals["goals"][0]["facet_scope"]["concepts"] = ["singular_value_decomposition", "svd"]
     write_yaml(paths.goals_path, goals)
     errors = read_yaml(paths.error_types_path)
     errors["error_types"][0]["related_concepts"] = ["singular_value_decomposition", "svd"]

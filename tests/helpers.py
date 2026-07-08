@@ -84,14 +84,15 @@ def create_basic_vault(root: Path) -> VaultPaths:
     write_yaml(
         paths.goals_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "goals": [
                 {
                     "id": "goal_linear_algebra_ml",
                     "title": "Linear algebra for ML",
                     "status": "active",
                     "priority": 0.8,
-                    "concept_anchors": ["singular_value_decomposition"],
+                    "target_recall": 0.8,
+                    "facet_scope": {"concepts": ["singular_value_decomposition"]},
                     "due_at": None,
                     "created_at": NOW_ISO,
                     "updated_at": NOW_ISO,

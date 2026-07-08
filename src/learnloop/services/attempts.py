@@ -101,6 +101,10 @@ class AttemptDraft:
     hints_used: int = 0
     latency_seconds: int | None = None
     session_id: str | None = None
+    # Retry launched from the feedback screen's source-review panel: the
+    # canonical source was just re-read, so the mastery update applies an IRT
+    # easiness shift and the attempt does not advance last_evidence_at.
+    primed: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,6 +138,13 @@ class GradeAttribution:
     severity: float
     evidence: str | None = None
     is_misconception: bool = False
+    # spec §2.1: structured belief captured by the grader; persisted on the
+    # error event so the registry (Phase 2) and replay can read it losslessly.
+    misconception_statement: str | None = None
+    misconception_consistent_answer: str | None = None
+    # spec §2.2: registry link written by normalization after persistence; carried
+    # through replay (from the persisted error event) so the link survives rebuilds.
+    misconception_id: str | None = None
     target_evidence_families: list[str] = field(default_factory=list)
     target_criterion_ids: list[str] = field(default_factory=list)
 
@@ -716,7 +727,10 @@ def _resolve_attempt_target(vault: LoadedVault, draft: AttemptDraft, *, replay: 
     # attempt_types_allowed list. At replay time the exemption is unconditional
     # on the attempt_type — an attempt that was valid when recorded must always
     # replay, even after the item was edited to another practice mode.
-    exempt_attempt_types = {"dont_know", "exam_evidence"}
+    # "exam_attempt" is a held-out practice-exam answer applied at exam finish.
+    # The pooled item is a regular practice item that only lists its live
+    # attempt types, so the exam attempt type is exempt (like exam_evidence).
+    exempt_attempt_types = {"dont_know", "exam_evidence", "exam_attempt"}
     if draft.attempt_type == "teach_back" and (replay or item.practice_mode == "teach_back"):
         exempt_attempt_types.add("teach_back")
     if (
@@ -970,6 +984,12 @@ def _compute_resolved_grade_application(
     item_a, item_b = resolve_item_irt_params(
         item, learning_object, vault.config.mastery, prior_state.item_parameter_state
     )
+    if draft.primed:
+        # Source just re-read: the item is effectively easier. Shifting b (rather
+        # than dampening the observation weight) keeps the evidence asymmetric —
+        # a primed success barely moves mu, a primed failure moves it strongly.
+        # Prediction and surprise read the same shifted b, staying consistent.
+        item_b -= vault.config.mastery.irt.priming_b_offset
     expected_correctness, prediction_trace = predicted_correctness_from_prior(
         prior_state.aggregate_facet_recall,
         item,
@@ -1086,6 +1106,7 @@ def _compute_resolved_grade_application(
         observation_reliability=reliability.observation_reliability,
         observation_weight_override=error_impact.observation_weight,
         attempt_evidence_mass=attempt_evidence_mass(draft.attempt_type, vault.config.evidence),
+        primed=draft.primed,
     )
     # IRT (a, b) resolved once from static authored/LLM fields and shared by the
     # mastery EKF and the probability-space surprise (spec §4.3 / §8).
@@ -1106,7 +1127,9 @@ def _compute_resolved_grade_application(
     # Empirical-Bayes per-item difficulty: alternating conditional update on b
     # using the learner's fresh posterior mean (dark unless eb_difficulty_enabled).
     next_item_parameters: ItemParameterState | None = None
-    if vault.config.mastery.irt.eb_difficulty_enabled:
+    # Primed outcomes are conditioned on the source being fresh in working
+    # memory — they must not move the fitted *cold* difficulty.
+    if vault.config.mastery.irt.eb_difficulty_enabled and not draft.primed:
         _authored_a, authored_b = item_irt_params(item, learning_object, vault.config.mastery)
         next_item_parameters = update_item_difficulty(
             prior_state.item_parameter_state,
@@ -1163,6 +1186,7 @@ def _compute_resolved_grade_application(
         "created_at": now_iso,
         "updated_at": now_iso,
         "session_id": draft.session_id,
+        "primed": draft.primed,
     }
     error_event_ids = [
         error_event_ids_override[index]
@@ -1180,6 +1204,9 @@ def _compute_resolved_grade_application(
                 "error_type": attribution.error_type,
                 "severity": attribution.severity,
                 "is_misconception": attribution.is_misconception,
+                "misconception_statement": attribution.misconception_statement,
+                "misconception_consistent_answer": attribution.misconception_consistent_answer,
+                "misconception_id": attribution.misconception_id,
                 "repair_plan": _error_event_repair_plan(vault, base_attribution),
                 "status": "active",
                 "created_at": now_iso,
@@ -1269,6 +1296,8 @@ def _compute_resolved_grade_application(
         "facet_uncertainty_updates": facet_uncertainty_updates,
         "facet_uncertainty_trace": facet_uncertainty_trace,
         "ability_transition": ability_transition,
+        "primed": draft.primed,
+        "priming_b_offset": vault.config.mastery.irt.priming_b_offset if draft.primed else None,
         "fsrs_weights_fitted": fsrs_weights_fitted,
         "algorithm_version": vault.config.algorithms.algorithm_version,
         "created_at": now_iso,
@@ -1449,6 +1478,9 @@ def _replay_error_attributions(
                     severity=float(base_severity) if isinstance(base_severity, (int, float)) else _error_severity(vault, str(event_error_type)),
                     evidence=repair_plan.get("evidence") if isinstance(repair_plan.get("evidence"), str) else None,
                     is_misconception=bool(event.get("is_misconception", _is_misconception(vault, str(event_error_type)))),
+                    misconception_statement=event.get("misconception_statement"),
+                    misconception_consistent_answer=event.get("misconception_consistent_answer"),
+                    misconception_id=event.get("misconception_id"),
                     target_evidence_families=[str(facet) for facet in target_evidence_families],
                     target_criterion_ids=[str(criterion_id) for criterion_id in target_criterion_ids],
                 )
@@ -1501,6 +1533,9 @@ def _resolved_codex_grade(
                 severity=attribution.severity,
                 evidence=attribution.evidence,
                 is_misconception=attribution.is_misconception,
+                misconception_statement=attribution.misconception_statement,
+                misconception_consistent_answer=attribution.misconception_consistent_answer,
+                misconception_id=getattr(attribution, "misconception_id", None),
                 target_evidence_families=list(attribution.target_evidence_families or []),
                 target_criterion_ids=list(attribution.target_criterion_ids or []),
             )

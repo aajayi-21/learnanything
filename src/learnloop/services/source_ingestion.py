@@ -13,11 +13,13 @@ from typing import Any, Literal
 
 from learnloop.ai.client import AIProviderClient
 from learnloop.clock import Clock, utc_now_iso
+from learnloop.config import PdfIngestConfig
 from learnloop.codex.client import CanonicalIngestContext, CodexClient, ExtractionPlan, SourceChunk, SourceKind
 from learnloop.codex.prompts import CANONICAL_INGEST_PROMPT_VERSION
 from learnloop.codex.schemas import AuthoringProposal
 from learnloop.db.repositories import Repository
 from learnloop.ids import kebab_case, new_ulid, snake_case
+from learnloop.services.pdf_extraction import PdfExtractionError, extract_pdf_markdown
 from learnloop.services.proposals import _auto_apply_rows, _proposal_item_row
 from learnloop.vault.loader import add_subject, load_vault
 from learnloop.vault.paths import VaultPaths
@@ -37,6 +39,10 @@ class FetchResult:
     original_uri: str
     retrieved_at: str
     fetch_uri: str | None = None
+    # Original document bytes when raw_bytes holds a converted form (e.g. the
+    # PDF a Markdown conversion came from); retained alongside the note so the
+    # true source survives re-extraction with a better engine later.
+    source_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,8 @@ def ingest_canonical_source(
     retry_model: str | None = None,
     retry_provider_revision: str | None = None,
     purpose: str = "canonical_ingest",
+    pdf_engine: str | None = None,
+    pdf_use_llm: bool | None = None,
     clock: Clock | None = None,
 ) -> IngestResult:
     vault = load_vault(root)
@@ -143,6 +151,7 @@ def ingest_canonical_source(
     resolved_kind = detect_source_kind(source, kind=kind, learning_object_ids=target_learning_object_ids)
     if allow_auto_captions is None:
         allow_auto_captions = vault.config.ingest.allow_auto_captions
+    pdf_config = _resolved_pdf_config(vault.config.ingest.pdf, engine=pdf_engine, use_llm=pdf_use_llm)
     if goal_id is not None:
         _validate_active_goal(vault, goal_id)
 
@@ -154,6 +163,7 @@ def ingest_canonical_source(
         source,
         kind=resolved_kind,
         allow_auto_captions=allow_auto_captions,
+        pdf_config=pdf_config,
         clock=clock,
     )
     normalized = normalize_source(fetch_result, resolved_kind)
@@ -173,7 +183,7 @@ def ingest_canonical_source(
         vault.root,
         subject,
         normalized,
-        fetch_result.raw_bytes,
+        fetch_result.source_bytes or fetch_result.raw_bytes,
         content_hash,
         clock=clock,
     )
@@ -421,6 +431,25 @@ def _downgrade_unready_auto_apply(rows: list[dict[str, Any]], vault) -> None:
             row["_auto_apply"] = False
 
 
+def _resolved_pdf_config(
+    base: PdfIngestConfig,
+    *,
+    engine: str | None,
+    use_llm: bool | None,
+) -> PdfIngestConfig:
+    if engine is None and use_llm is None:
+        return base
+    updates = base.model_dump()
+    if engine is not None:
+        updates["engine"] = engine
+    if use_llm is not None:
+        updates["use_llm"] = use_llm
+    try:
+        return PdfIngestConfig.model_validate(updates)
+    except ValueError as exc:
+        raise SourceIngestionError(f"invalid PDF extraction settings: {exc}") from exc
+
+
 def detect_source_kind(
     source: str,
     *,
@@ -444,7 +473,9 @@ def detect_source_kind(
     if suffix in {".html", ".htm"}:
         return "website_page"
     if suffix == ".pdf":
-        # A text-based PDF is normalized to Markdown and ingested like a web page.
+        # A PDF is converted to Markdown (marker-pdf when installed, pypdf
+        # otherwise) and ingested like a web page. Pass --learning-object /
+        # --kind textbook_chapter to anchor a textbook chapter instead.
         return "website_page"
     raise SourceIngestionError("unsupported or inaccessible source")
 
@@ -455,6 +486,7 @@ def fetch_source(
     *,
     kind: SourceKind,
     allow_auto_captions: bool,
+    pdf_config: PdfIngestConfig | None = None,
     clock: Clock | None = None,
 ) -> FetchResult:
     parsed = urllib.parse.urlparse(source)
@@ -462,19 +494,23 @@ def fetch_source(
         return _fetch_youtube_transcript(source, allow_auto_captions=allow_auto_captions, clock=clock)
     if parsed.scheme in {"http", "https"}:
         fetch_uri = _canonical_fetch_uri(source, kind)
-        return _fetch_url(root, fetch_uri, original_uri=source, clock=clock)
+        fetched = _fetch_url(root, fetch_uri, original_uri=source, clock=clock)
+        if _is_pdf_fetch(fetched):
+            return _pdf_fetch_result(root, fetched.raw_bytes, fetched, pdf_config)
+        return fetched
     path = Path(source).expanduser()
     if not path.exists() or not path.is_file():
         raise SourceIngestionError("unsupported or inaccessible source")
     if path.suffix.lower() == ".pdf":
-        markdown = _extract_pdf_markdown(path.read_bytes())
-        return FetchResult(
-            raw_bytes=markdown.encode("utf-8"),
-            content_type="text/plain",
-            original_uri=path.resolve().as_uri(),
-            fetch_uri=path.resolve().as_uri(),
+        uri = path.resolve().as_uri()
+        placeholder = FetchResult(
+            raw_bytes=b"",
+            content_type="application/pdf",
+            original_uri=uri,
+            fetch_uri=uri,
             retrieved_at=utc_now_iso(clock),
         )
+        return _pdf_fetch_result(root, path.read_bytes(), placeholder, pdf_config)
     if path.suffix.lower() not in {".html", ".htm", ".md", ".txt"}:
         raise SourceIngestionError("unsupported or inaccessible source")
     raw = path.read_bytes()
@@ -1601,7 +1637,7 @@ def _establish_goal_linkage(
     if not concepts:
         return {"goal_id": goal_id, "created": False, "updated": False}
     paths = VaultPaths(vault.root, vault.config)
-    goals_data = read_yaml(paths.goals_path) if paths.goals_path.exists() else {"schema_version": 1, "goals": []}
+    goals_data = read_yaml(paths.goals_path) if paths.goals_path.exists() else {"schema_version": 2, "goals": []}
     goals = goals_data.setdefault("goals", [])
     now = utc_now_iso(clock)
     created = False
@@ -1616,11 +1652,10 @@ def _establish_goal_linkage(
         if target is None or target.get("status") != "active":
             raise SourceIngestionError(f"goal '{goal_id}' is not active")
     else:
-        reachable = _reachable_by_goal(goals, vault.edges)
         for goal in goals:
             if not isinstance(goal, dict) or goal.get("status") != "active":
                 continue
-            if concepts <= reachable.get(str(goal.get("id")), set()):
+            if concepts <= _goal_scope_concepts(goal):
                 target = goal
                 break
         if target is None:
@@ -1629,7 +1664,8 @@ def _establish_goal_linkage(
                 "title": title,
                 "status": "active",
                 "priority": default_priority,
-                "concept_anchors": [],
+                "target_recall": 0.8,
+                "facet_scope": {"concepts": [], "facets": []},
                 "due_at": None,
                 "created_at": now,
                 "updated_at": now,
@@ -1637,12 +1673,18 @@ def _establish_goal_linkage(
             goals.append(target)
             created = True
 
-    anchors = list(target.get("concept_anchors") or [])
+    # Normalize legacy v1 goals (concept_anchors) to v2 facet_scope on write.
+    scope = target.get("facet_scope")
+    if not isinstance(scope, dict):
+        scope = {"concepts": list(target.pop("concept_anchors", None) or []), "facets": []}
+        target["facet_scope"] = scope
+        updated = True
+    scope_concepts = list(scope.get("concepts") or [])
     for concept_id in sorted(concepts):
-        if concept_id not in anchors:
-            anchors.append(concept_id)
+        if concept_id not in scope_concepts:
+            scope_concepts.append(concept_id)
             updated = True
-    target["concept_anchors"] = anchors
+    scope["concepts"] = scope_concepts
     if created or updated:
         target["updated_at"] = now
         write_yaml(paths.goals_path, goals_data)
@@ -1661,18 +1703,13 @@ def _proposal_learning_object_concepts(proposal: AuthoringProposal) -> set[str]:
     return concepts
 
 
-def _reachable_by_goal(goals: list[Any], edges: list[Any]) -> dict[str, set[str]]:
-    reachable: dict[str, set[str]] = {}
-    for goal in goals:
-        if not isinstance(goal, dict):
-            continue
-        goal_id = str(goal.get("id"))
-        concepts = set(goal.get("concept_anchors") or [])
-        for edge in edges:
-            if edge.relation_type in {"prerequisite", "part_of"} and edge.source in concepts:
-                concepts.add(edge.target)
-        reachable[goal_id] = concepts
-    return reachable
+def _goal_scope_concepts(goal: dict[str, Any]) -> set[str]:
+    """Concept scope of a raw goals.yaml entry, tolerating legacy v1 form."""
+
+    scope = goal.get("facet_scope")
+    if isinstance(scope, dict):
+        return set(scope.get("concepts") or [])
+    return set(goal.get("concept_anchors") or [])
 
 
 def _result_from_existing_batch(
@@ -1742,36 +1779,39 @@ def _youtube_video_id(source: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _extract_pdf_markdown(raw_bytes: bytes) -> str:
-    """Extract text from a text-based PDF into normalized Markdown.
+def _is_pdf_fetch(fetched: FetchResult) -> bool:
+    if (fetched.content_type or "").lower() == "application/pdf":
+        return True
+    parsed = urllib.parse.urlparse(fetched.fetch_uri or fetched.original_uri)
+    if Path(parsed.path).suffix.lower() == ".pdf":
+        return True
+    return fetched.raw_bytes[:5] == b"%PDF-"
 
-    Scanned/image-only PDFs (no embedded text layer) are not supported and raise
-    a clear error rather than producing an empty source.
-    """
 
+def _pdf_fetch_result(
+    root: Path,
+    pdf_bytes: bytes,
+    fetched: FetchResult,
+    pdf_config: PdfIngestConfig | None,
+) -> FetchResult:
+    markdown = _pdf_markdown(root, pdf_bytes, pdf_config)
+    return FetchResult(
+        raw_bytes=markdown.encode("utf-8"),
+        content_type="text/markdown",
+        original_uri=fetched.original_uri,
+        fetch_uri=fetched.fetch_uri,
+        retrieved_at=fetched.retrieved_at,
+        source_bytes=pdf_bytes,
+    )
+
+
+def _pdf_markdown(root: Path, pdf_bytes: bytes, pdf_config: PdfIngestConfig | None) -> str:
+    cache_dir = root / ".learnloop" / "source-cache" / "pdf"
     try:
-        import pypdf
-    except ImportError as exc:  # pragma: no cover - optional dependency guard
-        raise SourceIngestionError(
-            "pypdf is required for PDF ingestion; install it with 'uv add pypdf'"
-        ) from exc
-
-    import io
-
-    try:
-        reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
-        pages: list[str] = []
-        for page in reader.pages:
-            text = (page.extract_text() or "").strip()
-            if text:
-                pages.append(text)
-    except Exception as exc:
-        raise SourceIngestionError(f"failed to read PDF source: {exc}") from exc
-
-    markdown = _normalize_markdown("\n\n".join(pages))
-    if not markdown.strip():
-        raise SourceIngestionError("PDF contained no extractable text (likely scanned images)")
-    return markdown
+        extraction = extract_pdf_markdown(pdf_bytes, config=pdf_config, cache_dir=cache_dir)
+    except PdfExtractionError as exc:
+        raise SourceIngestionError(str(exc)) from exc
+    return _normalize_markdown(extraction.markdown)
 
 
 def _content_type_for_path(path: Path) -> str:
@@ -1786,7 +1826,7 @@ def _content_type_for_path(path: Path) -> str:
 def _looks_like_markdown(fetch_result: FetchResult) -> bool:
     parsed = urllib.parse.urlparse(fetch_result.original_uri)
     suffix = Path(parsed.path).suffix.lower()
-    return suffix in {".md", ".txt"} or (fetch_result.content_type or "").startswith("text/plain")
+    return suffix in {".md", ".txt"} or (fetch_result.content_type or "").startswith(("text/plain", "text/markdown"))
 
 
 def _decode_bytes(raw: bytes) -> str:

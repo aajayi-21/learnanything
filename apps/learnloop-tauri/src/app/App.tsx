@@ -6,8 +6,10 @@ import { CommandPalette } from "../components/CommandPalette";
 import { InspectorOverlay } from "../components/InspectorOverlay";
 import { SessionFinishHud } from "../components/SessionFinishHud";
 import { EmptyPlaceholder, TerminalFrame, type TopTab, navTabs } from "../components/ui";
+import { ExamScreen } from "../screens/ExamScreen";
 import { FeedbackScreen } from "../screens/FeedbackScreen";
 import { GraphScreen } from "../screens/GraphScreen";
+import { IngestScreen } from "../screens/IngestScreen";
 import { LibraryScreen } from "../screens/LibraryScreen";
 import { PracticeScreen } from "../screens/PracticeScreen";
 import { ProposalsScreen } from "../screens/ProposalsScreen";
@@ -23,9 +25,16 @@ export function App() {
   const [tab, setTab] = useState<TopTab>("start");
   const [todayStage, setTodayStage] = useState<TodayStage>("queue");
   const [practiceItemId, setPracticeItemId] = useState<string | null>(null);
+  // The current practice item is a primed retry (opened from the feedback
+  // screen's source panel); the submit carries primed=true to the backend.
+  const [primedRetry, setPrimedRetry] = useState(false);
   const [attemptId, setAttemptId] = useState<string | null>(null);
+  // The practice-exam overlay: when set, ExamScreen takes over the body (entered
+  // only from the goal banner, exited back to the today tab). Not a nav tab.
+  const [examGoalId, setExamGoalId] = useState<string | null>(null);
   const [inspectorId, setInspectorId] = useState<string | null>(null);
   const [libraryFocus, setLibraryFocus] = useState<{ patchId: string; itemId: string } | null>(null);
+  const [libraryFilePath, setLibraryFilePath] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteEntityIds, setPaletteEntityIds] = useState<string[]>([]);
   const [palettePracticeItemIds, setPalettePracticeItemIds] = useState<string[]>([]);
@@ -159,14 +168,34 @@ export function App() {
       setToast("Start a session before opening practice.");
       return;
     }
+    setPrimedRetry(false);
+    setPracticeItemId(id);
+    setTab("today");
+    setTodayStage("practice");
+  }
+
+  function openPrimedRetry(id: string) {
+    if (!session) {
+      setTab("start");
+      setToast("Start a session before opening practice.");
+      return;
+    }
+    setPrimedRetry(true);
     setPracticeItemId(id);
     setTab("today");
     setTodayStage("practice");
   }
 
   function openFeedback(id: string) {
+    setPrimedRetry(false);
     setAttemptId(id);
     setTodayStage("feedback");
+  }
+
+  // "View in Library" from the feedback source panel: open that vault file.
+  function openLibraryFile(path: string) {
+    setLibraryFilePath(path);
+    setTab("library");
   }
 
   function clearLocalCheckpoint() {
@@ -187,6 +216,18 @@ export function App() {
   function gotoTab(next: TopTab) {
     setTab(next);
     if (next !== "today") setTodayStage("queue");
+  }
+
+  // Enter the practice-exam overlay from the goal banner.
+  function openExam(goalId: string) {
+    setExamGoalId(goalId);
+  }
+
+  // Exit the exam back to the today tab.
+  function exitExam() {
+    setExamGoalId(null);
+    setTab("today");
+    setTodayStage("queue");
   }
 
   // Open the ask overlay for the current context if one is determinable
@@ -247,6 +288,11 @@ export function App() {
     if (!snapshot) {
       return <EmptyPlaceholder title="Loading LearnLoop vault" />;
     }
+    // The exam overlay pre-empts the tab body — it's entered only from the goal
+    // banner and returns to the today tab on exit.
+    if (examGoalId) {
+      return <ExamScreen goalId={examGoalId} onExit={exitExam} onError={onError} />;
+    }
     if (tab === "start") {
       return <StartScreen onBegin={beginSession} onError={onError} vault={snapshot.vault} streak={snapshot.streak} />;
     }
@@ -256,6 +302,7 @@ export function App() {
           <PracticeScreen
             session={session}
             practiceItemId={practiceItemId}
+            primed={primedRetry}
             gradingReady={gradingReady}
             gradingProvider={gradingProvider}
             restoredAnswer={restored.answer}
@@ -278,6 +325,8 @@ export function App() {
             onNext={() => setTodayStage("queue")}
             onBack={() => setTodayStage("queue")}
             onOpenNotes={() => gotoTab("library")}
+            onPrimedRetry={openPrimedRetry}
+            onOpenLibraryFile={openLibraryFile}
             onInspect={setInspectorId}
             onAsk={setAskTarget}
             onError={onError}
@@ -294,6 +343,7 @@ export function App() {
           onPaletteEntities={onPaletteEntities}
           onEndSession={endSession}
           onInspect={setInspectorId}
+          onTakeExam={openExam}
           onError={onError}
         />
       );
@@ -301,12 +351,17 @@ export function App() {
     if (tab === "graph") {
       return <GraphScreen onInspect={setInspectorId} onError={onError} />;
     }
+    if (tab === "ingest") {
+      return <IngestScreen onProceedToPropose={() => gotoTab("proposals")} />;
+    }
     if (tab === "library") {
       return (
         <LibraryScreen
           onError={onError}
           focus={libraryFocus}
           onFocusConsumed={() => setLibraryFocus(null)}
+          focusFilePath={libraryFilePath}
+          onFileFocusConsumed={() => setLibraryFilePath(null)}
           onAsk={setAskTarget}
           onNoteSelected={setLibraryNoteId}
         />

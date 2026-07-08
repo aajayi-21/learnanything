@@ -25,6 +25,12 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+# High-fidelity PDF extraction (headings, tables, LaTeX math, OCR) for
+# canonical source ingestion; heavy (pulls in torch). Without it, PDF
+# ingestion falls back to plain pypdf text extraction.
+pdf = [
+  "marker-pdf>=1.10",
+]
 
 [project.scripts]
 learnloop = "learnloop.cli:app"

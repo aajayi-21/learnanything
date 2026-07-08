@@ -2,7 +2,15 @@ import math
 
 import pytest
 
-from learnloop.numeric import clamp, empirical_quantile, percentiles, sigmoid
+from learnloop.numeric import (
+    beta_mean,
+    beta_quantile,
+    clamp,
+    empirical_quantile,
+    percentiles,
+    regularized_incomplete_beta,
+    sigmoid,
+)
 
 
 def test_clamp_bounds() -> None:
@@ -63,3 +71,47 @@ def test_percentiles_custom_qs() -> None:
     result = percentiles([1.0, 2.0, 3.0, 4.0], qs=(0.5,))
     assert result == {0.5: pytest.approx(2.5)}
     assert not math.isnan(result[0.5])
+
+
+def test_regularized_incomplete_beta_matches_uniform_cdf() -> None:
+    # Beta(1,1) is uniform: I_x(1,1) == x.
+    for x in (0.0, 0.1, 0.25, 0.5, 0.9, 1.0):
+        assert regularized_incomplete_beta(x, 1.0, 1.0) == pytest.approx(x, abs=1e-9)
+    # Symmetric Beta(2,2) has median 0.5 and is monotone.
+    assert regularized_incomplete_beta(0.5, 2.0, 2.0) == pytest.approx(0.5, abs=1e-9)
+    assert regularized_incomplete_beta(0.2, 2.0, 2.0) < 0.5
+
+
+def test_beta_mean() -> None:
+    assert beta_mean(1.0, 1.0) == pytest.approx(0.5)
+    assert beta_mean(9.0, 1.0) == pytest.approx(0.9)
+
+
+def test_beta_quantile_uniform() -> None:
+    # Beta(1,1) inverse-CDF is the identity: the 25th percentile is 0.25.
+    assert beta_quantile(0.25, 1.0, 1.0) == pytest.approx(0.25, abs=1e-6)
+    assert beta_quantile(0.5, 1.0, 1.0) == pytest.approx(0.5, abs=1e-6)
+
+
+def test_beta_quantile_high_evidence_tracks_mean() -> None:
+    # A high-evidence posterior concentrates: its 25th-percentile lower bound sits
+    # just under the mean, unlike a flat 5-trial estimate.
+    alpha, beta = 90.0, 10.0
+    mean = beta_mean(alpha, beta)  # 0.9
+    lb = beta_quantile(0.25, alpha, beta)
+    assert lb == pytest.approx(mean, abs=0.03)
+    assert lb < mean
+    # A thin 5-trial estimate (alpha=5, beta=1, mean ~0.83) is far more cautious:
+    # its lower bound sits well under the mean despite the high point estimate.
+    thin_lb = beta_quantile(0.25, 5.0, 1.0)
+    assert thin_lb < beta_mean(5.0, 1.0) - 0.05
+    # and the high-evidence lb clears 0.83 while the thin lb does not.
+    assert lb > 0.83
+    assert thin_lb < 0.83
+
+
+def test_beta_quantile_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        beta_quantile(1.5, 1.0, 1.0)
+    with pytest.raises(ValueError):
+        beta_quantile(0.5, 0.0, 1.0)
