@@ -9,6 +9,7 @@ from learnloop.services.misconceptions import normalize_and_resolve_attempt
 from learnloop.db.repositories import MisconceptionRecord, Repository
 from learnloop.services.facet_diagnostics import candidate_facet_support
 from learnloop.services.gate_score import (
+    GATE_FEATURE_VERSION,
     GateScoreResult,
     GateSignalValues,
     compute_gate_score,
@@ -80,6 +81,19 @@ class InterventionSelection:
     eligible_slate_size: int = 0
 
 
+@dataclass(frozen=True)
+class AttemptFacetTargets:
+    """Facet evidence roles for follow-up routing.
+
+    ``selection_facets`` scopes candidate selection. ``failed_facets`` is the
+    strictly smaller set supported by an actual failed facet outcome and is the
+    only set allowed to receive failure evidence in diagnostic focus.
+    """
+
+    selection_facets: list[str]
+    failed_facets: list[str]
+
+
 def evaluate_intervention_followup(
     vault: LoadedVault,
     repository: Repository,
@@ -96,6 +110,7 @@ def evaluate_intervention_followup(
     repeated_same_facet_failure: bool | None = None,
     probe_unfamiliar_probability: float | None = None,
     target_facets: list[str] | None = None,
+    failed_facets: list[str] | None = None,
     bad_item_suspicion: float = 0.0,
     available_minutes: int | None = None,
     session_id: str | None = None,
@@ -123,16 +138,17 @@ def evaluate_intervention_followup(
     thresholds = resolve_followup_thresholds(repository, config, exclude_attempt_id=attempt_id)
     target_facets = target_facets or _attempt_target_facets(repository, practice_item_id)
     target_facets = _canonical_target_facets(vault, target_facets)
-    # Raw failure counts are kept (not just booleans) so score mode can grade
+    failed_facets = target_facets if failed_facets is None else _canonical_target_facets(vault, failed_facets)
+    # Raw failure streaks are kept (not just booleans) so score mode can grade
     # the margin; explicit boolean overrides map to synthetic counts at/below
     # the threshold to preserve the legacy parameter contract.
     if repeated_same_item_failure is None:
-        item_failure_count = float(_current_inclusive_same_item_failures(repository, practice_item_id))
+        item_failure_count = float(current_same_item_failure_streak(repository, practice_item_id))
     else:
         item_failure_count = float(config.tau_repeated_item_failures) if repeated_same_item_failure else 0.0
     if repeated_same_facet_failure is None:
         facet_failure_count = float(
-            _current_inclusive_same_facet_failures(repository, learning_object_id, target_facets)
+            current_same_facet_failure_streak(repository, learning_object_id, target_facets)
         )
     else:
         facet_failure_count = float(config.tau_repeated_facet_failures) if repeated_same_facet_failure else 0.0
@@ -286,6 +302,7 @@ def evaluate_intervention_followup(
         learning_object_id=learning_object_id,
         exclude_practice_item_id=practice_item_id,
         target_facets=target_facets,
+        failed_facets=failed_facets,
         intent=intent,
         max_error_severity=max_error_severity,
         tau_severe_error=thresholds["tau_severe_error"].value,
@@ -446,7 +463,7 @@ def evaluate_attempt_intervention_followup(
     )
 
     debug_payload = result.debug_payload or {}
-    target_facets = _target_facets_from_debug(debug_payload)
+    facet_targets = _facet_targets_from_debug(debug_payload)
     aggregate_facet_states = [
         state for state in repository.facet_recall_states(result.learning_object_id) if state.practice_item_id is None
     ]
@@ -476,7 +493,8 @@ def evaluate_attempt_intervention_followup(
         error_event_written=bool(result.error_event_ids or error_events),
         max_error_severity=max_error_severity,
         probe_unfamiliar_probability=probe_unfamiliar_probability,
-        target_facets=target_facets,
+        target_facets=facet_targets.selection_facets,
+        failed_facets=facet_targets.failed_facets,
         bad_item_suspicion=float(debug_payload.get("bad_item_suspicion") or 0.0),
         available_minutes=available_minutes,
         session_id=session_id,
@@ -515,7 +533,7 @@ def _probe_unfamiliar_probability(
     return float(posterior.posterior.get("unfamiliar", 0.0))
 
 
-def _target_facets_from_debug(debug_payload: dict[str, Any]) -> list[str]:
+def _facet_targets_from_debug(debug_payload: dict[str, Any]) -> AttemptFacetTargets:
     facet_outcomes = debug_payload.get("facet_outcomes")
     if isinstance(facet_outcomes, dict):
         failed = [
@@ -524,16 +542,16 @@ def _target_facets_from_debug(debug_payload: dict[str, Any]) -> list[str]:
             if isinstance(outcome, (int, float)) and float(outcome) < 0.40
         ]
         if failed:
-            return failed
+            return AttemptFacetTargets(selection_facets=failed, failed_facets=failed)
     covered = debug_payload.get("covered_facets")
     if isinstance(covered, dict):
-        return list(covered.keys())
+        return AttemptFacetTargets(selection_facets=list(covered.keys()), failed_facets=[])
     coverage_trace = debug_payload.get("coverage_trace")
     if isinstance(coverage_trace, dict):
         traced = coverage_trace.get("covered_facets")
         if isinstance(traced, dict):
-            return list(traced.keys())
-    return []
+            return AttemptFacetTargets(selection_facets=list(traced.keys()), failed_facets=[])
+    return AttemptFacetTargets(selection_facets=[], failed_facets=[])
 
 
 def _max_error_severity(debug_payload: dict[str, Any], error_events: list[dict[str, Any]]) -> float:
@@ -623,6 +641,7 @@ def _build_gate_diagnostics(
     """
 
     payload = {
+        "feature_version": GATE_FEATURE_VERSION,
         "outcome": outcome,
         "decisive_reason": decisive_reason,
         "decisive_signal": _decisive_signal(
@@ -981,6 +1000,7 @@ def _choose_intervention_item(
     learning_object_id: str,
     exclude_practice_item_id: str,
     target_facets: list[str],
+    failed_facets: list[str],
     intent: str,
     max_error_severity: float,
     tau_severe_error: float = 0.0,
@@ -1027,7 +1047,7 @@ def _choose_intervention_item(
         vault,
         repository,
         attempt_id=attempt_id,
-        failed_facets=target_facets,
+        failed_facets=failed_facets,
         diagnostic_states=diagnostic_states,
         max_error_severity=max_error_severity,
         fallback_dominant_target_facet=interim_dominant_target_facet,
@@ -1500,27 +1520,48 @@ def _attempt_target_facets(repository: Repository, practice_item_id: str) -> lis
     return list(attempts[0].get("evidence_facets", []))
 
 
-def _current_inclusive_same_item_failures(repository: Repository, practice_item_id: str) -> int:
-    return sum(
-        1
-        for attempt in repository.list_recent_attempts_by_practice_item(practice_item_id, limit=20)
-        if attempt.get("attempt_type") == "dont_know" or float(attempt.get("correctness") or 0.0) <= 0.40 or bool(attempt.get("error_type"))
-    )
+def current_same_item_failure_streak(repository: Repository, practice_item_id: str) -> int:
+    """Trailing attempt-level failure streak for one Practice Item.
+
+    The repository returns newest first, so the first success is the natural
+    boundary. Historical failures before that success no longer describe a
+    *repeated current failure* and must not contribute to the intervention gate.
+    """
+
+    streak = 0
+    for attempt in repository.list_recent_attempts_by_practice_item(practice_item_id, limit=20):
+        if not _attempt_is_failure(attempt):
+            break
+        streak += 1
+    return streak
 
 
-def _current_inclusive_same_facet_failures(repository: Repository, learning_object_id: str, facets: list[str]) -> int:
-    target = set(facets)
-    if not target:
-        return 0
-    return sum(
-        1
-        for attempt in repository.list_recent_attempts_by_learning_object(learning_object_id, limit=20)
-        if set(attempt.get("evidence_facets", [])) & target
-        and (
-            attempt.get("attempt_type") == "dont_know"
-            or float(attempt.get("correctness") or 0.0) <= 0.40
-            or bool(attempt.get("error_type"))
-        )
+def current_same_facet_failure_streak(
+    repository: Repository,
+    learning_object_id: str,
+    facets: list[str],
+) -> int:
+    """Largest current aggregate failure streak among the target facets.
+
+    Facet recall state is updated from facet outcomes on every relevant attempt
+    and already resets ``consecutive_failures`` to zero on success. Taking the
+    maximum answers whether *any* target facet is repeatedly failing without
+    conflating unrelated historical errors on the same Learning Object.
+    """
+
+    streaks = [
+        state.consecutive_failures
+        for facet in sorted(set(facets))
+        if (state := repository.facet_recall_state(learning_object_id, facet)) is not None
+    ]
+    return max(streaks, default=0)
+
+
+def _attempt_is_failure(attempt: dict[str, Any]) -> bool:
+    return (
+        attempt.get("attempt_type") == "dont_know"
+        or float(attempt.get("correctness") or 0.0) <= 0.40
+        or bool(attempt.get("error_type"))
     )
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from learnloop.clock import FrozenClock
 from learnloop.db.repositories import MasteryState, Repository
 from learnloop.services.attempts import (
@@ -12,6 +14,8 @@ from learnloop.services.attempts import (
     compute_attempt_application,
 )
 from learnloop.services.followups import evaluate_attempt_intervention_followup, evaluate_intervention_followup
+from learnloop.services.gate_score import GATE_FEATURE_VERSION
+from learnloop.services.practice_generation import build_diagnostic_practice_plan
 from learnloop.services.state_sync import sync_vault_state
 from learnloop.vault.loader import load_vault
 from learnloop.vault.paths import VaultPaths
@@ -202,6 +206,153 @@ def test_repeated_failure_triggers_intervention_need_without_surprise(tmp_path):
     assert decision.need_id is not None
     assert "repeated_same_item_failure" in ",".join(decision.triggered_actions)
     assert repository.pending_intervention_needs("lo_svd_definition")[0]["target_facets"] == ["recall"]
+
+
+def test_success_resets_repeat_failure_gate_and_coverage_is_not_failed(tmp_path):
+    paths = create_basic_vault(tmp_path / "vault")
+    vault = load_vault(paths.root)
+    repository = Repository(paths.sqlite_path)
+    sync_vault_state(vault, repository, clock=FrozenClock(NOW))
+
+    for offset in (0, 1):
+        complete_self_graded_attempt(
+            vault,
+            repository,
+            AttemptDraft("pi_svd_define_001", "I do not know", attempt_type="dont_know"),
+            SelfGradeInput(criterion_points={}, confidence=5),
+            clock=FrozenClock(NOW + timedelta(minutes=offset)),
+        )
+    success = complete_self_graded_attempt(
+        vault,
+        repository,
+        AttemptDraft("pi_svd_define_001", "SVD factors a matrix as U Sigma V transpose."),
+        SelfGradeInput(criterion_points={"correctness": 4}, confidence=5),
+        clock=FrozenClock(NOW + timedelta(minutes=2)),
+    )
+
+    decision = evaluate_attempt_intervention_followup(
+        vault,
+        repository,
+        result=success,
+        clock=FrozenClock(NOW + timedelta(minutes=2)),
+    )
+
+    assert decision.triggered is False
+    assert decision.need_id is None
+    gate = decision.gate_diagnostics
+    assert gate["feature_version"] == GATE_FEATURE_VERSION
+    assert gate["subscores"]["repeated_item_failure"]["raw_value"] == 0.0
+    assert gate["subscores"]["repeated_facet_failure"]["raw_value"] == 0.0
+
+    # A user may still manually ask for a diagnostic after succeeding. Covered
+    # facets scope that request, but do not become fabricated failed evidence.
+    forced = evaluate_attempt_intervention_followup(
+        vault,
+        repository,
+        result=success,
+        manual_override=True,
+        clock=FrozenClock(NOW + timedelta(minutes=2)),
+    )
+    assert forced.need_id is not None
+    focus = repository.intervention_need(forced.need_id)["diagnostic_focus"]
+    assert focus["failed_facets"] == []
+    assert all(
+        source["source"] != "failed_facet"
+        for entry in focus["facet_source_scores"].values()
+        for source in entry["sources"]
+    )
+
+
+def test_success_breaks_item_streak_before_a_later_failure(tmp_path):
+    paths = create_basic_vault(tmp_path / "vault")
+    vault = load_vault(paths.root)
+    repository = Repository(paths.sqlite_path)
+    sync_vault_state(vault, repository, clock=FrozenClock(NOW))
+
+    complete_self_graded_attempt(
+        vault,
+        repository,
+        AttemptDraft("pi_svd_define_001", "I do not know", attempt_type="dont_know"),
+        SelfGradeInput(criterion_points={}, confidence=5),
+        clock=FrozenClock(NOW),
+    )
+    complete_self_graded_attempt(
+        vault,
+        repository,
+        AttemptDraft("pi_svd_define_001", "U Sigma V transpose"),
+        SelfGradeInput(criterion_points={"correctness": 4}, confidence=5),
+        clock=FrozenClock(NOW + timedelta(minutes=1)),
+    )
+    failure = complete_self_graded_attempt(
+        vault,
+        repository,
+        AttemptDraft("pi_svd_define_001", "wrong"),
+        SelfGradeInput(
+            criterion_points={"correctness": 1},
+            confidence=5,
+            error_type="conceptual_slip",
+        ),
+        clock=FrozenClock(NOW + timedelta(minutes=2)),
+    )
+
+    decision = evaluate_attempt_intervention_followup(
+        vault,
+        repository,
+        result=failure,
+        clock=FrozenClock(NOW + timedelta(minutes=2)),
+    )
+    gate = decision.gate_diagnostics
+    assert gate["subscores"]["repeated_item_failure"]["raw_value"] == 1.0
+    assert "repeated_same_item_failure" not in gate["triggered_reasons"]
+
+
+def test_diagnostic_generation_stales_resolved_repeat_failure_need(tmp_path):
+    paths = create_basic_vault(tmp_path / "vault")
+    vault = load_vault(paths.root)
+    repository = Repository(paths.sqlite_path)
+    sync_vault_state(vault, repository, clock=FrozenClock(NOW))
+
+    second = None
+    for offset in (0, 1):
+        second = complete_self_graded_attempt(
+            vault,
+            repository,
+            AttemptDraft("pi_svd_define_001", "I do not know", attempt_type="dont_know"),
+            SelfGradeInput(criterion_points={}, confidence=5),
+            clock=FrozenClock(NOW + timedelta(minutes=offset)),
+        )
+    assert second is not None
+    created = evaluate_intervention_followup(
+        vault,
+        repository,
+        attempt_id=second.attempt_id,
+        learning_object_id=second.learning_object_id,
+        practice_item_id=second.practice_item_id,
+        surprise_direction="none",
+        bayesian_surprise=0.0,
+        grader_confidence=1.0,
+        error_event_written=False,
+        max_error_severity=0.0,
+        target_facets=["recall"],
+        lo_independent_evidence_mass=2.0,
+        clock=FrozenClock(NOW + timedelta(minutes=1)),
+    )
+    assert created.need_id is not None
+    assert repository.intervention_need(created.need_id)["trigger_reason"] == "repeated_same_item_failure"
+
+    complete_self_graded_attempt(
+        vault,
+        repository,
+        AttemptDraft("pi_svd_define_001", "U Sigma V transpose"),
+        SelfGradeInput(criterion_points={"correctness": 4}, confidence=5),
+        clock=FrozenClock(NOW + timedelta(minutes=2)),
+    )
+
+    plan = build_diagnostic_practice_plan(vault, repository)
+    need = repository.intervention_need(created.need_id)
+    assert plan.targets == []
+    assert need["status"] == "stale"
+    assert need["blocked_reason"] == "resolved_failure_streak:0/2"
 
 
 def test_high_unfamiliar_probe_posterior_records_intervention_need(tmp_path):

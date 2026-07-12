@@ -16,7 +16,7 @@ from math import log
 from learnloop.config import LearnLoopConfig
 from learnloop.db.repositories import Repository
 from learnloop.numeric import sigmoid
-from learnloop.services.gate_score import GATE_FEATURES, subscores_from_diagnostics
+from learnloop.services.gate_score import GATE_FEATURES, GATE_FEATURE_VERSION, subscores_from_diagnostics
 
 # Rows whose silence says nothing about signal quality (budget gates, item
 # availability) are excluded from the negative pool.
@@ -59,6 +59,8 @@ def assemble_gate_training_set(repository: Repository, config: LearnLoopConfig) 
     for row in repository.gate_training_rows():
         gate = row.get("gate_diagnostics")
         if not isinstance(gate, dict):
+            continue
+        if gate.get("feature_version") != GATE_FEATURE_VERSION:
             continue
         features = subscores_from_diagnostics(gate, followup)
         if features is None:

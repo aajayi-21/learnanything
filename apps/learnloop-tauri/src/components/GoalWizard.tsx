@@ -36,6 +36,7 @@ export function GoalWizard({ onClose, onCreated, onError }: { onClose: () => voi
   // step 4
   const [examEnabled, setExamEnabled] = useState(true);
   const [examItemCount, setExamItemCount] = useState(20);
+  const [populatePractice, setPopulatePractice] = useState(true);
 
   const [submitting, setSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -110,7 +111,7 @@ export function GoalWizard({ onClose, onCreated, onError }: { onClose: () => voi
     setSubmitting(true);
     setCreateError(null);
     try {
-      await api.createGoal({
+      const created = await api.createGoal({
         title: title.trim(),
         targetRecall,
         dueAt,
@@ -119,6 +120,21 @@ export function GoalWizard({ onClose, onCreated, onError }: { onClose: () => voi
         examEnabled,
         examItemCount: examEnabled ? examItemCount : undefined
       });
+      if (populatePractice) {
+        // Fire-and-forget: the exam pool reserves never-attempted items on day
+        // one, which can leave the goal with nothing practicable. Populate in
+        // the background; failures surface through the shared error channel.
+        void api
+          .runCliCommand(["populate-goal", created.goal.id])
+          .then((result) => {
+            if (result.exitCode !== 0) {
+              onError(`goal practice generation failed: ${result.stderr || result.stdout}`.trim());
+            } else {
+              onCreated();
+            }
+          })
+          .catch((e) => onError(`goal practice generation failed: ${(e as Error).message}`));
+      }
       onCreated();
       onClose();
     } catch (e) {
@@ -224,6 +240,8 @@ export function GoalWizard({ onClose, onCreated, onError }: { onClose: () => voi
               onExamEnabled={setExamEnabled}
               examItemCount={examItemCount}
               onExamItemCount={setExamItemCount}
+              populatePractice={populatePractice}
+              onPopulatePractice={setPopulatePractice}
               title={title}
               conceptCount={conceptIds.length}
               facetCount={facetIds.length}
@@ -408,6 +426,8 @@ function StepExam({
   onExamEnabled,
   examItemCount,
   onExamItemCount,
+  populatePractice,
+  onPopulatePractice,
   title,
   conceptCount,
   facetCount,
@@ -420,6 +440,8 @@ function StepExam({
   onExamEnabled: (v: boolean) => void;
   examItemCount: number;
   onExamItemCount: (v: number) => void;
+  populatePractice: boolean;
+  onPopulatePractice: (v: boolean) => void;
   title: string;
   conceptCount: number;
   facetCount: number;
@@ -454,6 +476,20 @@ function StepExam({
       </label>
       <div style={{ marginTop: 6, fontSize: 12, color: COLOR.textFaint, lineHeight: 1.5 }}>
         Held-out items are reserved from your practice pool so the exam measures real transfer, not memorized questions.
+      </div>
+
+      <Label style={{ marginTop: 22 }}>starter practice</Label>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, cursor: "pointer" }}>
+        <span style={{ fontFamily: FONT_MONO, color: populatePractice ? COLOR.amber : COLOR.textFaint, fontSize: 15 }} onClick={() => onPopulatePractice(!populatePractice)}>
+          {populatePractice ? "▣" : "▢"}
+        </span>
+        <span style={{ fontSize: 13, color: COLOR.text }} onClick={() => onPopulatePractice(!populatePractice)}>
+          generate practice questions for this goal (background)
+        </span>
+      </label>
+      <div style={{ marginTop: 6, fontSize: 12, color: COLOR.textFaint, lineHeight: 1.5 }}>
+        The held-out exam reserves questions you have never practiced, which can leave the goal with
+        little to practice on day one. This fills the gap with newly generated items.
       </div>
 
       <Label style={{ marginTop: 22 }}>summary</Label>

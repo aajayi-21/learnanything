@@ -11,6 +11,7 @@ from learnloop.services.followups import evaluate_intervention_followup
 from learnloop.services.gate_score import (
     DEFAULT_GATE_BIAS,
     DEFAULT_GATE_WEIGHTS,
+    GATE_FEATURE_VERSION,
     GateSignalValues,
     compute_gate_score,
     resolve_gate_weights,
@@ -164,7 +165,7 @@ def test_resolve_gate_weights_defaults_and_fitted(tmp_path):
     fitted = {name: value * 0.5 for name, value in DEFAULT_GATE_WEIGHTS.items()}
     fitted_id = repository.insert_fitted_parameters(
         scope="followup_gate",
-        params={"weights": fitted, "bias": -5.0},
+        params={"weights": fitted, "bias": -5.0, "feature_version": GATE_FEATURE_VERSION},
         algorithm_version=ALGORITHM_VERSION,
         training_rows_count=50,
     )
@@ -172,6 +173,19 @@ def test_resolve_gate_weights_defaults_and_fitted(tmp_path):
     assert weights == fitted
     assert bias == -5.0
     assert provenance == f"fitted:{fitted_id}"
+
+    # A fitted vector trained against the old window-count semantics is not
+    # compatible with the current streak features and cleanly falls back.
+    repository.insert_fitted_parameters(
+        scope="followup_gate",
+        params={"weights": fitted, "bias": -4.0, "feature_version": GATE_FEATURE_VERSION - 1},
+        algorithm_version=ALGORITHM_VERSION,
+        training_rows_count=50,
+    )
+    weights, bias, provenance = resolve_gate_weights(repository)
+    assert weights == DEFAULT_GATE_WEIGHTS
+    assert bias == DEFAULT_GATE_BIAS
+    assert provenance == "default"
 
     # Malformed payload falls back.
     repository.insert_fitted_parameters(

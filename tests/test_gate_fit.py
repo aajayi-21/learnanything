@@ -14,7 +14,7 @@ from learnloop.services.gate_fit import (
     assemble_gate_training_set,
     fit_gate_weights,
 )
-from learnloop.services.gate_score import GATE_FEATURES
+from learnloop.services.gate_score import GATE_FEATURES, GATE_FEATURE_VERSION
 
 from tests.helpers import create_basic_vault
 
@@ -65,6 +65,7 @@ def _cascade_gate(**overrides):
         "grader_confidence": 0.9,
         "max_error_severity": 0.0,
         "target_facets": [],
+        "feature_version": GATE_FEATURE_VERSION,
     }
     gate.update(overrides)
     return gate
@@ -131,6 +132,14 @@ def test_label_assembly(tmp_path):
     assert by_source["silent_gate"].label == 0
     assert by_source["silent_gate"].weight == pytest.approx(0.25)
     assert all(set(example.features) == set(GATE_FEATURES) for example in examples)
+
+
+def test_label_assembly_excludes_old_feature_semantics(tmp_path):
+    repository = _repository(tmp_path)
+    old_gate = _cascade_gate(feature_version=GATE_FEATURE_VERSION - 1)
+    _seed_gate_row(repository, "old_window_counts", old_gate)
+
+    assert assemble_gate_training_set(repository, LearnLoopConfig()) == []
 
 
 def _example(features, label, source="rating_useful", weight=1.0, attempt_id="a"):

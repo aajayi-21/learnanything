@@ -7,6 +7,10 @@ from typing import Any
 
 from learnloop.ai.client import AIProviderClient
 from learnloop.db.repositories import Repository
+from learnloop.services.followups import (
+    current_same_facet_failure_streak,
+    current_same_item_failure_streak,
+)
 from learnloop.services.mastery import display_mastery
 from learnloop.services.proposals import generate_authoring_proposal
 from learnloop.services.teach_back import TEACH_BACK_PRACTICE_MODE
@@ -28,6 +32,7 @@ class PracticeExpansionTarget:
     probe_attempts_target: int
     mastery_mean: float | None
     recommended_difficulty_band: tuple[float, float]
+    existing_evidence_facets: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +46,7 @@ class PracticeExpansionTarget:
             "probe_attempts_target": self.probe_attempts_target,
             "mastery_mean": self.mastery_mean,
             "recommended_difficulty_band": list(self.recommended_difficulty_band),
+            "existing_evidence_facets": self.existing_evidence_facets,
         }
 
 
@@ -166,6 +172,8 @@ def build_practice_expansion_plan(
     focus_concepts: list[str] | None = None,
     learning_object_ids: list[str] | None = None,
     mode_mix: dict[str, int] | None = None,
+    require_completed_probe: bool = True,
+    exclude_item_ids: set[str] | None = None,
 ) -> PracticeExpansionPlan:
     if target_items_per_lo <= 0:
         raise PracticeExpansionError("target_items_per_lo must be positive")
@@ -173,10 +181,13 @@ def build_practice_expansion_plan(
         raise PracticeExpansionError("max_new_per_lo must be positive")
     _validate_mode_mix(mode_mix)
     named_lo_ids = list(dict.fromkeys(learning_object_ids or []))
-    _validate_named_learning_objects(vault, repository, named_lo_ids)
+    _validate_named_learning_objects(
+        vault, repository, named_lo_ids, require_completed_probe=require_completed_probe
+    )
     subject_filter = set(subjects or [])
     concept_filter = set(focus_concepts or [])
-    item_counts = _active_practice_item_counts(vault, repository)
+    item_counts = _active_practice_item_counts(vault, repository, exclude_item_ids=exclude_item_ids)
+    facet_unions = _active_evidence_facet_unions(vault, repository)
     irt = vault.config.mastery.irt
     mode_mix_items = sum(mode_mix.values()) if mode_mix else None
     targets: list[PracticeExpansionTarget] = []
@@ -190,7 +201,7 @@ def build_practice_expansion_plan(
         if concept_filter and learning_object.concept not in concept_filter:
             continue
         probe_state = repository.probe_state(learning_object.id)
-        if probe_state is None or probe_state.status != "complete":
+        if require_completed_probe and (probe_state is None or probe_state.status != "complete"):
             continue
         existing_count = item_counts.get(learning_object.id, 0)
         needed = target_items_per_lo - existing_count
@@ -215,8 +226,8 @@ def build_practice_expansion_plan(
                 concept=learning_object.concept,
                 existing_practice_items=existing_count,
                 requested_new_items=requested,
-                probe_attempts_completed=probe_state.probe_attempts_completed,
-                probe_attempts_target=probe_state.probe_attempts_target,
+                probe_attempts_completed=(probe_state.probe_attempts_completed if probe_state else 0),
+                probe_attempts_target=(probe_state.probe_attempts_target if probe_state else 0),
                 mastery_mean=mastery_mean,
                 recommended_difficulty_band=_success_band_difficulty(
                     _ability_logit(mastery_mean),
@@ -224,6 +235,7 @@ def build_practice_expansion_plan(
                     discrimination=irt.discrimination_default,
                     difficulty_scale=irt.difficulty_prior_scale,
                 ),
+                existing_evidence_facets=facet_unions.get(learning_object.id, []),
             )
         )
     if max_los is not None:
@@ -243,6 +255,8 @@ def build_diagnostic_practice_plan(
     irt = vault.config.mastery.irt
     targets: list[DiagnosticPracticeTarget] = []
     for need in repository.pending_intervention_needs(learning_object_id):
+        if _stale_repeat_failure_need(vault, repository, need):
+            continue
         learning_object = vault.learning_objects.get(need["learning_object_id"])
         if learning_object is None or learning_object.status != "active":
             continue
@@ -301,6 +315,52 @@ def build_diagnostic_practice_plan(
         if len(targets) >= max_needs:
             break
     return DiagnosticPracticePlan(targets=targets)
+
+
+def _stale_repeat_failure_need(
+    vault: LoadedVault,
+    repository: Repository,
+    need: dict[str, Any],
+) -> bool:
+    """Lazily retire repeat-failure needs whose streak has since resolved.
+
+    Staleness is deliberately trigger-aware: residual uncertainty may still be
+    useful evidence for a future diagnostic, but it must not keep alive a need
+    whose recorded reason was a repeated failure that is no longer repeating.
+    Other trigger families retain their existing lifecycle.
+    """
+
+    reason = need.get("trigger_reason")
+    config = vault.config.scheduler.followup
+    streak: int
+    threshold: int
+    if reason == "repeated_same_item_failure":
+        practice_item_id = need.get("practice_item_id")
+        streak = (
+            current_same_item_failure_streak(repository, str(practice_item_id))
+            if practice_item_id
+            else 0
+        )
+        threshold = config.tau_repeated_item_failures
+    elif reason == "repeated_same_facet_failure":
+        facets = [vault.canonical_facet_id(str(facet)) for facet in need.get("target_facets", [])]
+        streak = current_same_facet_failure_streak(
+            repository,
+            str(need["learning_object_id"]),
+            facets,
+        )
+        threshold = config.tau_repeated_facet_failures
+    else:
+        return False
+
+    if streak >= threshold:
+        return False
+    repository.update_intervention_need_status(
+        str(need["id"]),
+        status="stale",
+        blocked_reason=f"resolved_failure_streak:{streak}/{threshold}",
+    )
+    return True
 
 
 def generate_diagnostic_practice_proposal(
@@ -406,6 +466,105 @@ def generate_post_probe_practice_proposal(
     )
 
 
+def build_goal_practice_plan(
+    vault: LoadedVault,
+    repository: Repository,
+    goal,
+    *,
+    target_items_per_lo: int = 5,
+    max_new_per_lo: int = 3,
+) -> tuple[PracticeExpansionPlan, list[str]]:
+    """Expansion plan covering a goal's scope, sized by *practicable* supply.
+
+    Goal population differs from post-probe expansion in two deliberate ways:
+    the completed-probe gate is waived (the goal itself is the learner's
+    declared intent to practice these LOs), and items reserved for a held-out
+    exam pool do not count as existing supply (they are quarantined from the
+    scheduler, so they cannot cover the goal's facets). Returns the plan plus
+    the goal's currently at-risk facet ids for generation focus.
+    """
+
+    from learnloop.services.goal_projection import goal_report, resolve_goal_scope
+
+    scope = resolve_goal_scope(vault, goal, repository)
+    if not scope:
+        raise PracticeExpansionError(f"Goal {goal.id} has no active learning objects in scope.")
+    reserved = repository.reserved_exam_pool_item_ids()
+    plan = build_practice_expansion_plan(
+        vault,
+        repository,
+        target_items_per_lo=target_items_per_lo,
+        max_new_per_lo=max_new_per_lo,
+        learning_object_ids=sorted(scope),
+        require_completed_probe=False,
+        exclude_item_ids=reserved,
+    )
+    report = goal_report(vault, repository, goal)
+    at_risk_facets = sorted({facet.facet_id for facet in report.facets if not facet.on_track})
+    return plan, at_risk_facets
+
+
+def generate_goal_practice_proposal(
+    root: Path,
+    codex_client: AIProviderClient,
+    *,
+    goal_id: str,
+    target_items_per_lo: int = 5,
+    max_new_per_lo: int = 3,
+    extra_instructions: str | None = None,
+    codex_revision: str | None = None,
+) -> PracticeExpansionResult:
+    """Generate Practice Items that populate an active goal's scope.
+
+    See ``build_goal_practice_plan`` for how goal population differs from the
+    post-probe expansion path. The goal's at-risk facets become the generation
+    focus so new items retire the facets that block the goal first.
+    """
+
+    vault = load_vault(root)
+    repository = Repository(VaultPaths(vault.root, vault.config).sqlite_path)
+    sync_vault_state(vault, repository)
+    goal = next((candidate for candidate in vault.goals if candidate.id == goal_id), None)
+    if goal is None:
+        raise PracticeExpansionError(f"Unknown goal id: {goal_id}")
+    if goal.status != "active":
+        raise PracticeExpansionError(f"Goal {goal_id} is not active (status={goal.status}).")
+    plan, at_risk_facets = build_goal_practice_plan(
+        vault,
+        repository,
+        goal,
+        target_items_per_lo=target_items_per_lo,
+        max_new_per_lo=max_new_per_lo,
+    )
+    if not plan.targets:
+        raise PracticeExpansionError(
+            f"Goal {goal_id}'s learning objects already have enough practicable items."
+        )
+    goal_preamble = (
+        f"These items populate practice for the learner's goal '{goal.title}' ({goal.id}), "
+        f"target recall {goal.target_recall:.2f}"
+        + (f" by {goal.due_at}" if goal.due_at else "")
+        + "."
+    )
+    merged_instructions = (
+        f"{goal_preamble} {extra_instructions}" if extra_instructions else goal_preamble
+    )
+    patch_id = generate_authoring_proposal(
+        root,
+        codex_client,
+        subjects=_target_subjects(plan, None),
+        instructions=_practice_expansion_instructions(
+            plan,
+            extra_instructions=merged_instructions,
+            focus_facets=at_risk_facets or None,
+        ),
+        focus_concepts=list(goal.facet_scope.concepts) or None,
+        focus_facets=at_risk_facets or None,
+        codex_revision=codex_revision,
+    )
+    return PracticeExpansionResult(patch_id=patch_id, plan=plan)
+
+
 def _validate_mode_mix(mode_mix: dict[str, int] | None) -> None:
     if not mode_mix:
         return
@@ -420,11 +579,15 @@ def _validate_named_learning_objects(
     vault: LoadedVault,
     repository: Repository,
     learning_object_ids: list[str],
+    *,
+    require_completed_probe: bool = True,
 ) -> None:
     """Named --los targets must exist, be active, and have a completed probe.
 
     Naming an LO bypasses only the item-count deficit gate; the completed-probe
-    gate stays (evidence-not-mastery: generation targets follow probe evidence).
+    gate stays (evidence-not-mastery: generation targets follow probe evidence)
+    unless the caller explicitly waives it (goal population, where the goal
+    itself is the learner's declared intent to practice these LOs).
     """
 
     for lo_id in learning_object_ids:
@@ -433,6 +596,8 @@ def _validate_named_learning_objects(
             raise PracticeExpansionError(f"Unknown learning object id: {lo_id}")
         if learning_object.status != "active":
             raise PracticeExpansionError(f"Learning object {lo_id} is not active (status={learning_object.status}).")
+        if not require_completed_probe:
+            continue
         probe_state = repository.probe_state(lo_id)
         if probe_state is None or probe_state.status != "complete":
             raise PracticeExpansionError(
@@ -480,15 +645,37 @@ def _mode_mix_compliance(
     return violations, warnings
 
 
-def _active_practice_item_counts(vault: LoadedVault, repository: Repository) -> dict[str, int]:
+def _active_practice_item_counts(
+    vault: LoadedVault,
+    repository: Repository,
+    *,
+    exclude_item_ids: set[str] | None = None,
+) -> dict[str, int]:
     states = repository.practice_item_states()
+    excluded = exclude_item_ids or set()
     counts: dict[str, int] = {}
     for item in vault.practice_items.values():
+        if item.id in excluded:
+            continue
         state = states.get(item.id)
         if state is not None and not state.active:
             continue
         counts[item.learning_object_id] = counts.get(item.learning_object_id, 0) + 1
     return counts
+
+
+def _active_evidence_facet_unions(vault: LoadedVault, repository: Repository) -> dict[str, list[str]]:
+    """Union of evidence facet ids across each Learning Object's active items."""
+    states = repository.practice_item_states()
+    unions: dict[str, set[str]] = {}
+    for item in vault.practice_items.values():
+        state = states.get(item.id)
+        if state is not None and not state.active:
+            continue
+        unions.setdefault(item.learning_object_id, set()).update(
+            vault.canonical_facet_id(facet) for facet in item.evidence_facets
+        )
+    return {learning_object_id: sorted(facets) for learning_object_id, facets in unions.items()}
 
 
 def _target_subjects(plan: PracticeExpansionPlan, subjects: list[str] | None) -> list[str]:
@@ -526,7 +713,8 @@ def _practice_expansion_instructions(
         "Each new Practice Item must attach to one of the target learning_object_id values below.",
         "Prefer constructed_response items with attempt_types_allowed ['open_text'] unless the Learning Object clearly calls for another existing supported attempt type.",
         "Use review_route='review_required' unless a direct note or canonical source reference in the supplied context supports auto_apply.",
-        "Avoid duplicating existing prompts in context; vary facets and expected answer shape.",
+        "Avoid duplicating existing prompts in context; vary prompt surface and expected answer shape.",
+        "Facet vocabulary: each target lists existing_evidence_facets, the facet ids already established for that Learning Object. When an item probes knowledge one of those facets names, reuse that exact facet id in evidence_facets/evidence_weights/criterion_facet_weights. Mint a new facet id only when the item probes knowledge no existing facet covers; never restate an existing facet under a new name.",
         "Calibrate each item's difficulty to its target's recommended_difficulty_band (~70-85% expected success - effortful but usually successful, the desirable-difficulty band), and set difficulty and difficulty_source='llm_estimate' accordingly. At most one item per target may be a harder transfer item above the band, and only when corrective feedback makes the challenge productive.",
         "For each target, create exactly requested_new_items Practice Items.",
         f"Targets: {[target.as_dict() for target in plan.targets]}",

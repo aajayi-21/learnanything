@@ -44,6 +44,7 @@ def test_generate_practice_dry_run_targets_completed_probe(tmp_path):
     assert target["learning_object_id"] == "lo_svd_definition"
     assert target["existing_practice_items"] == 1
     assert target["requested_new_items"] == 2
+    assert target["existing_evidence_facets"] == ["recall"]
 
 
 def test_generate_practice_reports_no_targets_before_probe_completion(tmp_path):
@@ -594,3 +595,105 @@ def test_generate_practice_from_goal_merges_concept_anchors(tmp_path):
     unknown = runner.invoke(app, ["generate-practice", "--from-goal", "goal_missing", *v])
     assert unknown.exit_code == 1
     assert json.loads(unknown.output)["error"] == "invalid_goal"
+
+
+def _reserve_goal_exam_pool(vault_root, sqlite_path) -> list[str]:
+    from learnloop.services.exam_pool import reserve_exam_pool
+
+    vault = load_vault(vault_root)
+    repository = Repository(sqlite_path)
+    goal = next(goal for goal in vault.goals if goal.id == "goal_linear_algebra_ml")
+    return reserve_exam_pool(vault, repository, goal, item_count=5).reserved_item_ids
+
+
+def test_populate_goal_dry_run_waives_probe_gate_and_ignores_reserved_supply(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    # No completed probe, and the goal's only item is held out for its exam —
+    # exactly the day-one starvation populate-goal exists to fix.
+    reserved = _reserve_goal_exam_pool(vault_root, paths.sqlite_path)
+    assert reserved == ["pi_svd_define_001"]
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["populate-goal", "goal_linear_algebra_ml", "--vault", str(vault_root), "--dry-run", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    targets = payload["plan"]["targets"]
+    assert [target["learning_object_id"] for target in targets] == ["lo_svd_definition"]
+    assert targets[0]["existing_practice_items"] == 0
+    assert targets[0]["requested_new_items"] == 3
+    assert "recall" in payload["at_risk_facets"]
+
+
+def test_populate_goal_generates_and_auto_accepts(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    reserved = _reserve_goal_exam_pool(vault_root, paths.sqlite_path)
+    assert reserved == ["pi_svd_define_001"]
+    checkout = tmp_path / "codex"
+    checkout.mkdir()
+    (checkout / "HEAD").write_text("abc123", encoding="utf-8")
+    server = _ProposalServer(_practice_proposal_payload())
+    server.start()
+    try:
+        _configure_codex(vault_root, checkout, server.base_url)
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["populate-goal", "goal_linear_algebra_ml", "--vault", str(vault_root), "--json"],
+        )
+    finally:
+        server.stop()
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["accepted"] is True
+    assert payload["applied_count"] == 1
+    assert payload["proposal_id"]
+    instructions = server.requests[0]["body"]["context"]["instructions"]
+    assert "goal_linear_algebra_ml" in instructions
+    assert "lo_svd_definition" in instructions
+    vault = load_vault(vault_root)
+    assert "pi_svd_more_001" in vault.practice_items
+
+
+def test_populate_goal_review_flag_leaves_proposal_pending(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    _reserve_goal_exam_pool(vault_root, paths.sqlite_path)
+    checkout = tmp_path / "codex"
+    checkout.mkdir()
+    (checkout / "HEAD").write_text("abc123", encoding="utf-8")
+    server = _ProposalServer(_practice_proposal_payload())
+    server.start()
+    try:
+        _configure_codex(vault_root, checkout, server.base_url)
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["populate-goal", "goal_linear_algebra_ml", "--vault", str(vault_root), "--review", "--json"],
+        )
+    finally:
+        server.stop()
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["accepted"] is False
+    assert payload["applied_count"] == 0
+    vault = load_vault(vault_root)
+    assert "pi_svd_more_001" not in vault.practice_items
+
+
+def test_populate_goal_rejects_unknown_goal(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["populate-goal", "goal_missing", "--vault", str(vault_root), "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"] == "invalid_goal"

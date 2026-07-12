@@ -64,8 +64,10 @@ from learnloop.services.practice_generation import (
     DiagnosticPracticePlan,
     PracticeExpansionError,
     build_diagnostic_practice_plan,
+    build_goal_practice_plan,
     build_practice_expansion_plan,
     generate_diagnostic_practice_proposal,
+    generate_goal_practice_proposal,
     generate_post_probe_practice_proposal,
 )
 from learnloop.services.recall_calibration import (
@@ -1546,6 +1548,116 @@ def generate_practice(
         _echo_practice_generation_plan(result.plan)
 
 
+@app.command("populate-goal")
+def populate_goal(
+    goal_id: Annotated[str, typer.Argument(help="Active goal id to populate with Practice Items.")],
+    target_items_per_lo: Annotated[int, typer.Option("--target-items-per-lo", min=1, help="Desired practicable (non-exam-reserved) Practice Item count per scope LO.")] = 5,
+    max_new_per_lo: Annotated[int, typer.Option("--max-new-per-lo", min=1, help="Maximum new Practice Items to ask for per LO.")] = 3,
+    instructions: Annotated[str | None, typer.Option("--instructions", help="Extra generation instructions.")] = None,
+    ai_provider: Annotated[str | None, typer.Option("--ai-provider", help="AI provider profile to use for practice generation.")] = None,
+    review: Annotated[bool, typer.Option("--review", help="Leave the proposal pending review instead of auto-accepting.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show targets without calling the AI provider.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Generate Practice Items covering an active goal's scope.
+
+    Unlike ``generate-practice``, the completed-probe gate is waived and items
+    reserved for the goal's held-out exam do not count as existing supply, so a
+    freshly created goal (whose exam pool may have quarantined most of its
+    items) becomes practicable in one shot. Auto-accepts the proposal unless
+    ``--review`` is passed.
+    """
+
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    sync_vault_state(loaded, repository)
+
+    def _fail(error: str, message: str, **extra: object) -> None:
+        if json_output:
+            typer.echo(_dump({"version": 1, "error": error, "message": message, **extra}))
+        else:
+            typer.echo(message, err=True)
+        raise typer.Exit(code=1)
+
+    goal = next((candidate for candidate in loaded.goals if candidate.id == goal_id), None)
+    if goal is None or goal.status != "active":
+        reason = "not found" if goal is None else f"not active (status={goal.status})"
+        _fail("invalid_goal", f"Goal {goal_id} is {reason}.", goal_id=goal_id)
+    try:
+        plan, at_risk_facets = build_goal_practice_plan(
+            loaded,
+            repository,
+            goal,
+            target_items_per_lo=target_items_per_lo,
+            max_new_per_lo=max_new_per_lo,
+        )
+    except PracticeExpansionError as exc:
+        _fail("invalid_generation_request", str(exc))
+    if dry_run:
+        if json_output:
+            typer.echo(_dump({"version": 1, "plan": plan.as_dict(), "at_risk_facets": at_risk_facets}))
+        else:
+            _echo_practice_generation_plan(plan)
+            if at_risk_facets:
+                typer.echo(f"At-risk facets in focus: {', '.join(at_risk_facets)}")
+        return
+    if not plan.targets:
+        _fail(
+            "no_targets",
+            f"Goal {goal_id}'s learning objects already have enough practicable items.",
+            plan=plan.as_dict(),
+        )
+    provider_name, runtime, client = _ready_provider_for_task(vault_root, loaded.config, "authoring", ai_provider)
+    if not runtime.ready:
+        runtime_label = "Codex runtime" if provider_name == "codex" else "AI provider"
+        _fail(runtime.status, runtime.message or f"{runtime_label} is {runtime.status}.", plan=plan.as_dict())
+    try:
+        result = generate_goal_practice_proposal(
+            vault_root,
+            client,
+            goal_id=goal_id,
+            target_items_per_lo=target_items_per_lo,
+            max_new_per_lo=max_new_per_lo,
+            extra_instructions=instructions,
+            codex_revision=getattr(runtime, "actual_revision", None),
+        )
+    except Exception as exc:
+        _fail(
+            "codex_failed" if provider_name == "codex" else "ai_failed",
+            str(exc),
+            plan=plan.as_dict(),
+        )
+    applied_count = 0
+    if not review:
+        try:
+            apply_result = accept_items(vault_root, result.patch_id)
+            applied_count = apply_result.applied_count
+        except PatchApplicationError as exc:
+            _fail("accept_failed", str(exc), proposal_id=result.patch_id, plan=result.plan.as_dict())
+    if json_output:
+        typer.echo(
+            _dump(
+                {
+                    "version": 1,
+                    "goal_id": goal_id,
+                    "proposal_id": result.patch_id,
+                    "accepted": not review,
+                    "applied_count": applied_count,
+                    "plan": result.plan.as_dict(),
+                    "at_risk_facets": at_risk_facets,
+                }
+            )
+        )
+    else:
+        if review:
+            typer.echo(f"Persisted goal-population proposal {result.patch_id}; review it with `proposals`.")
+        else:
+            typer.echo(f"Populated goal {goal_id}: accepted proposal {result.patch_id} ({applied_count} item(s)).")
+        _echo_practice_generation_plan(result.plan)
+
+
 @app.command("generate-diagnostics")
 def generate_diagnostics(
     learning_object_id: Annotated[str | None, typer.Option("--learning-object-id", help="Limit to one Learning Object id.")] = None,
@@ -2358,6 +2470,7 @@ def fit_gate_command(
 
     from learnloop.services.fitted_params import FOLLOWUP_GATE_SCOPE
     from learnloop.services.gate_fit import GateFitError, assemble_gate_training_set, fit_gate_weights
+    from learnloop.services.gate_score import GATE_FEATURE_VERSION
 
     root = _root(vault)
     loaded = _load_vault_or_exit(root, json_output=json_output)
@@ -2387,7 +2500,11 @@ def fit_gate_command(
     if not dry_run:
         persisted_id = repository.insert_fitted_parameters(
             scope=FOLLOWUP_GATE_SCOPE,
-            params={"weights": result.weights, "bias": result.bias},
+            params={
+                "weights": result.weights,
+                "bias": result.bias,
+                "feature_version": GATE_FEATURE_VERSION,
+            },
             algorithm_version=loaded.config.algorithms.algorithm_version,
             training_rows_count=result.n_examples,
             metrics={
@@ -2397,7 +2514,8 @@ def fit_gate_command(
                 "n_positive": result.n_positive,
                 "n_negative": result.n_negative,
                 "label_source_counts": result.label_source_counts,
-                "fitter": "gate_fit.v1",
+                "fitter": "gate_fit.v2",
+                "feature_version": GATE_FEATURE_VERSION,
             },
         )
     if json_output:

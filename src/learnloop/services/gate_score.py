@@ -50,6 +50,13 @@ GATE_FEATURES: tuple[str, ...] = (
     "grader_confidence_ok",
 )
 
+# Version the *meaning* of the feature vector, not merely its shape. Version 2
+# changes the repeated-failure inputs from windowed historical counts to
+# trailing failure streaks. Old fitted weights and training rows therefore
+# cannot be mixed safely with current evaluations even though the feature names
+# are unchanged.
+GATE_FEATURE_VERSION: int = 2
+
 # Which trigger-family feature maps to which cascade reason string (the reason
 # vocabulary downstream intent selection / action tags already understand).
 TRIGGER_FEATURE_REASONS: dict[str, str] = {
@@ -197,6 +204,8 @@ def resolve_gate_weights(repository: Repository) -> tuple[dict[str, float], floa
     if record is None:
         return dict(DEFAULT_GATE_WEIGHTS), DEFAULT_GATE_BIAS, "default"
     params = record.get("params", {})
+    if params.get("feature_version") != GATE_FEATURE_VERSION:
+        return dict(DEFAULT_GATE_WEIGHTS), DEFAULT_GATE_BIAS, "default"
     raw_weights = params.get("weights")
     raw_bias = params.get("bias")
     if not isinstance(raw_weights, dict) or not isinstance(raw_bias, (int, float)) or isinstance(raw_bias, bool):

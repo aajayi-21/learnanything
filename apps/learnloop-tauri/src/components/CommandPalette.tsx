@@ -40,7 +40,7 @@ type OutputRow =
 // ── Command grammar ─────────────────────────────────────────────────────
 // Static description of every command — used by both autocomplete and the
 // parser. Execution lives in runCommand().
-type ArgKind = "practice_item" | "concept" | "any" | "subject" | "tab" | "url" | "path";
+type ArgKind = "practice_item" | "concept" | "goal" | "any" | "subject" | "tab" | "url" | "path";
 interface ArgSpec {
   name: string;
   kind?: ArgKind;
@@ -66,7 +66,8 @@ const GRAMMAR: Record<string, GrammarSpec> = {
   ingest: { help: "Stage a source note from URL / arXiv / PDF / .md", args: [{ name: "source", kind: "url" }], flags: ["--kind", "--subject", "--learning-object", "--goal", "--allow-auto-captions", "--instructions", "--json"] },
   "add-subject": { help: "Create a subject view + metadata", args: [{ name: "id", kind: "subject" }, { name: "title" }], flags: [] },
   "add-note": { help: "Register a note for later proposal generation", args: [{ name: "subject_id", kind: "subject" }, { name: "note_id" }, { name: "title" }], flags: ["--body", "--file", "--source-type"] },
-  "generate-practice": { help: "Generate post-probe practice proposals", args: [], flags: ["--subjects", "--target-items-per-lo", "--max-new-per-lo", "--max-los", "--instructions", "--dry-run", "--json"] },
+  "generate-practice": { help: "Generate post-probe practice proposals", args: [], flags: ["--subjects", "--target-items-per-lo", "--max-new-per-lo", "--max-los", "--from-goal", "--instructions", "--dry-run", "--json"] },
+  "populate-goal": { help: "Generate + accept practice items covering an active goal's scope", args: [{ name: "goal_id", kind: "goal" }], flags: ["--target-items-per-lo", "--max-new-per-lo", "--instructions", "--review", "--dry-run", "--json"] },
   "generate-diagnostics": { help: "Generate diagnostic follow-up practice proposals", args: [], flags: ["--learning-object-id", "--max-needs", "--instructions", "--ai-provider", "--dry-run", "--json"] },
   "observation-templates": { help: "List observation templates", args: [], flags: ["--all", "--json"] },
   "register-observation-template": { help: "Register an observation template", args: [], flags: ["--file", "--domain", "--version", "--title", "--active", "--inactive", "--json"] },
@@ -94,6 +95,7 @@ const CLI_DELEGATED_COMMANDS = new Set([
   "add-subject",
   "add-note",
   "generate-practice",
+  "populate-goal",
   "generate-diagnostics",
   "observation-templates",
   "register-observation-template",
@@ -336,6 +338,7 @@ interface Candidates {
   entityIds: string[];
   practiceItemIds: string[];
   conceptIds: string[];
+  goalIds: string[];
   subjects: string[];
 }
 
@@ -345,6 +348,8 @@ function candidatesFor(kind: ArgKind | undefined, c: Candidates): string[] {
       return c.practiceItemIds;
     case "concept":
       return c.conceptIds;
+    case "goal":
+      return c.goalIds;
     case "any":
       return Array.from(new Set([...c.practiceItemIds, ...c.entityIds]));
     case "subject":
@@ -513,6 +518,7 @@ function KindBadge({ kind }: { kind: string }) {
     concept: { tone: "amber", label: "concept" },
     tab: { tone: "cyan", label: "tab" },
     practice_item: { tone: "cyan", label: "pi" },
+    goal: { tone: "green", label: "goal" },
     any: { tone: "slate", label: "id" }
   };
   const m = map[kind] ?? { tone: "slate", label: kind || "?" };
@@ -643,11 +649,15 @@ export function CommandPalette({
   const [acIdx, setAcIdx] = useState(0);
   const [busy, setBusy] = useState(false);
   const [conceptIds, setConceptIds] = useState<string[]>([]);
+  const [goalIds, setGoalIds] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const subjectsKey = useMemo(() => subjects.join("\0"), [subjects]);
-  const cands = useMemo<Candidates>(() => ({ entityIds, practiceItemIds, conceptIds, subjects }), [entityIds, practiceItemIds, conceptIds, subjects]);
+  const cands = useMemo<Candidates>(
+    () => ({ entityIds, practiceItemIds, conceptIds, goalIds, subjects }),
+    [entityIds, practiceItemIds, conceptIds, goalIds, subjects]
+  );
   const completions = useMemo(() => computeCompletions(line, cursor, cands), [line, cursor, cands]);
 
   const helpCommands = useMemo(() => Object.entries(GRAMMAR).map(([name, spec]) => ({ name, help: spec.help })), []);
@@ -670,6 +680,15 @@ export function CommandPalette({
       })
       .catch(() => {
         if (!cancelled) setConceptIds([]);
+      });
+    api
+      .goalsList()
+      .then((snapshot) => {
+        // populate-goal only operates on active goals, so only offer those.
+        if (!cancelled) setGoalIds(snapshot.goals.filter((goal) => goal.status === "active").map((goal) => goal.id));
+      })
+      .catch(() => {
+        if (!cancelled) setGoalIds([]);
       });
     return () => {
       cancelled = true;
