@@ -46,3 +46,30 @@ def test_harvest_is_deterministic(tmp_path):
     first = harvest_facet_candidates(vault)
     second = harvest_facet_candidates(vault)
     assert first == second
+
+
+def test_harvests_candidates_from_unit_inventories(tmp_path):
+    # KM §3.3 seam: once ING M4 inventory rows exist, harvesting reads their
+    # claims/concept mentions as candidates (never canonical).
+    from tests.test_source_inventory import (
+        FakeInventoryClient,
+        _block,
+        _ir,
+        _persist,
+        _register_revision,
+    )
+    from learnloop.services.source_unit_inventory import run_unit_inventory
+
+    paths = create_basic_vault(tmp_path / "vault")
+    vault = load_vault(paths.root)
+    repository = Repository(paths.sqlite_path)
+    _register_revision(repository)
+    ir = _ir([("u1", "Eigen", [_block("s1", "An eigenvector of A is a nonzero vector.")], "sha256:h1", 1)])
+    _persist(repository, ir, revision_id="rev1", extraction_id="ext1")
+    run_unit_inventory(repository, "ext1", "u1", role="primary_textbook", profile="semantic", client=FakeInventoryClient())
+
+    result = harvest_facet_candidates(vault, repository)
+    kinds = {candidate["source_kind"] for candidate in result["candidates"]}
+    assert "unit_inventory" in kinds
+    texts = {candidate["text"] for candidate in result["candidates"] if candidate["source_kind"] == "unit_inventory"}
+    assert any("eigenvector" in text.lower() for text in texts)

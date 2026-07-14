@@ -119,6 +119,7 @@ def run_doctor(root: Path, *, fix_state: bool = False, ai: bool = False, ai_prov
     _check_references(vault, issues)
 
     repository = Repository(paths.sqlite_path)
+    _check_source_sets(vault, repository, issues)
     state_sync_result = sync_vault_state(vault, repository) if fix_state and paths.sqlite_path.exists() else None
     if (
         fix_state
@@ -406,6 +407,47 @@ def _check_references(vault: LoadedVault, issues: list[HealthIssue]) -> None:
         for concept_id in note.related_concepts:
             if concept_id not in concept_ids:
                 issues.append(_issue("warning", "note:missing_concept", f"{note.id} references missing concept {concept_id}", entity_id=note.id))
+
+
+def _check_source_sets(vault: LoadedVault, repository: Repository, issues: list[HealthIssue]) -> None:
+    """Validate source-set membership (spec_source_ingestion_v2 §4.3).
+
+    Unknown roles are open strings → warnings; missing pins are errors;
+    subject/source/revision/unit references must resolve. Membership owns
+    role/scope/priority — the source note carries only hints."""
+
+    from learnloop.services.role_authority import KNOWN_ROLES
+
+    subject_ids = set(vault.subjects)
+    db_available = repository.sqlite_path.exists()
+    for source_set in vault.source_sets:
+        if source_set.subject_id not in subject_ids:
+            issues.append(
+                _issue("error", "source_set:missing_subject", f"{source_set.id} references missing subject {source_set.subject_id}", entity_id=source_set.id)
+            )
+        for member in source_set.members:
+            if not (member.revision_id or "").strip():
+                issues.append(
+                    _issue("error", "source_set:missing_pin", f"{source_set.id} member {member.source_id} has no pinned revision_id", entity_id=source_set.id)
+                )
+            if member.default_role not in KNOWN_ROLES:
+                issues.append(
+                    _issue("warning", "source_set:unknown_role", f"{source_set.id} member {member.source_id} has unknown role '{member.default_role}' (fails closed for authority until confirmed)", entity_id=source_set.id)
+                )
+            if db_available:
+                if member.source_id and repository.get_source_artifact(member.source_id) is None:
+                    issues.append(
+                        _issue("error", "source_set:missing_source", f"{source_set.id} references source {member.source_id} not in the library", entity_id=source_set.id)
+                    )
+                elif member.revision_id and repository.get_source_revision(member.revision_id) is None:
+                    issues.append(
+                        _issue("warning", "source_set:missing_revision", f"{source_set.id} pins revision {member.revision_id} not in the library", entity_id=source_set.id)
+                    )
+            for scope in member.scope:
+                if scope.role_override is not None and scope.role_override not in KNOWN_ROLES:
+                    issues.append(
+                        _issue("warning", "source_set:unknown_role_override", f"{source_set.id} unit {scope.unit_id} has unknown role_override '{scope.role_override}'", entity_id=source_set.id)
+                    )
 
 
 def _check_sql_state(vault: LoadedVault, repository: Repository, issues: list[HealthIssue]) -> None:

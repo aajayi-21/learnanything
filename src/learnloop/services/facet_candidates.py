@@ -124,10 +124,10 @@ def _harvest(vault: LoadedVault, repository=None) -> list[FacetCandidate]:
                 seen_misconceptions.add(record.id)
                 add("misconception", record.statement, [record.id])
 
-    # Unit inventories (source-ingestion): none exist at KM1; harvested when the
-    # inventory table lands (ING M4). Guarded so this stays forward-compatible.
+    # Unit inventories (source-ingestion §7, live since ING M4). Candidates only —
+    # inventory rows never mint canonical facets.
     if repository is not None and hasattr(repository, "source_unit_inventory_claims"):
-        for claim in repository.source_unit_inventory_claims():  # pragma: no cover - ING M4
+        for claim in repository.source_unit_inventory_claims():
             add("unit_inventory", claim.get("text", ""), [str(claim.get("unit_id", ""))])
 
     return candidates

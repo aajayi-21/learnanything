@@ -21,6 +21,7 @@ from learnloop.vault.models import (
     Note,
     PracticeItem,
     RelationsFile,
+    SourceSetsFile,
     Subject,
     SubjectMetadata,
 )
@@ -79,6 +80,10 @@ def load_vault(root: Path | None = None) -> LoadedVault:
     goals_file = _load_yaml_model(paths.goals_path, GoalsFile, issues)
     if goals_file:
         loaded.goals = goals_file.goals
+
+    source_sets_file = _load_yaml_model(paths.source_sets_path, SourceSetsFile, issues)
+    if source_sets_file:
+        loaded.source_sets = source_sets_file.source_sets
 
     error_types_file = _load_yaml_model(paths.error_types_path, ErrorTypesFile, issues)
     if error_types_file:

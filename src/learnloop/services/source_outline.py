@@ -51,14 +51,16 @@ _SIGNAL_ROLES = {
 }
 
 
-def unit_inventory_marker(extraction_id: str, unit_id: str) -> dict[str, object]:
-    """Whether a unit already has a cached inventory (M4 seam).
+def unit_inventory_marker(repo: Repository, extraction_id: str, unit_id: str) -> dict[str, object]:
+    """Whether a unit already has a cached inventory (ING M4).
 
-    Inventory tables (`source_unit_inventories`) arrive in ING M4; until then this
-    hook returns a not-inventoried marker so the outline and build plan can render
-    the "cached" affordance without pretending data exists."""
+    Reads real `source_unit_inventories` rows so the outline and build plan render
+    the "cached" affordance from actual data. Returns the richest cached profile
+    for the unit's current semantic hash."""
 
-    return {"inventoried": False, "inventory_profile": None}
+    from learnloop.services.source_unit_inventory import inventory_marker
+
+    return inventory_marker(repo, extraction_id, unit_id)
 
 
 class OutlineUnit(BaseModel):
@@ -137,7 +139,7 @@ def build_source_outline(repo: Repository, extraction_id: str) -> SourceOutline:
                 structural_signals=signals,
                 health_flags=flags,
                 approx_tokens=approx,
-                inventory=unit_inventory_marker(extraction_id, unit.unit_id),
+                inventory=unit_inventory_marker(repo, extraction_id, unit.unit_id),
             )
         )
 

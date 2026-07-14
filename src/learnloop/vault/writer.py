@@ -7,7 +7,14 @@ from pydantic import BaseModel, ValidationError
 
 from learnloop.clock import Clock, utc_now_iso
 from learnloop.vault.loader import load_vault
-from learnloop.vault.models import Concept, ConceptEdge, ErrorType, LearningObject, PracticeItem
+from learnloop.vault.models import (
+    Concept,
+    ConceptEdge,
+    ErrorType,
+    LearningObject,
+    PracticeItem,
+    SourceSet,
+)
 from learnloop.vault.paths import VaultPaths
 from learnloop.vault.yaml_io import read_yaml, write_yaml
 
@@ -271,6 +278,52 @@ def upsert_error_type(
         error_types[index] = validated
     write_yaml(paths.error_types_path, data)
     return paths.error_types_path
+
+
+SOURCE_SET_ORDER = [
+    "id",
+    "subject_id",
+    "title",
+    "members",
+    "priority",
+    "created_at",
+    "updated_at",
+]
+
+
+def upsert_source_set(
+    root: Path,
+    payload: SourceSet | dict[str, Any],
+    *,
+    clock: Clock | None = None,
+) -> Path:
+    """Create or update a source set in sources/source_sets.yaml (§4.3).
+
+    Membership owns role/scope/priority — this is the one source of truth. The
+    write is validated through the SourceSet model and round-trips untouched
+    records."""
+
+    vault = load_vault(root)
+    paths = VaultPaths(vault.root, vault.config)
+    data = _read_yaml_or(paths.source_sets_path, {"schema_version": 1, "source_sets": []})
+    source_sets = data.setdefault("source_sets", [])
+    if not isinstance(source_sets, list):
+        raise VaultWriterError("sources/source_sets.yaml must contain a source_sets list")
+    raw = _payload(payload)
+    set_id = str(raw.get("id") or "")
+    if not set_id:
+        raise VaultWriterError("Source set id is required")
+    index = _list_index_by_id(source_sets, set_id)
+    existing = _mapping(source_sets[index]) if index is not None else {}
+    merged = _merge_entity(existing, raw, SOURCE_SET_ORDER, clock=clock)
+    validated = SourceSet.model_validate(merged).model_dump(mode="json", exclude_none=False)
+    if index is None:
+        source_sets.append(validated)
+    else:
+        source_sets[index] = validated
+    paths.source_sets_path.parent.mkdir(parents=True, exist_ok=True)
+    write_yaml(paths.source_sets_path, data)
+    return paths.source_sets_path
 
 
 def _payload(value: BaseModel | dict[str, Any]) -> dict[str, Any]:

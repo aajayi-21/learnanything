@@ -142,3 +142,76 @@ def test_start_extraction_repair_requires_consent_over_sidecar(tmp_path):
         ]
     )[1]
     assert response["error"]["data"]["code"] == "consent_required"
+
+
+# --------------------------------------------------------------------------
+# ING M4: source-set CRUD + coverage over the sidecar (§4.3/§9.3)
+# --------------------------------------------------------------------------
+
+
+def test_source_set_crud_and_coverage_over_sidecar(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    _revision_id, extraction_id = _seed_extraction(paths.sqlite_path)
+
+    results = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "upsert_source_set",
+                "params": {
+                    "id": "set_sc",
+                    "subjectId": "linear-algebra",
+                    "title": "Sidecar Set",
+                    "members": [
+                        {
+                            "sourceId": "src_book",
+                            "revisionId": _revision_id,
+                            "defaultRole": "primary_textbook",
+                            "scope": [{"unitId": "u1", "roleOverride": None}],
+                            "priority": 1,
+                        }
+                    ],
+                },
+            },
+            {"jsonrpc": "2.0", "id": 3, "method": "list_source_sets", "params": {}},
+            {"jsonrpc": "2.0", "id": 4, "method": "get_source_coverage", "params": {"sourceSetId": "set_sc"}},
+        ]
+    )
+    created = results[1]["result"]["sourceSet"]
+    assert created["id"] == "set_sc"
+    assert created["members"][0]["defaultRole"] == "primary_textbook"
+
+    listing = results[2]["result"]["sourceSets"]
+    assert any(row["id"] == "set_sc" for row in listing)
+
+    coverage = results[3]["result"]["coverage"]
+    assert coverage["sourceSetId"] == "set_sc"
+    assert coverage["curriculumLinkageSeam"] == "entity_source_links_m5_m6"
+
+
+def test_start_inventory_over_sidecar(tmp_path):
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    _revision_id, extraction_id = _seed_extraction(paths.sqlite_path)
+
+    result = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "start_inventory",
+                "params": {
+                    "extractionRef": extraction_id,
+                    "units": [{"unitId": "u1", "role": "reference", "profile": "semantic"}],
+                },
+            },
+        ]
+    )[1]
+    # The batch is enqueued (a real codex provider is absent, so the job will fail
+    # cleanly when drained — enqueue itself must succeed with a batch id).
+    assert "result" in result
+    assert result["result"]["id"].startswith("batch_")

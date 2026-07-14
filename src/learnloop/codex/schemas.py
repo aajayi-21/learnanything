@@ -442,3 +442,113 @@ class DiagnosticTrials(BaseModel):
 
     planted: list[DiagnosticTrialResult] = Field(default_factory=list)
     clean: list[DiagnosticTrialResult] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Role-specific unit inventory (spec_source_ingestion_v2 §7, ING M4)
+#
+# The SourceUnitInventory contract, verbatim. Every assertion cites provided
+# span ids; the model never invents a locator. Ids the model returns are
+# placeholders — the inventory service reassigns deterministic ids from
+# (unit_id, window_ordinal, item_ordinal, normalized-content-hash), so an
+# unchanged semantic view yields stable ids. Inventory rows are CANDIDATES, not
+# canonical facets/recipes/learner evidence.
+# ---------------------------------------------------------------------------
+
+
+class InventoryConceptMention(BaseModel):
+    mention_id: str = ""
+    name: str = ""
+    aliases: list[str] = Field(default_factory=list)
+    notation: list[str] = Field(default_factory=list)
+    span_ids: list[str] = Field(default_factory=list)
+
+
+class InventoryClaim(BaseModel):
+    claim_id: str = ""
+    kind: Literal["definition", "theorem", "procedure", "assumption", "example"] = "definition"
+    statement: str = ""
+    preconditions: list[str] = Field(default_factory=list)
+    postconditions: list[str] = Field(default_factory=list)
+    applicability: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+    counterexamples: list[str] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+    concept_mention_ids: list[str] = Field(default_factory=list)
+    prerequisite_hints: list[str] = Field(default_factory=list)
+    span_ids: list[str] = Field(default_factory=list)
+
+
+class InventoryProcedureSignal(BaseModel):
+    procedure_id: str = ""
+    contract: str = ""
+    ordered_steps: list[str] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
+    common_invalid_steps: list[str] = Field(default_factory=list)
+    observable_step_span_ids: list[str] = Field(default_factory=list)
+
+
+class InventoryPracticeSignal(BaseModel):
+    signal_id: str = ""
+    kind: Literal["exercise", "worked_example", "solution"] = "exercise"
+    task_family: str = ""
+    valid_method_hints: list[str] = Field(default_factory=list)
+    response_structure: str = ""
+    capability_demands: list[str] = Field(default_factory=list)
+    representation: str = ""
+    difficulty_signal: str = ""
+    concept_mention_ids: list[str] = Field(default_factory=list)
+    span_ids: list[str] = Field(default_factory=list)
+
+
+class InventoryAssessmentSignal(BaseModel):
+    assessment_item_id: str = ""
+    held_out: bool = False
+    topic_mentions: list[str] = Field(default_factory=list)
+    task_family: str = ""
+    capability_demands: list[str] = Field(default_factory=list)
+    representation: str = ""
+    response_format: str = ""
+    point_or_time_emphasis: str = ""
+    method_visibility: str = ""
+    span_ids: list[str] = Field(default_factory=list)
+
+
+class InventoryMisconceptionSignal(BaseModel):
+    statement: str = ""
+    confused_concept_mentions: list[str] = Field(default_factory=list)
+    trigger_conditions: list[str] = Field(default_factory=list)
+    invalid_step: str = ""
+    repair_hint: str = ""
+    span_ids: list[str] = Field(default_factory=list)
+
+
+class InventoryCoverageClaim(BaseModel):
+    concept_mention_id: str = ""
+    depth: str = ""
+    pedagogical_forms: list[str] = Field(default_factory=list)
+    span_ids: list[str] = Field(default_factory=list)
+
+
+class InventoryWarning(BaseModel):
+    kind: str = ""
+    detail: str = ""
+    span_ids: list[str] = Field(default_factory=list)
+
+
+class SourceUnitInventory(BaseModel):
+    """The §7 unit-inventory contract. One envelope, role-aware profiles: a
+    narrower profile may leave irrelevant sections empty (they are never forced
+    through the most expensive prompt)."""
+
+    unit_id: str = ""
+    semantic_hash: str = ""
+    outline_summary: str = ""
+    concept_mentions: list[InventoryConceptMention] = Field(default_factory=list)
+    claims: list[InventoryClaim] = Field(default_factory=list)
+    procedure_signals: list[InventoryProcedureSignal] = Field(default_factory=list)
+    practice_signals: list[InventoryPracticeSignal] = Field(default_factory=list)
+    assessment_signals: list[InventoryAssessmentSignal] = Field(default_factory=list)
+    misconception_signals: list[InventoryMisconceptionSignal] = Field(default_factory=list)
+    coverage_claims: list[InventoryCoverageClaim] = Field(default_factory=list)
+    inventory_warnings: list[InventoryWarning] = Field(default_factory=list)
