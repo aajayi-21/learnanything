@@ -118,12 +118,7 @@ export function OpenInSource({
               )}
 
               {view.acquisitionKind === "youtube" && view.canonicalUri ? (
-                // YouTube embed is M8; external-open fallback at the source for now.
-                <div style={{ marginTop: 12 }}>
-                  <a href={view.canonicalUri} target="_blank" rel="noreferrer" style={{ color: COLOR.amberLink, fontSize: 12, fontFamily: FONT_MONO }}>
-                    open externally ↗
-                  </a>
-                </div>
+                <YouTubeEmbed view={view} />
               ) : null}
 
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16 }}>
@@ -154,6 +149,96 @@ export function OpenInSource({
             </>
           ) : null}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── YouTube embedded player (§9.2) ──────────────────────────────────────────
+// media-extended-style: seek the privacy-enhanced (youtube-nocookie.com) IFrame to
+// the cited range's start. Loading it is an explicit-action fetch of the already-
+// imported public URL — no consent dialog (stated in the privacy copy). Videos that
+// disallow embedding fall back to opening externally at the timestamp.
+
+function youtubeVideoId(uri: string): string | null {
+  try {
+    const url = new URL(uri);
+    const host = url.hostname.replace(/^www\./, "");
+    if (host === "youtu.be") return url.pathname.slice(1).split("/")[0] || null;
+    if (host.endsWith("youtube.com") || host.endsWith("youtube-nocookie.com")) {
+      const v = url.searchParams.get("v");
+      if (v) return v;
+      const parts = url.pathname.split("/").filter(Boolean); // /embed/ID or /v/ID
+      const marker = parts.findIndex((p) => p === "embed" || p === "v");
+      if (marker >= 0 && parts[marker + 1]) return parts[marker + 1];
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Parse a time_range_v1 locator (`t=<start>-<end>`, seconds) → [start, end]. The
+ *  span-view locator wraps it, e.g. `span:t=12-30` or `t=12.5-30`. */
+function timeRange(view: SpanViewDto): { start: number; end: number | null } {
+  const raw = (view.locator || "").replace(/^span:/, "");
+  const match = /^t=([0-9]+(?:\.[0-9]+)?)-([0-9]+(?:\.[0-9]+)?)$/.exec(raw);
+  if (match) return { start: Math.floor(Number(match[1])), end: Math.floor(Number(match[2])) };
+  return { start: 0, end: null };
+}
+
+function fmtTime(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function YouTubeEmbed({ view }: { view: SpanViewDto }) {
+  const uri = view.canonicalUri as string;
+  const videoId = youtubeVideoId(uri);
+  const { start, end } = timeRange(view);
+
+  if (!videoId) {
+    // Non-embeddable / unparseable → external open at the source (existing behavior).
+    return (
+      <div style={{ marginTop: 12 }}>
+        <a href={uri} target="_blank" rel="noreferrer" style={{ color: COLOR.amberLink, fontSize: 12, fontFamily: FONT_MONO }}>
+          open externally ↗
+        </a>
+      </div>
+    );
+  }
+
+  const src = `https://www.youtube-nocookie.com/embed/${videoId}?start=${start}&rel=0`;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ position: "relative", paddingTop: "56.25%", background: "#000", border: `1px solid ${COLOR.border}` }}>
+        <iframe
+          title="source video"
+          src={src}
+          allow="encrypted-media; picture-in-picture"
+          referrerPolicy="strict-origin-when-cross-origin"
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }}
+        />
+      </div>
+      {end !== null ? (
+        <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 11, color: COLOR.amber, fontFamily: FONT_MONO }}>
+            {fmtTime(start)}–{fmtTime(end)}
+          </span>
+          <div style={{ flex: 1, height: 4, background: COLOR.bgInput, position: "relative" }}>
+            <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: "100%", background: COLOR.amber, opacity: 0.6 }} />
+          </div>
+        </div>
+      ) : null}
+      <Faint style={{ fontSize: 10, marginTop: 6, display: "block" }}>
+        Loads YouTube&apos;s embedded player — an explicit fetch of the already-imported public URL
+        (privacy-enhanced youtube-nocookie.com); no data leaves your vault.
+      </Faint>
+      <div style={{ marginTop: 4 }}>
+        <a href={uri} target="_blank" rel="noreferrer" style={{ color: COLOR.amberLink, fontSize: 11, fontFamily: FONT_MONO }}>
+          open externally ↗
+        </a>
       </div>
     </div>
   );

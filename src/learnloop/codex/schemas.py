@@ -306,6 +306,19 @@ class TeachBackQuestion(BaseModel):
     question_md: str
 
 
+class TutorCitation(BaseModel):
+    """One source-span citation on a tutor answer (ING M8, §9.2).
+
+    The model may cite ONLY spans supplied in ``context.source_spans``; the
+    service drops any citation whose ``(extraction_id, span_id)`` was not
+    provided (never model-invented). The chip opens the Open-in-source viewer.
+    """
+
+    extraction_id: str
+    span_id: str
+    label: str | None = None
+
+
 class TutorAnswer(BaseModel):
     """Structured tutor Q&A output: the answer plus the question classification.
 
@@ -321,6 +334,10 @@ class TutorAnswer(BaseModel):
     # a different explanation style, pace, scaffold level, or a direct answer.
     # Preference questions change tutor policy, not mastery belief.
     question_channel: Literal["epistemic", "interaction_preference"] = "epistemic"
+    # ING M8 (§9.2): optional source-span citations, validated against the spans
+    # supplied in the context. Empty when no links exist (degrades to unchanged
+    # behavior).
+    citations: list[TutorCitation] = Field(default_factory=list)
 
 
 class MisconceptionMatch(BaseModel):

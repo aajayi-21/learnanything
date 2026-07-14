@@ -1,7 +1,4 @@
-"""Lightweight exam-readiness-by-task-family report (source-ingestion M7, §15).
-
-Exam preparation is a primary intent, so its marquee readout ships in the core
-release. This report is LIGHTWEIGHT = a DETERMINISTIC table, no LLM:
+"""Exam-readiness-by-task-family report (source-ingestion §15).
 
     declared blueprint distribution (exam profiles + blueprint weights)
       ×  facet-capability state (KM2 certification ledger + a KM §9.2 projection)
@@ -11,13 +8,24 @@ release. This report is LIGHTWEIGHT = a DETERMINISTIC table, no LLM:
 The display rule (KM §9.6) is honoured: every row is labelled with a clear
 Ready-vs-Demonstrated split — Ready is the projected success probability (predicted
 performance), Demonstrated is the certification-ledger credit (evidence actually
-banked). We never blend them into one number. M8 ships the fully calibrated
-version (predicted score distributions against Brier calibration).
+banked). We never blend them into one number.
+
+**ING M8 — fully calibrated.** On top of the M7 lightweight table this computes,
+Monte-Carlo-free, a predicted SCORE DISTRIBUTION per blueprint family: modelling a
+family as ``n`` independent Bernoulli tasks with success probability ``p`` gives an
+analytic mean ``p`` and variance ``p(1-p)/n``; the whole-exam predicted score is the
+weight-normalized aggregate ``S = Σ wᵢ·pᵢ`` with ``Var(S) = Σ wᵢ²·pᵢ(1-pᵢ)/nᵢ``. That
+predicted distribution is overlaid — clearly labelled, never blended — with the
+practice-exam Brier calibration from ``exam_calibration.py`` when data exists, so the
+learner sees predicted-vs-demonstrated AND how well past predictions held up. Both
+the LIGHTWEIGHT M7 table and the M8 distribution are deterministic and add zero
+provider tokens (KM §12.9).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import sqrt
 from typing import Any
 
 from learnloop.db.repositories import Repository
@@ -38,6 +46,8 @@ class TaskFamilyReadiness:
     demonstrated_fraction: float = 0.0    # ledger-certified share — evidence banked
     facet_capabilities: list[dict[str, Any]] = field(default_factory=list)
     calibration: dict[str, Any] | None = None
+    # ING M8: analytic predicted score distribution for this family.
+    predicted: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +59,7 @@ class TaskFamilyReadiness:
             "demonstrated_fraction": self.demonstrated_fraction,
             "facet_capabilities": list(self.facet_capabilities),
             "calibration": self.calibration,
+            "predicted": self.predicted,
         }
 
 
@@ -57,6 +68,10 @@ class ExamReadinessReport:
     subject_id: str | None
     rows: list[TaskFamilyReadiness] = field(default_factory=list)
     has_calibration: bool = False
+    # ING M8: whole-exam predicted score distribution (mean/variance/std) and the
+    # weight-normalized demonstrated fraction, reported side by side (never blended).
+    predicted_score: dict[str, Any] | None = None
+    demonstrated_score: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +79,8 @@ class ExamReadinessReport:
             "display_rule": "ready_vs_demonstrated",
             "rows": [row.as_dict() for row in self.rows],
             "has_calibration": self.has_calibration,
+            "predicted_score": self.predicted_score,
+            "demonstrated_score": self.demonstrated_score,
         }
 
 
@@ -83,8 +100,14 @@ def exam_readiness_report(
     *,
     subject_id: str | None = None,
     exam_profile: dict[str, Any] | None = None,
+    total_exam_items: int | None = None,
 ) -> ExamReadinessReport:
-    """Build the deterministic exam-readiness table (§15). No LLM."""
+    """Build the deterministic exam-readiness table + predicted score distribution (§15).
+
+    No LLM. ``total_exam_items`` (optional) sizes each family's Bernoulli item count
+    ``nᵢ = max(1, round(normalized_weightᵢ · total_exam_items))`` so the per-family
+    variance ``p(1-p)/n`` tightens as the exam allots more items to a family; absent
+    it, each family is one representative task (``n = 1``)."""
 
     # Certification ledger (Demonstrated) keyed by (facet, capability).
     ledger: dict[tuple[str, str], float] = {}
@@ -158,7 +181,36 @@ def exam_readiness_report(
     for row in rows:
         row.normalized_weight = (row.weight / total_weight) if total_weight > 0 else 0.0
 
+    # ING M8: analytic predicted score distribution per family and aggregate.
+    # Family score ~ mean p, variance p(1-p)/n (n independent Bernoulli tasks).
+    agg_mean = 0.0
+    agg_variance = 0.0
+    demonstrated_score = 0.0
+    for row in rows:
+        p = row.ready if row.ready is not None else 0.0
+        if total_exam_items is not None:
+            n_items = max(1, round(row.normalized_weight * total_exam_items))
+        else:
+            n_items = 1
+        variance = p * (1.0 - p) / n_items
+        row.predicted = {
+            "mean": round(p, 4),
+            "variance": round(variance, 6),
+            "std": round(sqrt(variance), 4),
+            "n_items": n_items,
+        }
+        agg_mean += row.normalized_weight * p
+        agg_variance += (row.normalized_weight ** 2) * variance
+        demonstrated_score += row.normalized_weight * row.demonstrated_fraction
+
     report = ExamReadinessReport(subject_id=subject_id, rows=rows)
+    if rows:
+        report.predicted_score = {
+            "mean": round(agg_mean, 4),
+            "variance": round(agg_variance, 6),
+            "std": round(sqrt(agg_variance), 4),
+        }
+        report.demonstrated_score = round(demonstrated_score, 4)
 
     # Calibration overlay where practice-exam data exists (Brier, exam_calibration).
     try:

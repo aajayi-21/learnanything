@@ -5,11 +5,13 @@ import type {
   CommandError,
   PromotionIntent,
   QuestionPromotionDto,
+  TutorCitationDto,
   TutorQuestionContext,
   TutorQuestionEventDto
 } from "../api/dto";
 import { COLOR, Faint, FONT_MONO, Pill, type PillColor } from "./term";
 import { MarkdownMath } from "../render/MarkdownMath";
+import { OpenInSource } from "./OpenInSource";
 
 export interface AskTarget {
   context: TutorQuestionContext;
@@ -44,6 +46,9 @@ interface ThreadEntry {
   /** §12.1 proactive handoff: a tutor-initiated turn with no learner question.
    *  Ephemeral — never persisted, so it carries no eventId/rate/save/promote. */
   opening?: boolean;
+  /** ING M8 (§9.2): source-span citations on the live answer; chips open the
+   *  Open-in-source viewer. Ephemeral — absent on transcript-reloaded turns. */
+  citations?: TutorCitationDto[];
 }
 
 interface SaveNotice {
@@ -83,6 +88,8 @@ export function AskOverlay({
   onToast: (message: string) => void;
 }) {
   const [thread, setThread] = useState<ThreadEntry[]>([]);
+  // ING M8 (§9.2): the citation span currently open in the source viewer.
+  const [openCitation, setOpenCitation] = useState<TutorCitationDto | null>(null);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [question, setQuestion] = useState("");
   const [pending, setPending] = useState(false);
@@ -296,7 +303,8 @@ export function AskOverlay({
                 hintEquivalent: answer.hintEquivalent,
                 rating: null,
                 savedNoteId: null,
-                promotion: null
+                promotion: null,
+                citations: answer.citations
               }
             : entry
         )
@@ -367,6 +375,7 @@ export function AskOverlay({
   }
 
   return (
+    <>
     <div style={backdropStyle} onClick={onClose}>
       <div style={modalStyle} onClick={(event) => event.stopPropagation()}>
         {/* ── header ── */}
@@ -419,6 +428,29 @@ export function AskOverlay({
                   <div className="markdown" style={{ fontSize: 13, lineHeight: 1.6 }}>
                     <MarkdownMath value={entry.answerMd} />
                   </div>
+                  {entry.citations && entry.citations.length > 0 ? (
+                    <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                      <span style={{ fontSize: 10, color: COLOR.textFaint, fontFamily: FONT_MONO }}>sources:</span>
+                      {entry.citations.map((citation) => (
+                        <span
+                          key={`${citation.extractionId}:${citation.spanId}`}
+                          onClick={() => setOpenCitation(citation)}
+                          title="Open in source"
+                          style={{
+                            cursor: "pointer",
+                            fontSize: 11,
+                            fontFamily: FONT_MONO,
+                            color: COLOR.amberLink,
+                            border: `1px solid ${COLOR.border}`,
+                            borderRadius: 3,
+                            padding: "1px 6px"
+                          }}
+                        >
+                          ❯ {citation.label ?? citation.spanId}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   {entry.eventId ? (
                     <div style={{ display: "flex", gap: 14, marginTop: 6, fontSize: 12, flexWrap: "wrap", alignItems: "center" }}>
                       {/* CSS `color` has no effect on color-emoji glyphs, so the
@@ -553,6 +585,17 @@ export function AskOverlay({
         </div>
       </div>
     </div>
+    {openCitation ? (
+      <OpenInSource
+        extractionId={openCitation.extractionId}
+        spanId={openCitation.spanId}
+        context="tutor_citation"
+        entityType={null}
+        entityId={null}
+        onClose={() => setOpenCitation(null)}
+      />
+    ) : null}
+    </>
   );
 }
 

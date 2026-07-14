@@ -36,6 +36,39 @@ def test_exam_readiness_report_is_deterministic_and_labels_ready_vs_demonstrated
     assert exam_readiness_report(vault, repo, subject_id="linear-algebra").as_dict() == data
 
 
+def test_exam_readiness_predicted_score_distribution_is_analytic(tmp_path):
+    """ING M8: per-family + aggregate predicted score distribution, labelled
+    predicted-vs-demonstrated, deterministic and Monte-Carlo-free."""
+
+    root, repo = _setup(tmp_path, with_exam=True)
+    create_study_map(root, "set_la", client=FakeSynthesisClient(), repository=repo,
+                     clock=_CLOCK, apply=True, brief={"outcome": "exam prep"})
+    vault = load_vault(root)
+
+    report = exam_readiness_report(vault, repo, subject_id="linear-algebra")
+    data = report.as_dict()
+    # Aggregate predicted score = weight-normalized Σ wᵢ·pᵢ, reported separately
+    # from the demonstrated fraction (never blended).
+    assert data["predicted_score"] is not None
+    assert "demonstrated_score" in data
+    expected_mean = sum(
+        r["normalized_weight"] * (r["ready"] or 0.0) for r in data["rows"]
+    )
+    assert abs(data["predicted_score"]["mean"] - round(expected_mean, 4)) < 1e-4
+    for row in data["rows"]:
+        assert row["predicted"]["n_items"] == 1  # no total supplied → one representative task
+        p = row["ready"] or 0.0
+        assert abs(row["predicted"]["variance"] - round(p * (1 - p), 6)) < 1e-4
+
+    # Sizing the exam tightens per-family variance (more items → smaller variance).
+    sized = exam_readiness_report(vault, repo, subject_id="linear-algebra", total_exam_items=20)
+    for base_row, sized_row in zip(report.rows, sized.rows):
+        if base_row.predicted and sized_row.predicted and sized_row.predicted["n_items"] > 1:
+            assert sized_row.predicted["variance"] <= base_row.predicted["variance"]
+    # Deterministic.
+    assert exam_readiness_report(vault, repo, subject_id="linear-algebra").as_dict() == data
+
+
 def test_conflict_resolution_preserves_locators_and_audit(tmp_path):
     root, repo = _setup(tmp_path, with_exam=False)
     create_study_map(root, "set_la", client=FakeSynthesisClient(), repository=repo,

@@ -136,6 +136,8 @@ def ask_tutor_question(ctx: SidecarContext, params: AskTutorQuestionInput) -> di
             "facets": result["facets"],
             "hint_equivalent": result["hint_equivalent"],
             "leak_suspected": result["leak_suspected"],
+            # ING M8 (§9.2): source-span citations; chips open Open-in-source.
+            "citations": result.get("citations", []),
             "remaining": result["remaining"],
         }
     )

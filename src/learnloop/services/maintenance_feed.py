@@ -50,6 +50,9 @@ NOTICE_TYPES: dict[str, NoticeType] = {
     "taught_blueprint_without_assessment": NoticeType("taught_blueprint_without_assessment", "auto_expiry", "info"),
     "token_estimate_exceeded": NoticeType("token_estimate_exceeded", "auto_expiry", "info"),
     "lo_without_practice": NoticeType("lo_without_practice", "escalation", "warning"),
+    # ING M8 (§11): provenance-outcome associations, additive suggestions only.
+    "repeated_failure_despite_coverage": NoticeType("repeated_failure_despite_coverage", "auto_expiry", "info"),
+    "needs_more_example_sources": NoticeType("needs_more_example_sources", "auto_expiry", "info"),
 }
 
 
@@ -224,12 +227,41 @@ def _taught_blueprint_without_assessment_notices(vault, repository) -> list[_Not
     return out
 
 
+def _source_outcome_notices(vault, repository) -> list[_Notice]:
+    """Provenance-outcome associations as additive suggestions (§11, ING M8).
+
+    Report-only: dismissible auto-expiry notices, never source/curriculum writes."""
+
+    from learnloop.services.source_outcome_analytics import (
+        analyze_source_outcomes,
+        source_outcome_notices,
+    )
+
+    report = analyze_source_outcomes(vault, repository)
+    out: list[_Notice] = []
+    for notice in source_outcome_notices(report):
+        out.append(
+            _Notice(
+                notice_type=notice["notice_type"],
+                dedup_key=notice["dedup_key"],
+                title=notice["title"],
+                action=notice["action"],
+                subject_id=notice.get("subject_id"),
+                entity_type=notice.get("entity_type"),
+                entity_id=notice.get("entity_id"),
+                detail=notice.get("detail"),
+            )
+        )
+    return out
+
+
 _COLLECTORS: tuple[Callable[[LoadedVault, Repository], list[_Notice]], ...] = (
     _stale_link_notices,
     _open_conflict_notices,
     _partial_append_notices,
     _lo_without_practice_notices,
     _taught_blueprint_without_assessment_notices,
+    _source_outcome_notices,
 )
 
 

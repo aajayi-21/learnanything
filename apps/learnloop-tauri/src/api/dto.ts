@@ -577,6 +577,15 @@ export interface AskTutorQuestionInput {
   secondsIntoAttempt?: number;
 }
 
+/** ING M8 (§9.2): one source-span citation on a tutor answer; the chip opens
+ *  the Open-in-source viewer (context "tutor_citation"). Validated server-side
+ *  against provided spans — never model-invented. */
+export interface TutorCitationDto {
+  extractionId: string;
+  spanId: string;
+  label: string | null;
+}
+
 export interface TutorAnswerDto {
   version: number;
   eventId: string;
@@ -585,6 +594,7 @@ export interface TutorAnswerDto {
   facets: string[];
   hintEquivalent: boolean;
   leakSuspected: boolean;
+  citations: TutorCitationDto[];
   remaining: number;
 }
 
@@ -2341,6 +2351,14 @@ export interface FacetCapabilityStateDto {
   recallMean: number;
 }
 
+/** ING M8: analytic predicted score distribution for a task family. */
+export interface PredictedScoreDto {
+  mean: number;
+  variance: number;
+  std: number;
+  nItems: number;
+}
+
 export interface TaskFamilyReadinessDto {
   taskFamily: string;
   weight: number;
@@ -2350,6 +2368,7 @@ export interface TaskFamilyReadinessDto {
   demonstratedFraction: number;
   facetCapabilities: FacetCapabilityStateDto[];
   calibration: { brier: number | null; sample: number } | null;
+  predicted: PredictedScoreDto | null;
 }
 
 export interface ExamReadinessReportDto {
@@ -2357,4 +2376,8 @@ export interface ExamReadinessReportDto {
   displayRule: "ready_vs_demonstrated";
   rows: TaskFamilyReadinessDto[];
   hasCalibration: boolean;
+  /** ING M8: whole-exam predicted score distribution (mean/std) vs demonstrated
+   *  fraction — reported side by side, never blended. */
+  predictedScore: { mean: number; variance: number; std: number } | null;
+  demonstratedScore: number | null;
 }

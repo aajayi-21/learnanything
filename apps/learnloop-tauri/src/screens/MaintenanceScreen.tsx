@@ -258,7 +258,7 @@ export function MaintenanceScreen({
                 <tr style={{ color: COLOR.textDim, textAlign: "left" }}>
                   <th style={th}>task family</th>
                   <th style={th}>weight</th>
-                  <th style={th}>Ready</th>
+                  <th style={th}>Ready (predicted)</th>
                   <th style={th}>Demonstrated</th>
                   <th style={th}>facets · capabilities</th>
                 </tr>
@@ -268,7 +268,12 @@ export function MaintenanceScreen({
                   <tr key={row.taskFamily} style={{ borderTop: `1px solid ${COLOR.border}` }}>
                     <td style={td}>{row.taskFamily}</td>
                     <td style={td}>{(row.normalizedWeight * 100).toFixed(0)}%</td>
-                    <td style={{ ...td, color: COLOR.cyan }}>{row.ready == null ? "n/a" : `${(row.ready * 100).toFixed(0)}%`}</td>
+                    <td style={{ ...td, color: COLOR.cyan }}>
+                      {row.ready == null ? "n/a" : `${(row.ready * 100).toFixed(0)}%`}
+                      {row.predicted ? (
+                        <span style={{ color: COLOR.textFaint }}> ±{(row.predicted.std * 100).toFixed(0)}%</span>
+                      ) : null}
+                    </td>
                     <td style={{ ...td, color: COLOR.green }}>{(row.demonstratedFraction * 100).toFixed(0)}%</td>
                     <td style={td}>
                       {row.facetCapabilities.map((fc, i) => (
@@ -283,6 +288,18 @@ export function MaintenanceScreen({
                 ))}
               </tbody>
             </table>
+            {readiness.predictedScore ? (
+              <div style={{ marginTop: 10, fontSize: 12, display: "flex", gap: 16, flexWrap: "wrap" }}>
+                <span style={{ color: COLOR.cyan }}>
+                  Predicted exam score {(readiness.predictedScore.mean * 100).toFixed(0)}% ± {(readiness.predictedScore.std * 100).toFixed(0)}%
+                  <Faint style={{ marginLeft: 6 }}>predicted performance</Faint>
+                </span>
+                <span style={{ color: COLOR.green }}>
+                  Demonstrated {((readiness.demonstratedScore ?? 0) * 100).toFixed(0)}%
+                  <Faint style={{ marginLeft: 6 }}>evidence banked</Faint>
+                </span>
+              </div>
+            ) : null}
           </div>
         ) : (
           <div style={{ marginTop: 8, color: COLOR.textDim }}>No blueprints to report yet.</div>
