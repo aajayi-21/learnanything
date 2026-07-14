@@ -2184,3 +2184,64 @@ def _rpc(messages: list[dict]) -> list[dict]:
     stdout = io.StringIO()
     serve(stdin, stdout)
     return [json.loads(line) for line in stdout.getvalue().splitlines()]
+
+
+def test_sidecar_create_vault_initializes_fresh_vault(tmp_path):
+    # create_vault needs no prior `initialize` — it scaffolds a brand-new vault
+    # on disk (the NewVault wizard's first step) and returns its root + subject.
+    vault_root = tmp_path / "new-vault"
+    response = _rpc(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "create_vault",
+                "params": {"path": str(vault_root), "subject": "Linear Algebra"},
+            }
+        ]
+    )[0]
+    result = response["result"]
+    assert result["vaultRoot"] == str(vault_root.resolve())
+    assert result["subjectId"] == "linear-algebra"
+    # Scaffolding is on disk and the vault loads cleanly with the seeded subject.
+    assert (vault_root / "learnloop.toml").exists()
+    loaded = load_vault(vault_root)
+    assert "linear-algebra" in loaded.subjects
+
+
+def test_sidecar_create_vault_is_idempotent_on_existing_vault(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    result = _rpc(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "create_vault",
+                "params": {"path": str(vault_root)},
+            }
+        ]
+    )[0]["result"]
+    assert result["vaultRoot"] == str(vault_root.resolve())
+    assert result["subjectId"] is None
+    assert (vault_root / "learnloop.toml").exists()
+
+
+def test_sidecar_create_vault_refuses_populated_non_vault_dir(tmp_path):
+    junk = tmp_path / "not-a-vault"
+    junk.mkdir()
+    (junk / "notes.txt").write_text("hello", encoding="utf-8")
+    response = _rpc(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "create_vault",
+                "params": {"path": str(junk)},
+            }
+        ]
+    )[0]
+    assert "error" in response
+    assert response["error"]["data"]["code"] == "vault_dir_not_empty"
+    # The guard left the directory untouched — no vault scaffolding written.
+    assert not (junk / "learnloop.toml").exists()

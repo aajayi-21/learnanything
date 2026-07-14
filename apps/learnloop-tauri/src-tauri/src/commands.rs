@@ -43,6 +43,14 @@ pub async fn reload_vault(sidecar: State<'_, SidecarManager>) -> Result<Value, C
 }
 
 #[tauri::command]
+pub async fn create_vault(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "create_vault", input).await
+}
+
+#[tauri::command]
 pub async fn get_runtime_health(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
     blocking_sidecar_call(sidecar, "get_runtime_health", json!({})).await
 }

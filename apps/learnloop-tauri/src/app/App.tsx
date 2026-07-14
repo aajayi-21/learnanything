@@ -23,6 +23,7 @@ import { StartScreen } from "../screens/StartScreen";
 import { TodayScreen } from "../screens/TodayScreen";
 import { OpenInSource } from "../components/OpenInSource";
 import { QuickAddDialog } from "../components/QuickAddDialog";
+import { NewVaultWizard } from "../components/NewVaultWizard";
 import { setAlgoConfig } from "./algoConfig";
 
 type OpenSourceTarget = {
@@ -43,6 +44,7 @@ export function App() {
   const [registrySubjectId, setRegistrySubjectId] = useState<string | null>(null);
   const [openSource, setOpenSource] = useState<OpenSourceTarget | null>(null);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [newVaultOpen, setNewVaultOpen] = useState(false);
   const [todayStage, setTodayStage] = useState<TodayStage>("queue");
   const [practiceItemId, setPracticeItemId] = useState<string | null>(null);
   // The current practice item is a primed retry (opened from the feedback
@@ -407,7 +409,15 @@ export function App() {
       );
     }
     if (tab === "start") {
-      return <StartScreen onBegin={beginSession} onError={onError} vault={snapshot.vault} streak={snapshot.streak} />;
+      return (
+        <StartScreen
+          onBegin={beginSession}
+          onError={onError}
+          vault={snapshot.vault}
+          streak={snapshot.streak}
+          onNewVault={() => setNewVaultOpen(true)}
+        />
+      );
     }
     if (tab === "today") {
       if (todayStage === "practice" && session && practiceItemId) {
@@ -598,6 +608,15 @@ export function App() {
             setTab("ingest");
             setToast("Study map building — track it in Ingest");
           }}
+        />
+      ) : null}
+      {newVaultOpen ? (
+        <NewVaultWizard
+          onClose={() => setNewVaultOpen(false)}
+          onActivateVault={changeVault}
+          onGotoTab={gotoTab}
+          onToast={setToast}
+          onError={onError}
         />
       ) : null}
       {repairMisconceptionId ? (

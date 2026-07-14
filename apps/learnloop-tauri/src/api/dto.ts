@@ -3164,3 +3164,18 @@ export interface LoBlueprintDto {
   weight: number;
   recipes: BlueprintRecipeDto[];
 }
+
+// ── NewVault wizard (create_vault) ───────────────────────────────────────────
+// Backend RPC that scaffolds a fresh vault on disk (wraps init_vault) and, if a
+// subject title is given, seeds a first subject. The frontend then re-selects
+// and re-loads the vault so the whole app rebinds to it.
+export interface CreateVaultInput {
+  path: string;
+  subject?: string | null;
+}
+
+export interface CreateVaultResult {
+  version: number;
+  vaultRoot: string;
+  subjectId: string | null;
+}

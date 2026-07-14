@@ -14,6 +14,7 @@ fn main() {
             select_vault,
             load_vault,
             reload_vault,
+            create_vault,
             get_runtime_health,
             get_config,
             start_session,

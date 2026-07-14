@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSnapshot,
   AnswerCalibrationReportDto,
+  CreateVaultInput,
+  CreateVaultResult,
   AttemptResultDto,
   CliCommandResult,
   CommandError,
@@ -166,6 +168,7 @@ function normalizeError(error: unknown): CommandError {
 export const api = {
   selectVault: (path?: string | null) => call<VaultSummary | null>("select_vault", { path }),
   loadVault: () => call<AppSnapshot>("load_vault"),
+  createVault: (input: CreateVaultInput) => call<CreateVaultResult>("create_vault", { input }),
   reloadVault: () => call<AppSnapshot>("reload_vault"),
   getRuntimeHealth: () => call<RuntimeHealth>("get_runtime_health"),
   startSession: (input: SessionStartInput) => call<SessionSnapshot>("start_session", { input }),

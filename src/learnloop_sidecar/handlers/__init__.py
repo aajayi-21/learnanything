@@ -29,4 +29,5 @@ from learnloop_sidecar.handlers import (  # noqa: F401
     sqlite_admin,
     teach_back,
     tutor_qa,
+    vault,
 )

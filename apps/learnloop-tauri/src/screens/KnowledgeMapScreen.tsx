@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { api } from "../api/client";
-import type { KnowledgeFacetPoint, KnowledgeMapHistory, KnowledgeMapPoint, KnowledgeMapSnapshot } from "../api/dto";
+import type { DecayPressureDto, KnowledgeFacetPoint, KnowledgeMapHistory, KnowledgeMapPoint, KnowledgeMapSnapshot } from "../api/dto";
 import { EntityLink } from "../components/ui";
 import { FacetEvidenceDrawer } from "../components/KnowledgeModel";
 import { COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader } from "../components/term";
 import { FacetInspector } from "../components/FacetInspector";
 import { masteryTone } from "../app/algoConfig";
 import { KnowledgeTerrainView } from "./KnowledgeTerrainView";
+import { KnowledgeWellView } from "./KnowledgeWellView";
 import { KnowledgeStrataView } from "./KnowledgeStrataView";
 
 // Knowledge map with two complementary read levels:
@@ -28,8 +29,12 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
   // Sticky hover selection, same convention as the facet radar: the last point
   // touched stays selected until another one is hovered/clicked.
   const [selected, setSelected] = useState<string | null>(null);
-  const [mode, setMode] = useState<"terrain" | "strata">("terrain");
+  const [mode, setMode] = useState<"terrain" | "well" | "strata">("terrain");
   const [history, setHistory] = useState<KnowledgeMapHistory | null>(null);
+  // The well view's decay-pressure feed (which facets the FSRS model holds flat
+  // for lack of history, and which cross target soon). Fetched lazily on first
+  // switch to "well"; the view degrades gracefully to no-decay if it's absent.
+  const [decay, setDecay] = useState<DecayPressureDto | null>(null);
   // FacetEvidenceDrawer (§4.9 / §5) — the map is its second consumer after Review.
   const [drawerFacetId, setDrawerFacetId] = useState<string | null>(null);
   // Facet chosen for the FacetInspector contract overlay. Complementary to the
@@ -71,10 +76,27 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
     };
   }, [mode, history, onError]);
 
+  // The well view's decay feed is only fetched once, on first switch.
+  useEffect(() => {
+    if (mode !== "well" || decay != null) return;
+    let cancelled = false;
+    api
+      .getDecayPressure()
+      .then((data) => {
+        if (!cancelled) setDecay(data.pressure);
+      })
+      .catch((error) => {
+        if (!cancelled) onError(error.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, decay, onError]);
+
   useEffect(() => {
     if (!snapshot) return;
     setSelected((current) => {
-      const candidates = mode === "terrain" ? snapshot.facetField.points : snapshot.points;
+      const candidates = mode === "strata" ? snapshot.points : snapshot.facetField.points;
       return candidates.some((point) => point.id === current) ? current : candidates[0]?.id ?? null;
     });
   }, [mode, snapshot]);
@@ -138,7 +160,7 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
               <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 12 }}>
                 <span style={{ display: "flex", gap: 4 }}>
                   <Faint>view:</Faint>
-                  {(["terrain", "strata"] as const).map((id) => (
+                  {(["terrain", "well", "strata"] as const).map((id) => (
                     <button
                       key={id}
                       type="button"
@@ -158,15 +180,19 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
                     </button>
                   ))}
                 </span>
-                <Faint>stress {(mode === "terrain" ? snapshot.facetField.stress : snapshot.stress).toFixed(2)}</Faint>
+                <Faint>stress {(mode === "strata" ? snapshot.stress : snapshot.facetField.stress).toFixed(2)}</Faint>
               </div>
             </div>
 
-            {(mode === "terrain" ? snapshot.facetField.points.length : points.length) === 0 ? (
+            {(mode === "strata" ? points.length : snapshot.facetField.points.length) === 0 ? (
               <div style={{ color: COLOR.textFaint, fontSize: 13, padding: 30 }}>no mapped evidence yet</div>
             ) : mode === "terrain" ? (
               <div style={{ display: "flex", justifyContent: "center" }}>
                 <KnowledgeTerrainView field={snapshot.facetField} selected={selected} onSelect={setSelected} onInspect={onInspect} />
+              </div>
+            ) : mode === "well" ? (
+              <div style={{ display: "flex", justifyContent: "center" }}>
+                <KnowledgeWellView field={snapshot.facetField} decay={decay} selected={selected} onSelect={setSelected} onInspect={onInspect} />
               </div>
             ) : history == null ? (
               <div style={{ color: COLOR.textFaint, fontSize: 13, padding: 30 }}>loading strata…</div>
@@ -184,7 +210,7 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
           </div>
         </div>
 
-        {mode === "terrain" ? (
+        {mode !== "strata" ? (
           <FacetFieldDetail
             point={activeFacet}
             nextGap={snapshot.facetField.nextGap?.facetId === activeFacet?.id ? snapshot.facetField.nextGap : null}
@@ -236,6 +262,16 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
             <span style={{ color: COLOR.textDim }}>rim: solid certified · hollow required</span>
             <Dim>only Ready fogs · × means no blueprint, not failure</Dim>
           </>
+        ) : mode === "well" ? (
+          <>
+            <Faint>well:</Faint>
+            <span style={{ color: COLOR.textDim }}>depth = Ready × evidence · flat = unexplored</span>
+            <span style={{ color: COLOR.green }}>● filled bead = Demonstrated</span>
+            <span style={{ color: COLOR.cyan }}>○ hollow = predicted, not demonstrated</span>
+            <span style={{ color: COLOR.cyan }}>◌ ghost ring = relaxing after decay</span>
+            <span style={{ color: COLOR.textDim }}>◇ dashed = held flat, not enough history</span>
+            <Dim>× means no blueprint, not failure · contours bunch at the frontier</Dim>
+          </>
         ) : (
           <>
             <Faint>strata:</Faint>
@@ -249,14 +285,24 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
         <span style={{ color: COLOR.amber }}>🔒 locked facet</span>
         <Dim>locked = history is load-bearing; unlocked facets still merge/split cheaply</Dim>
         <span style={{ flex: 1 }} />
-        <Faint>{mode === "terrain" ? "recipe graph field — values live in the capability grid" : "similarity map — distances are approximate"}</Faint>
+        <Faint>
+          {mode === "strata"
+            ? "similarity map — distances are approximate"
+            : mode === "well"
+              ? "ambient surface — Ready leads, values live in the side panel"
+              : "recipe graph field — values live in the capability grid"}
+        </Faint>
       </div>
 
       <KeyBar
         keys={[
           { key: "hover", label: "Select item" },
           { key: "click", label: "Inspect" },
-          ...(mode === "terrain" ? [{ key: "drag", label: "Orbit" }] : [{ key: "hover", label: "Crosshair date" }])
+          ...(mode === "terrain"
+            ? [{ key: "drag", label: "Orbit" }]
+            : mode === "well"
+              ? [{ key: "drag", label: "Orbit" }, { key: "← →", label: "Facets" }]
+              : [{ key: "hover", label: "Crosshair date" }])
         ]}
         right={{ key: "^p", label: "palette" }}
       />

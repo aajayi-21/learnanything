@@ -1401,16 +1401,50 @@ function StreakBadge({ streak }: { streak: StreakSummary }) {
   );
 }
 
+// "create a new vault ▸" affordance for the Start screen. Prominent (amber,
+// filled) on a fresh/empty vault; a quieter ghost link once the vault has content.
+function NewVaultAffordance({ fresh, onClick }: { fresh: boolean; onClick: () => void }) {
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      title="Create a brand-new vault and onboard from scratch"
+      style={{
+        flexShrink: 0,
+        padding: "6px 14px",
+        fontFamily: FONT_MONO,
+        fontSize: 12,
+        cursor: "pointer",
+        whiteSpace: "nowrap",
+        border: `1px solid ${fresh ? COLOR.amber : COLOR.border}`,
+        background: fresh ? "#241d12" : "transparent",
+        color: fresh ? COLOR.amber : COLOR.textDim
+      }}
+    >
+      + create a new vault ▸
+    </span>
+  );
+}
+
 export function StartScreen({
   onBegin,
   onError,
   vault,
-  streak
+  streak,
+  onNewVault
 }: {
   onBegin: (session: SessionSnapshot) => void;
   onError: (message: string) => void;
   vault: VaultSummary | null;
   streak: StreakSummary;
+  onNewVault: () => void;
 }) {
   const [backdrop, setBackdrop] = useState<BackdropName>(
     () => (localStorage.getItem("learnloop.startBackdrop") as BackdropName | null) ?? "axes"
@@ -1513,6 +1547,8 @@ export function StartScreen({
   const goalMeta = vault
     ? `${vault.counts.concepts} concepts in scope · ${vault.counts.learningObjects} active learning_objects · ${vault.counts.errorTypes} error types`
     : "11 concepts in scope · 18 active learning_objects · 3 open misconceptions";
+  // A fresh install / empty vault gets a louder "create a new vault" affordance.
+  const freshInstall = !vault || vault.counts.learningObjects === 0;
 
   if (previewLoading && !preview) {
     return <EmptyPlaceholder title="Loading today's queue" />;
@@ -1534,11 +1570,14 @@ export function StartScreen({
 
         {/* RIGHT — readiness form + queue preview */}
         <div style={{ padding: "24px 30px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
-          <div>
-            <div style={{ fontSize: 18, color: COLOR.text, fontWeight: 600 }}>ready to practice?</div>
-            <span style={{ fontStyle: "italic", color: COLOR.textItalic, fontSize: 12 }}>
-              tell the scheduler about today; it adjusts the queue, not your goals
-            </span>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 18, color: COLOR.text, fontWeight: 600 }}>ready to practice?</div>
+              <span style={{ fontStyle: "italic", color: COLOR.textItalic, fontSize: 12 }}>
+                tell the scheduler about today; it adjusts the queue, not your goals
+              </span>
+            </div>
+            <NewVaultAffordance fresh={freshInstall} onClick={onNewVault} />
           </div>
 
           <SectionHeader>Readiness</SectionHeader>

@@ -14,16 +14,20 @@ const ROLES = ["primary_textbook", "lecture", "paper", "reference", "alternate_e
 export function QuickAddDialog({
   subjects,
   defaultSubjectId,
+  defaultSource,
   onClose,
   onEnqueued
 }: {
   subjects: { id: string; title: string }[];
   defaultSubjectId?: string | null;
+  // Optional prefilled source (URL / path). The NewVault wizard passes the
+  // learner's first source so the bootstrap opens ready to analyze.
+  defaultSource?: string | null;
   onClose: () => void;
   onEnqueued: (batchId: string) => void;
 }) {
   const [phase, setPhase] = useState<"compose" | "confirm">("compose");
-  const [source, setSource] = useState("");
+  const [source, setSource] = useState(defaultSource ?? "");
   const [subjectId, setSubjectId] = useState(defaultSubjectId ?? subjects[0]?.id ?? "");
   const [brief, setBrief] = useState<StudyMapBriefDto | undefined>(undefined);
   const [briefOpen, setBriefOpen] = useState(false);
