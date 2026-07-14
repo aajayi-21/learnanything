@@ -1107,6 +1107,7 @@ export interface StartImportBatchInput {
   sources: string[];
   subjectId?: string | null;
   inventory?: boolean;
+  estimate?: Record<string, unknown> | null;
 }
 
 export type SourceReadiness = "ready" | "processing" | "needs_extraction";
@@ -1130,6 +1131,159 @@ export interface SourceLibraryCard {
 export interface SourceLibrarySnapshot {
   version: number;
   sources: SourceLibraryCard[];
+}
+
+// ── ING M3: outline, unit selection, budget planning, repair (§3/§5.3/§8.6) ──
+
+export interface UnitInventoryMarker {
+  inventoried: boolean;
+  inventoryProfile: string | null;
+}
+
+export interface OutlineUnit {
+  unitId: string;
+  parentUnitId: string | null;
+  label: string;
+  ordinal: number;
+  locator: Record<string, unknown>;
+  semanticHash: string;
+  pageStart: number | null;
+  pageEnd: number | null;
+  blockCount: number;
+  blockCounts: Record<string, number>;
+  structuralSignals: Record<string, number>;
+  healthFlags: string[];
+  approxTokens: number;
+  inventory: UnitInventoryMarker;
+}
+
+export interface UnitSelectionState {
+  selectedUnitIds: string[];
+  boundaryOverrides: Record<string, unknown>[];
+  needsReview: string[];
+}
+
+export interface SourceOutline {
+  version?: number;
+  extractionId: string;
+  revisionId: string | null;
+  sourceId: string | null;
+  title: string;
+  authors: string[];
+  extractor: string;
+  extractorVersion: string;
+  unitCount: number;
+  blockCount: number;
+  approxTokens: number;
+  healthFlags: string[];
+  difficultPageCount: number;
+  units: OutlineUnit[];
+  selection: UnitSelectionState;
+}
+
+export interface SaveUnitSelectionInput {
+  extractionId: string;
+  selectedUnitIds: string[];
+  boundaryOverrides?: Record<string, unknown>[];
+}
+
+export interface AcquisitionPreviewItem {
+  input: string;
+  recognized: boolean;
+  category: string | null;
+  normalizedUri: string | null;
+  error: string | null;
+  isLocal: boolean;
+  fileSizeBytes: number | null;
+  remoteMetadata: Record<string, unknown> | null;
+  duplicateOfInput: string | null;
+  existingSourceId: string | null;
+  existingRevisionCount: number;
+  configuredExtractor: string | null;
+  potentialExternal: Record<string, unknown>[];
+}
+
+export interface AcquisitionPreview {
+  version?: number;
+  items: AcquisitionPreviewItem[];
+  summary: {
+    inputCount: number;
+    recognizedCount: number;
+    duplicateCount: number;
+    existingCount: number;
+    needsConsentCount: number;
+  };
+}
+
+export interface BuildPlanStage {
+  stage: string;
+  calls: number;
+  inputTokens: number;
+  cachedTokens: number;
+  maxOutputTokens: number;
+  ceiling: number;
+  exceedsCeiling: boolean;
+}
+
+export interface BuildPlanSource {
+  extractionId: string;
+  revisionId: string | null;
+  sourceId: string | null;
+  title: string;
+  assetHash: string | null;
+  extractionResultHash: string | null;
+  selectedUnitIds: string[];
+  selectedUnitCount: number;
+  cachedInventoryCount: number;
+  approxTokens: number;
+  warnings: string[];
+}
+
+export interface BuildPlan {
+  version?: number;
+  routing: "create" | "update";
+  subjectId: string | null;
+  provider: string;
+  providerContextTokens: number | null;
+  providerMaxOutputTokens: number | null;
+  sources: BuildPlanSource[];
+  stages: BuildPlanStage[];
+  warnings: string[];
+  totals: {
+    selectedUnitCount: number;
+    inputTokens: number;
+    maxOutputTokens: number;
+    calls: number;
+    cacheSavingsTokens: number;
+  };
+  whatWillBeCreated: {
+    sources: number;
+    selectedUnits: number;
+    routing: string;
+    subjectId: string | null;
+  };
+}
+
+export interface BuildPlanSelectionInput {
+  extractionId: string;
+  selectedUnitIds?: string[];
+}
+
+export interface ExtractionRepairConsent {
+  provider: string;
+  purpose: string;
+  pages?: unknown[];
+  cached?: boolean;
+  external?: boolean;
+}
+
+export interface StartExtractionRepairInput {
+  revisionId: string;
+  pages: unknown[];
+  consent: ExtractionRepairConsent;
+  repairOptions?: Record<string, unknown>;
+  parentExtractionId?: string | null;
+  subjectId?: string | null;
 }
 
 export interface ConceptGraphLearningObject {

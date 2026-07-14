@@ -337,6 +337,48 @@ pub async fn get_source_library(sidecar: State<'_, SidecarManager>) -> Result<Va
     blocking_sidecar_call(sidecar, "get_source_library", json!({})).await
 }
 
+// ── ING M3: outline, unit selection, budget planning, repair (§3/§5.3/§8.6) ──
+
+#[tauri::command]
+pub async fn get_source_outline(
+    extraction_ref: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_source_outline", json!({"extractionRef": extraction_ref})).await
+}
+
+#[tauri::command]
+pub async fn save_unit_selection(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "save_unit_selection", input).await
+}
+
+#[tauri::command]
+pub async fn get_acquisition_preview(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_acquisition_preview", input).await
+}
+
+#[tauri::command]
+pub async fn get_build_plan(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_build_plan", input).await
+}
+
+#[tauri::command]
+pub async fn start_extraction_repair(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "start_extraction_repair", input).await
+}
+
 #[tauri::command]
 pub async fn read_vault_file(
     path: String,

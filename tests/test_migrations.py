@@ -248,6 +248,53 @@ def test_durable_ingest_jobs_migration_applies_on_pre_033_db(tmp_path):
     assert {"ingest_batches", "ingest_jobs", "ingest_job_dependencies"} <= tables
 
 
+def test_source_unit_selections_schema_is_available(tmp_path):
+    sqlite_path = tmp_path / "state.sqlite"
+    apply_migrations(sqlite_path)
+
+    with connect(sqlite_path) as connection:
+        tables = {
+            row["name"]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(source_unit_selections)")
+        }
+
+    assert "source_unit_selections" in tables
+    assert {
+        "extraction_id",
+        "source_id",
+        "revision_id",
+        "selected_unit_ids_json",
+        "boundary_overrides_json",
+        "needs_review_json",
+    } <= columns
+
+
+def test_source_unit_selections_migration_applies_on_pre_040_db(tmp_path):
+    sqlite_path = tmp_path / "state.sqlite"
+    old_migrations = tmp_path / "old_migrations"
+    old_migrations.mkdir()
+    for migration in discover_migrations():
+        if migration.version <= 39:
+            shutil.copy2(migration.path, old_migrations / migration.path.name)
+
+    apply_migrations(sqlite_path, migrations_dir=old_migrations)
+    applied = apply_migrations(sqlite_path)
+    assert 40 in [migration.version for migration in applied]
+
+    with connect(sqlite_path) as connection:
+        fk_issues = connection.execute("PRAGMA foreign_key_check").fetchall()
+        tables = {
+            row["name"]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert fk_issues == []
+    assert "source_unit_selections" in tables
+
+
 def test_migrations_are_idempotent(tmp_path):
     sqlite_path = tmp_path / "state.sqlite"
     apply_migrations(sqlite_path)

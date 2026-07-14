@@ -447,6 +447,174 @@ def handle_legacy_ingest(ctx: JobContext) -> dict[str, Any]:
     return result.as_dict() if hasattr(result, "as_dict") else dict(result)
 
 
+def handle_extraction_repair(ctx: JobContext) -> dict[str, Any]:
+    """extraction_repair: a consent-gated, page-range re-extraction (§2.5).
+
+    Payload carries the revision, target pages, repair options (force-OCR /
+    inline-math / table-processing / an approved external LLM service per
+    ``[ingest.pdf]``), and an explicit consent record (provider, purpose, pages,
+    cached?). The run re-extracts only the requested pages with
+    ``parent_extraction_id`` set, then composes with the parent so unaffected units
+    keep their semantic hashes while repaired units get fresh ones (§2.3). Declining
+    repair is simply not enqueuing this job — the flagged parent stays usable."""
+
+    from learnloop.ingest.hashing import extraction_request_hash, extraction_result_hash
+    from learnloop.ingest.ir import IR_SCHEMA_VERSION, compose_extraction_runs
+    from learnloop.ingest.resolution import resolve_source
+
+    payload = ctx.payload
+    revision_id = str(payload.get("revision_id") or "").strip()
+    if not revision_id:
+        raise IngestRunnerError("extraction_repair requires a 'revision_id'.")
+    pages = _normalize_pages(payload.get("pages") or payload.get("page_ranges"))
+    if not pages:
+        raise IngestRunnerError("extraction_repair requires at least one page.")
+    consent = payload.get("consent")
+    if not isinstance(consent, Mapping) or not consent.get("provider") or not consent.get("purpose"):
+        raise IngestRunnerError(
+            "extraction_repair requires an explicit consent record (provider + purpose)."
+        )
+
+    revision = ctx.repo.get_source_revision(revision_id)
+    if revision is None:
+        raise IngestRunnerError(f"revision '{revision_id}' does not exist.")
+    artifact = ctx.repo.get_source_artifact(revision["source_id"])
+    acquisition_kind = artifact.get("acquisition_kind") if artifact else "pdf"
+
+    parent_id = payload.get("parent_extraction_id") or _latest_completed_extraction(ctx.repo, revision_id)
+    if not parent_id:
+        raise IngestRunnerError(f"revision '{revision_id}' has no completed extraction to repair.")
+    parent_ir = ctx.repo.load_document_ir(parent_id)
+    if parent_ir is None:
+        raise IngestRunnerError(f"parent extraction '{parent_id}' has no persisted IR.")
+
+    source = revision.get("original_uri") or (artifact.get("canonical_uri") if artifact else None)
+    if not source:
+        raise IngestRunnerError(f"revision '{revision_id}' has no fetchable URI for re-extraction.")
+    resolved_category = resolve_source(str(source)).category
+
+    ctx.report("acquired", message=f"Re-acquiring {len(pages)} page(s) for repair")
+    fetched = ctx.services.fetch_bytes(str(source), resolved_category, ctx)
+
+    options = dict(payload.get("repair_options") or {})
+    repair_config = _repair_pdf_config(options, pages)
+    ctx.job["payload"] = {**payload, "pdf_config": repair_config}
+    ctx.job["_revision_id"] = revision_id
+
+    ctx.report("registered", message="Registered repair extraction")
+    repair_ir = ctx.services.extract_ir(fetched, resolved_category, ctx)
+
+    request_hash = extraction_request_hash(
+        revision_id=revision_id,
+        extractor=repair_ir.extractor,
+        extractor_version=repair_ir.extractor_version,
+        config=repair_config,
+        page_selection=pages,
+        ir_schema_version=IR_SCHEMA_VERSION,
+    )
+    existing = ctx.repo.extraction_run_by_request_hash(revision_id, request_hash)
+    if existing is not None and existing.get("status") == "completed":
+        repair_extraction_id = existing["id"]
+    else:
+        repair_extraction_id = existing["id"] if existing is not None else f"ext_{new_ulid()}"
+        if existing is None:
+            ctx.repo.insert_extraction_run(
+                id=repair_extraction_id,
+                revision_id=revision_id,
+                extractor=repair_ir.extractor,
+                extractor_version=repair_ir.extractor_version,
+                extraction_request_hash=request_hash,
+                ir_schema_version=IR_SCHEMA_VERSION,
+                config=repair_config,
+                page_selection=pages,
+                parent_extraction_id=parent_id,
+                status="running",
+                clock=ctx.clock,
+            )
+        ctx.repo.persist_document_ir(repair_extraction_id, repair_ir)
+        ctx.repo.complete_extraction_run(
+            repair_extraction_id,
+            extraction_result_hash=extraction_result_hash(request_hash, repair_ir),
+            clock=ctx.clock,
+        )
+
+    ctx.report("extracted", message="Composed repaired pages with the parent extraction")
+    composed = compose_extraction_runs(parent_ir, repair_ir)
+    repaired_pages = sorted({block.page for block in repair_ir.blocks if block.page is not None})
+    affected = {unit.unit_id for unit in _units_touching(composed, repaired_pages)}
+
+    return {
+        "revision_id": revision_id,
+        "parent_extraction_id": parent_id,
+        "repair_extraction_id": repair_extraction_id,
+        "repaired_pages": repaired_pages,
+        "requested_pages": pages,
+        "affected_unit_hashes": {
+            unit.unit_id: unit.semantic_hash for unit in composed.units if unit.unit_id in affected
+        },
+        "unaffected_unit_hashes": {
+            unit.unit_id: unit.semantic_hash for unit in composed.units if unit.unit_id not in affected
+        },
+        "consent": dict(consent),
+    }
+
+
+def _repair_pdf_config(options: Mapping[str, Any], pages: list[int]) -> dict[str, Any]:
+    config: dict[str, Any] = {"page_range": ",".join(str(page) for page in pages)}
+    if options.get("force_ocr"):
+        config["force_ocr"] = True
+    if options.get("inline_math"):
+        config["inline_math"] = True
+    if options.get("table_processing"):
+        config["table_processing"] = True
+    if options.get("use_llm"):
+        config["use_llm"] = True
+        if options.get("llm_service"):
+            config["llm_service"] = options["llm_service"]
+    return config
+
+
+def _normalize_pages(raw: Any) -> list[int]:
+    pages: set[int] = set()
+    if raw is None:
+        return []
+    for entry in raw if isinstance(raw, (list, tuple)) else [raw]:
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            start, end = int(entry[0]), int(entry[1])
+            pages.update(range(min(start, end), max(start, end) + 1))
+        elif isinstance(entry, int) and not isinstance(entry, bool):
+            pages.add(entry)
+        elif isinstance(entry, str) and entry.strip():
+            text = entry.strip()
+            if "-" in text:
+                start_s, _, end_s = text.partition("-")
+                pages.update(range(int(start_s), int(end_s) + 1))
+            else:
+                pages.add(int(text))
+    return sorted(pages)
+
+
+def _latest_completed_extraction(repo: Repository, revision_id: str) -> str | None:
+    runs = [
+        run
+        for run in repo.extraction_runs_for_revision(revision_id)
+        if run.get("status") == "completed" and run.get("parent_extraction_id") is None
+    ]
+    return runs[-1]["id"] if runs else None
+
+
+def _units_touching(ir: Any, pages: list[int]) -> list[Any]:
+    page_set = set(pages)
+    touching: list[Any] = []
+    for unit in ir.units:
+        if unit.page_start is None:
+            continue
+        end = unit.page_end if unit.page_end is not None else unit.page_start
+        if any(unit.page_start <= page <= end for page in page_set):
+            touching.append(unit)
+    return touching
+
+
 def _not_implemented_handler(job_type: str) -> Handler:
     def handler(_ctx: JobContext) -> dict[str, Any]:
         raise NotImplementedError(
@@ -463,7 +631,7 @@ DEFAULT_HANDLERS: dict[str, Handler] = {
     "inventory": _not_implemented_handler("inventory"),
     "bootstrap_synthesis": _not_implemented_handler("bootstrap_synthesis"),
     "append_synthesis": _not_implemented_handler("append_synthesis"),
-    "extraction_repair": _not_implemented_handler("extraction_repair"),
+    "extraction_repair": handle_extraction_repair,
 }
 
 

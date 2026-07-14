@@ -28,6 +28,13 @@ import type {
   IngestBatchesSnapshot,
   StartImportBatchInput,
   SourceLibrarySnapshot,
+  SourceOutline,
+  SaveUnitSelectionInput,
+  UnitSelectionState,
+  AcquisitionPreview,
+  BuildPlan,
+  BuildPlanSelectionInput,
+  StartExtractionRepairInput,
   RuntimeHealth,
   SchedulerExplanationDto,
   SessionEndSummary,
@@ -165,6 +172,16 @@ export const api = {
   cancelIngestBatch: (batchId: string) => call<IngestBatchDto>("cancel_ingest_batch", { batchId }),
   resumeIngestBatch: (batchId: string) => call<IngestBatchDto>("resume_ingest_batch", { batchId }),
   getSourceLibrary: () => call<SourceLibrarySnapshot>("get_source_library"),
+  getSourceOutline: (extractionRef: string) =>
+    call<SourceOutline>("get_source_outline", { extractionRef }),
+  saveUnitSelection: (input: SaveUnitSelectionInput) =>
+    call<{ version: number } & UnitSelectionState & { extractionId: string }>("save_unit_selection", { input }),
+  getAcquisitionPreview: (inputs: string[]) =>
+    call<AcquisitionPreview>("get_acquisition_preview", { input: { inputs } }),
+  getBuildPlan: (selections: BuildPlanSelectionInput[], subjectId?: string | null) =>
+    call<BuildPlan>("get_build_plan", { input: { selections, subjectId: subjectId ?? null } }),
+  startExtractionRepair: (input: StartExtractionRepairInput) =>
+    call<IngestBatchDto>("start_extraction_repair", { input }),
   readVaultFile: (path: string) => call<VaultFileContent>("read_vault_file", { path }),
   writeVaultFile: (path: string, body: string) => call<VaultFileContent>("write_vault_file", { path, body }),
   createVaultFile: (path: string, body = "") =>

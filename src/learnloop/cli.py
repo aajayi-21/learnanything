@@ -865,6 +865,169 @@ def ingest_batches_resume(
     typer.echo(_dump({"version": 1, "batch": batch}) if json_output else f"Batch {batch_id} [{batch['status']}]")
 
 
+@app.command("source-outline")
+def source_outline_command(
+    ref: Annotated[str, typer.Argument(help="Extraction, revision, or artifact id to outline.")],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the outline as JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Deterministic outline of a source's extraction — zero agent runs (§3/§5.7)."""
+
+    from learnloop.services.source_outline import build_source_outline, resolve_extraction_id
+
+    vault_root = _root(vault)
+    repository = _repository(vault_root)
+    extraction_id = resolve_extraction_id(repository, ref)
+    if extraction_id is None:
+        typer.echo(f"No extraction resolves for '{ref}'.", err=True)
+        raise typer.Exit(code=1)
+    outline = build_source_outline(repository, extraction_id)
+    if json_output:
+        typer.echo(_dump({"version": 1, "outline": outline.model_dump(mode="json")}))
+        return
+    typer.echo(f"{outline.title}  [{outline.extractor} {outline.extractor_version}]")
+    typer.echo(f"  units={outline.unit_count} blocks={outline.block_count} ~{outline.approx_tokens} tokens")
+    if outline.difficult_page_count:
+        typer.echo(f"  {outline.difficult_page_count} difficult page(s) flagged for repair")
+    for unit in outline.units:
+        signals = ",".join(f"{k}={v}" for k, v in unit.structural_signals.items() if v)
+        flags = f" flags={','.join(unit.health_flags)}" if unit.health_flags else ""
+        typer.echo(f"  {unit.ordinal:>2} {unit.unit_id:<8} {unit.label[:40]:<40} ~{unit.approx_tokens:>6}t {signals}{flags}")
+
+
+@app.command("select-units")
+def select_units_command(
+    extraction_id: Annotated[str, typer.Argument(help="Extraction id to record a selection for.")],
+    units: Annotated[list[str], typer.Option("--unit", help="Selected unit id (repeatable).")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the stored selection as JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Persist a per-extraction unit selection (§5.3)."""
+
+    from learnloop.services.source_unit_selection import SelectionValidationError, save_unit_selection
+
+    repository = _repository(_root(vault))
+    try:
+        selection = save_unit_selection(repository, extraction_id, list(units or []))
+    except SelectionValidationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(_dump({"version": 1, "selection": selection}))
+        return
+    typer.echo(f"Selected {len(selection['selected_unit_ids'])} unit(s): {', '.join(selection['selected_unit_ids'])}")
+
+
+@app.command("build-plan")
+def build_plan_command(
+    refs: Annotated[list[str], typer.Argument(help="Extraction/revision/artifact ids to plan.")],
+    subject: Annotated[str | None, typer.Option("--subject", help="Target subject id (Create-vs-Update routing).")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the build plan as JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Deterministic build plan with per-stage token estimates (§8.6.2)."""
+
+    from learnloop.services.build_plan import build_build_plan
+    from learnloop.services.source_outline import resolve_extraction_id
+
+    vault_root = _root(vault)
+    loaded = _load_vault_or_exit(vault_root, json_output=json_output)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    selections: list[dict[str, Any]] = []
+    for ref in refs:
+        extraction_id = resolve_extraction_id(repository, ref)
+        if extraction_id is None:
+            typer.echo(f"No extraction resolves for '{ref}'.", err=True)
+            raise typer.Exit(code=1)
+        selections.append({"extraction_id": extraction_id, "selected_unit_ids": []})
+    plan = build_build_plan(repository, loaded.config, loaded, subject_id=subject, selections=selections)
+    if json_output:
+        typer.echo(_dump({"version": 1, "plan": plan.as_dict()}))
+        return
+    totals = plan.as_dict()["totals"]
+    typer.echo(f"Build plan  routing={plan.routing}  provider={plan.provider}")
+    typer.echo(
+        f"  units={totals['selected_unit_count']} calls={totals['calls']} "
+        f"input~{totals['input_tokens']}t output<={totals['max_output_tokens']}t "
+        f"cache_savings~{totals['cache_savings_tokens']}t"
+    )
+    for stage in plan.stages:
+        marker = " OVER-CEILING" if stage.exceeds_ceiling else ""
+        typer.echo(
+            f"  {stage.stage:<12} calls={stage.calls} input~{stage.input_tokens}t "
+            f"out<={stage.max_output_tokens}t ceiling={stage.ceiling}{marker}"
+        )
+    for warning in plan.warnings:
+        typer.echo(f"  ! {warning}")
+
+
+@app.command("repair-extraction")
+def repair_extraction_command(
+    revision_id: Annotated[str, typer.Argument(help="Source revision id to repair.")],
+    pages: Annotated[str, typer.Option("--pages", help="Page ranges, e.g. '3-5,8'.")],
+    force_ocr: Annotated[bool, typer.Option("--force-ocr", help="Force OCR on the repaired pages.")] = False,
+    inline_math: Annotated[bool, typer.Option("--inline-math", help="Request inline-math extraction.")] = False,
+    table_processing: Annotated[bool, typer.Option("--table-processing", help="Request table processing.")] = False,
+    use_llm: Annotated[bool, typer.Option("--use-llm", help="Approve the external VLM boost (external egress).")] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Record CLI consent and run the repair.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the durable batch as JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Consent-gated page-range extraction repair (§2.5). Requires ``--yes``."""
+
+    from learnloop.services.ingest_runner import JobSpec
+
+    vault_root = _root(vault)
+    loaded = _load_vault_or_exit(vault_root, json_output=json_output)
+    if not yes:
+        typer.echo("Refusing to run repair without --yes (consent is required).", err=True)
+        raise typer.Exit(code=1)
+    page_list = [segment.strip() for segment in pages.split(",") if segment.strip()]
+    provider = loaded.config.ingest.pdf.llm_service if use_llm else "local"
+    consent = {
+        "provider": provider,
+        "purpose": "extraction_repair",
+        "pages": page_list,
+        "cached": False,
+        "consented_via": "cli --yes",
+        "external": bool(use_llm),
+    }
+    repair_options = {
+        "force_ocr": force_ocr,
+        "inline_math": inline_math,
+        "table_processing": table_processing,
+        "use_llm": use_llm,
+    }
+    runner = _ingest_runner(vault_root)
+    if runner.repo.get_source_revision(revision_id) is None:
+        typer.echo(f"Revision '{revision_id}' was not found.", err=True)
+        raise typer.Exit(code=1)
+    batch_id = runner.enqueue_batch(
+        "extraction_repair",
+        [
+            JobSpec(
+                "extraction_repair",
+                {
+                    "revision_id": revision_id,
+                    "pages": page_list,
+                    "repair_options": repair_options,
+                    "consent": consent,
+                },
+            )
+        ],
+    )
+    runner.recover_stale_leases()
+    runner.drain()
+    payload = _batch_json(runner, batch_id)
+    if json_output:
+        typer.echo(_dump({"version": 1, "batch": payload}))
+        return
+    typer.echo(f"Repair batch {payload['id']} [{payload['status']}]")
+    for job in payload["jobs"]:
+        detail = job.get("error", {}).get("message") if job.get("error") else job.get("message")
+        typer.echo(f"  {job['job_type']:<18} {job['status']:<12} {detail or ''}")
+
+
 @app.command("seed-exam-attempts")
 def seed_exam_attempts_command(
     outcomes: Annotated[Path, typer.Option("--outcomes", help="JSON file with per-question exam outcomes.")],

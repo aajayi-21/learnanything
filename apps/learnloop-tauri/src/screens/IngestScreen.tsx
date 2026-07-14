@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../api/client";
-import type { CommandError, IngestJobDto, IngestJobPhase, IngestMode, RecentIngestEntry } from "../api/dto";
+import type { CommandError, IngestJobDto, IngestJobPhase, IngestMode, RecentIngestEntry, SourceLibraryCard } from "../api/dto";
 import { COLOR, Dim, Faint, FONT_MONO, KeyBar, Pill, SectionHeader, type PillColor } from "../components/term";
 import {
   BatchProgressView,
@@ -9,6 +9,7 @@ import {
   SourceLibraryView,
   type IngestView
 } from "../components/BatchProgress";
+import { OutlinePlanFlow } from "../components/OutlineAndPlan";
 
 // Ingest screen — `learnloop ingest <source> --subject <id>` mirror.
 // Spec_mvp §15.2: turn external reference material (URL / arXiv id / PDF /
@@ -484,6 +485,24 @@ export function IngestScreen({
   // A running legacy job forces the Add-source view so its progress stays visible.
   const [view, setView] = useState<IngestView>(jobId ? "add" : "library");
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  // The outline → build-plan → start-batch flow overlays the tab shell (§5.7).
+  const [outlineCard, setOutlineCard] = useState<SourceLibraryCard | null>(null);
+
+  if (outlineCard) {
+    return (
+      <OutlinePlanFlow
+        sourceRef={outlineCard.sourceId}
+        sourceUri={outlineCard.canonicalUri}
+        subjectId={null}
+        onClose={() => setOutlineCard(null)}
+        onOpenBatch={(batchId) => {
+          setOutlineCard(null);
+          setSelectedBatchId(batchId);
+          setView("batches");
+        }}
+      />
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
@@ -497,6 +516,7 @@ export function IngestScreen({
             setSelectedBatchId(batchId);
             setView("batches");
           }}
+          onOpenOutline={(card) => setOutlineCard(card)}
         />
       )}
       {view === "batches" && <BatchProgressView selectedBatchId={selectedBatchId} onSelect={setSelectedBatchId} />}

@@ -4,6 +4,17 @@ from typing import Any, Literal
 
 from learnloop.ingest.models import UnsupportedSourceError
 from learnloop.ingest.resolution import resolve_source
+from learnloop.services.acquisition_preview import build_acquisition_preview
+from learnloop.services.build_plan import build_build_plan
+from learnloop.services.source_outline import (
+    OutlineNotFound,
+    build_source_outline,
+    resolve_extraction_id,
+)
+from learnloop.services.source_unit_selection import (
+    SelectionValidationError,
+    save_unit_selection,
+)
 from learnloop_sidecar.context import SidecarContext
 from learnloop_sidecar.dto import ParamsModel, versioned
 from learnloop_sidecar.errors import SidecarError
@@ -32,6 +43,8 @@ class StartImportBatchInput(ParamsModel):
     sources: list[str]
     subject_id: str | None = None
     inventory: bool = False
+    # A build-plan estimate snapshot (§8.6.2) when the batch is started from a plan.
+    estimate: dict[str, Any] | None = None
 
 
 class IngestBatchInput(ParamsModel):
@@ -118,7 +131,7 @@ def start_import_batch(ctx: SidecarContext, params: StartImportBatchInput) -> di
         except UnsupportedSourceError as exc:
             raise SidecarError("unsupported_source", str(exc)) from exc
     batch_id = ctx.ingest_jobs.enqueue_import(
-        sources, subject_id=params.subject_id, inventory=params.inventory
+        sources, subject_id=params.subject_id, inventory=params.inventory, estimate=params.estimate
     )
     return versioned(ctx.ingest_jobs.get_batch(batch_id))
 
@@ -195,6 +208,144 @@ def get_source_library(ctx: SidecarContext, _params) -> dict[str, Any]:
             }
         )
     return versioned({"sources": cards})
+
+
+# ---------------------------------------------------------------------------
+# Outline, selection, budget planning, and repair (ING M3, §3/§5.3/§5.7/§8.6)
+# ---------------------------------------------------------------------------
+
+
+class SourceOutlineInput(ParamsModel):
+    extraction_ref: str
+
+
+class SaveUnitSelectionInput(ParamsModel):
+    extraction_id: str
+    selected_unit_ids: list[str]
+    boundary_overrides: list[dict[str, Any]] = []
+
+
+class AcquisitionPreviewInput(ParamsModel):
+    inputs: list[str]
+
+
+class BuildPlanSelection(ParamsModel):
+    extraction_id: str
+    selected_unit_ids: list[str] = []
+
+
+class BuildPlanInput(ParamsModel):
+    selections: list[BuildPlanSelection]
+    subject_id: str | None = None
+
+
+class StartExtractionRepairInput(ParamsModel):
+    revision_id: str
+    pages: list[Any]
+    consent: dict[str, Any]
+    repair_options: dict[str, Any] = {}
+    parent_extraction_id: str | None = None
+    subject_id: str | None = None
+
+
+@method("get_source_outline", SourceOutlineInput)
+def get_source_outline(ctx: SidecarContext, params: SourceOutlineInput) -> dict[str, Any]:
+    """Deterministic outline of a source's extraction (zero agent runs, §3/§5.7)."""
+
+    _vault, repository = ctx.require_vault()
+    extraction_id = resolve_extraction_id(repository, params.extraction_ref)
+    if extraction_id is None:
+        raise SidecarError("extraction_not_found", f"No extraction resolves for '{params.extraction_ref}'.")
+    try:
+        outline = build_source_outline(repository, extraction_id)
+    except OutlineNotFound as exc:
+        raise SidecarError("extraction_not_found", str(exc)) from exc
+    payload = outline.model_dump(mode="json")
+    selection = repository.get_unit_selection(extraction_id)
+    payload["selection"] = {
+        "selected_unit_ids": selection.get("selected_unit_ids") if selection else [],
+        "boundary_overrides": selection.get("boundary_overrides") if selection else [],
+        "needs_review": selection.get("needs_review") if selection else [],
+    }
+    return versioned(payload)
+
+
+@method("save_unit_selection", SaveUnitSelectionInput)
+def save_unit_selection_rpc(ctx: SidecarContext, params: SaveUnitSelectionInput) -> dict[str, Any]:
+    """Persist per-extraction unit selection + boundary overrides (§5.3)."""
+
+    _vault, repository = ctx.require_vault()
+    try:
+        selection = save_unit_selection(
+            repository,
+            params.extraction_id,
+            params.selected_unit_ids,
+            boundary_overrides=params.boundary_overrides,
+        )
+    except SelectionValidationError as exc:
+        raise SidecarError("invalid_unit_selection", str(exc)) from exc
+    return versioned(
+        {
+            "extraction_id": params.extraction_id,
+            "selected_unit_ids": selection.get("selected_unit_ids", []),
+            "boundary_overrides": selection.get("boundary_overrides", []),
+            "needs_review": selection.get("needs_review", []),
+        }
+    )
+
+
+@method("get_acquisition_preview", AcquisitionPreviewInput)
+def get_acquisition_preview(ctx: SidecarContext, params: AcquisitionPreviewInput) -> dict[str, Any]:
+    """Deterministic acquisition preview — no downloads/extraction/LLM (§8.6.1)."""
+
+    vault, repository = ctx.require_vault()
+    preview = build_acquisition_preview(repository, vault.config, params.inputs)
+    return versioned(preview.as_dict())
+
+
+@method("get_build_plan", BuildPlanInput)
+def get_build_plan(ctx: SidecarContext, params: BuildPlanInput) -> dict[str, Any]:
+    """Deterministic build plan with per-stage token estimates (§8.6.2)."""
+
+    vault, repository = ctx.require_vault()
+    if params.subject_id is not None and params.subject_id not in vault.subjects:
+        raise SidecarError("unknown_subject", f"Subject '{params.subject_id}' does not exist.")
+    try:
+        plan = build_build_plan(
+            repository,
+            vault.config,
+            vault,
+            subject_id=params.subject_id,
+            selections=[selection.model_dump() for selection in params.selections],
+        )
+    except OutlineNotFound as exc:
+        raise SidecarError("extraction_not_found", str(exc)) from exc
+    return versioned(plan.as_dict())
+
+
+@method("start_extraction_repair", StartExtractionRepairInput)
+def start_extraction_repair(ctx: SidecarContext, params: StartExtractionRepairInput) -> dict[str, Any]:
+    """Enqueue a consent-gated extraction-repair batch (§2.5)."""
+
+    vault, repository = ctx.require_vault()
+    if repository.get_source_revision(params.revision_id) is None:
+        raise SidecarError("revision_not_found", f"Revision '{params.revision_id}' was not found.")
+    if not params.consent.get("provider") or not params.consent.get("purpose"):
+        raise SidecarError(
+            "consent_required",
+            "Extraction repair needs an explicit consent record (provider + purpose).",
+        )
+    if params.subject_id is not None and params.subject_id not in vault.subjects:
+        raise SidecarError("unknown_subject", f"Subject '{params.subject_id}' does not exist.")
+    batch_id = ctx.ingest_jobs.enqueue_extraction_repair(
+        revision_id=params.revision_id,
+        pages=params.pages,
+        repair_options=params.repair_options,
+        consent=params.consent,
+        parent_extraction_id=params.parent_extraction_id,
+        subject_id=params.subject_id,
+    )
+    return versioned(ctx.ingest_jobs.get_batch(batch_id))
 
 
 def _artifact_title(artifact: dict[str, Any], revision: dict[str, Any] | None) -> str:
