@@ -432,6 +432,47 @@ class FacetRecallState:
 
 
 @dataclass(frozen=True)
+class CanonicalFacetRecallState:
+    """Canonical shared facet belief (KM2 §7.1), keyed on the post-merge facet id
+    and observed capability. ``practice_item_id=None`` is the shared aggregate."""
+
+    id: str
+    facet_id: str
+    capability_key: str
+    practice_item_id: str | None
+    recall_alpha: float
+    recall_beta: float
+    recall_mean: float
+    recall_variance: float
+    independent_evidence_mass: float
+    raw_coverage_mass: float
+    last_observed_at: str | None
+    last_error_at: str | None
+    consecutive_failures: int
+    algorithm_version: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class FacetCapabilityEvidence:
+    """Capability-sliced certification ledger (KM2 §7.1). A replayable cache
+    derived from immutable observations, not a new evidence source."""
+
+    facet_id: str
+    capability: str
+    direct_positive_mass: float
+    direct_negative_mass: float
+    embedded_positive_mass: float
+    embedded_negative_mass: float
+    certification_credit: float
+    independent_surface_groups: list[str]
+    algorithm_version: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class FacetUncertaintyState:
     id: str
     learning_object_id: str
@@ -1159,15 +1200,19 @@ class Repository:
     def facet_ids_with_recall_evidence(self) -> set[str]:
         """Facet ids that carry accrued attempt evidence (§12 locks).
 
-        Reads the legacy per-LO recall table (the only evidence store at KM1;
-        KM2's canonical ``facet_recall_state`` joins this once it lands).
+        Unions the legacy per-LO recall table (mvp-0.6) and KM2's canonical
+        ``facet_recall_state`` (mvp-0.7) so the lock closure sees evidence under
+        either keying.
         """
 
         with self.connection() as connection:
-            rows = connection.execute(
+            legacy = connection.execute(
                 "SELECT DISTINCT facet_id FROM evidence_facet_recall_state"
             ).fetchall()
-        return {str(row["facet_id"]) for row in rows}
+            canonical = connection.execute(
+                "SELECT DISTINCT facet_id FROM facet_recall_state"
+            ).fetchall()
+        return {str(row["facet_id"]) for row in legacy} | {str(row["facet_id"]) for row in canonical}
 
     def update_misconception(
         self,
@@ -2404,6 +2449,191 @@ class Repository:
                     (learning_object_id, facet_id, practice_item_id),
                 ).fetchone()
         return _facet_recall_state(row) if row is not None else None
+
+    # -- KM2 canonical shared facet state (§7.1) --------------------------------
+    # These read/write the canonical `facet_recall_state`, `facet_capability_evidence`,
+    # and `facet_merges` tables. They are consumed only under mvp-0.7; the legacy
+    # per-LO `evidence_facet_recall_state` methods above stay untouched so mvp-0.6
+    # replay reproduces byte-identical state.
+
+    def canonical_facet_recall_states(self) -> list[CanonicalFacetRecallState]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM facet_recall_state ORDER BY facet_id, capability_key, practice_item_id"
+            ).fetchall()
+        return [_canonical_facet_recall_state(row) for row in rows]
+
+    def canonical_facet_recall_state(
+        self,
+        facet_id: str,
+        capability_key: str = "shared",
+        practice_item_id: str | None = None,
+    ) -> CanonicalFacetRecallState | None:
+        with self.connection() as connection:
+            if practice_item_id is None:
+                row = connection.execute(
+                    """
+                    SELECT * FROM facet_recall_state
+                    WHERE facet_id = ? AND capability_key = ? AND practice_item_id IS NULL
+                    """,
+                    (facet_id, capability_key),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT * FROM facet_recall_state
+                    WHERE facet_id = ? AND capability_key = ? AND practice_item_id = ?
+                    """,
+                    (facet_id, capability_key, practice_item_id),
+                ).fetchone()
+        return _canonical_facet_recall_state(row) if row is not None else None
+
+    def facet_capability_evidence(
+        self, facet_id: str, capability: str
+    ) -> FacetCapabilityEvidence | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM facet_capability_evidence WHERE facet_id = ? AND capability = ?",
+                (facet_id, capability),
+            ).fetchone()
+        return _facet_capability_evidence(row) if row is not None else None
+
+    def facet_capability_evidence_all(self) -> list[FacetCapabilityEvidence]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM facet_capability_evidence ORDER BY facet_id, capability"
+            ).fetchall()
+        return [_facet_capability_evidence(row) for row in rows]
+
+    def replace_canonical_facet_state(
+        self,
+        *,
+        recall_rows: Iterable[Mapping[str, Any]],
+        capability_rows: Iterable[Mapping[str, Any]],
+        algorithm_version: str,
+        clock: Clock | None = None,
+    ) -> None:
+        """Replace the entire canonical belief cache from a derived projection.
+
+        The canonical state is a pure, order-independent (beta masses accumulate
+        additively) projection over the immutable observation ledger, so a full
+        rebuild is the safe, replay-identical way to persist it: no per-LO reset
+        can shear a facet shared across LOs. Idempotent.
+        """
+
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute("DELETE FROM facet_recall_state")
+            connection.execute("DELETE FROM facet_capability_evidence")
+            for state in recall_rows:
+                connection.execute(
+                    """
+                    INSERT INTO facet_recall_state(
+                      id, facet_id, capability_key, practice_item_id, recall_alpha,
+                      recall_beta, recall_mean, recall_variance,
+                      independent_evidence_mass, raw_coverage_mass, last_observed_at,
+                      last_error_at, consecutive_failures, algorithm_version,
+                      created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(state.get("id") or new_ulid()),
+                        state["facet_id"],
+                        state.get("capability_key", "shared"),
+                        state.get("practice_item_id"),
+                        state["recall_alpha"],
+                        state["recall_beta"],
+                        state["recall_mean"],
+                        state["recall_variance"],
+                        state.get("independent_evidence_mass", 0.0),
+                        state.get("raw_coverage_mass", 0.0),
+                        state.get("last_observed_at"),
+                        state.get("last_error_at"),
+                        int(state.get("consecutive_failures", 0)),
+                        algorithm_version,
+                        state.get("created_at", now),
+                        now,
+                    ),
+                )
+            for row in capability_rows:
+                connection.execute(
+                    """
+                    INSERT INTO facet_capability_evidence(
+                      facet_id, capability, direct_positive_mass, direct_negative_mass,
+                      embedded_positive_mass, embedded_negative_mass, certification_credit,
+                      independent_surface_groups_json, algorithm_version, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["facet_id"],
+                        row["capability"],
+                        row.get("direct_positive_mass", 0.0),
+                        row.get("direct_negative_mass", 0.0),
+                        row.get("embedded_positive_mass", 0.0),
+                        row.get("embedded_negative_mass", 0.0),
+                        row.get("certification_credit", 0.0),
+                        _json(sorted(row.get("independent_surface_groups", []))),
+                        algorithm_version,
+                        row.get("created_at", now),
+                        now,
+                    ),
+                )
+            connection.commit()
+
+    # -- facet_merges: transitive resolution, cycle-rejected at write (§3.4) ------
+
+    def facet_merge_map(self) -> dict[str, str]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT retired_facet_id, surviving_facet_id FROM facet_merges"
+            ).fetchall()
+        return {str(r["retired_facet_id"]): str(r["surviving_facet_id"]) for r in rows}
+
+    def resolve_facet_merge(self, facet_id: str, merge_map: Mapping[str, str] | None = None) -> str:
+        """Resolve a facet id transitively to its terminal survivor (§7.1)."""
+
+        table = dict(merge_map) if merge_map is not None else self.facet_merge_map()
+        return _resolve_merge(facet_id, table)
+
+    def insert_facet_merge(
+        self,
+        *,
+        retired_facet_id: str,
+        surviving_facet_id: str,
+        proposal_item_id: str | None = None,
+        rationale: str | None = None,
+        clock: Clock | None = None,
+    ) -> None:
+        """Record a pre-lock reviewed merge; reject a row that creates a cycle.
+
+        A cycle would make transitive resolution non-terminating; it is rejected
+        at write time so the map can always be resolved to a fixed point (§7.1).
+        """
+
+        if retired_facet_id == surviving_facet_id:
+            raise ValueError("merge would create a cycle: a facet cannot be merged into itself")
+        table = self.facet_merge_map()
+        if retired_facet_id in table:
+            raise ValueError(f"facet {retired_facet_id!r} is already retired by a merge")
+        # Would (retired -> surviving) create a cycle? It does iff `retired` is
+        # already reachable from `surviving` under the existing map.
+        if _resolve_merge(surviving_facet_id, table) == retired_facet_id or _reaches(
+            surviving_facet_id, retired_facet_id, table
+        ):
+            raise ValueError(
+                f"merge {retired_facet_id!r} -> {surviving_facet_id!r} would create a cycle"
+            )
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO facet_merges(
+                  retired_facet_id, surviving_facet_id, merged_at, proposal_item_id, rationale
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (retired_facet_id, surviving_facet_id, now, proposal_item_id, rationale),
+            )
+            connection.commit()
 
     def facet_recall_states(self, learning_object_id: str | None = None) -> list[FacetRecallState]:
         with self.connection() as connection:
@@ -7138,6 +7368,68 @@ def _facet_recall_state(row: sqlite3.Row) -> FacetRecallState:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _canonical_facet_recall_state(row: sqlite3.Row) -> CanonicalFacetRecallState:
+    return CanonicalFacetRecallState(
+        id=row["id"],
+        facet_id=row["facet_id"],
+        capability_key=row["capability_key"],
+        practice_item_id=row["practice_item_id"],
+        recall_alpha=row["recall_alpha"],
+        recall_beta=row["recall_beta"],
+        recall_mean=row["recall_mean"],
+        recall_variance=row["recall_variance"],
+        independent_evidence_mass=row["independent_evidence_mass"],
+        raw_coverage_mass=row["raw_coverage_mass"],
+        last_observed_at=row["last_observed_at"],
+        last_error_at=row["last_error_at"],
+        consecutive_failures=row["consecutive_failures"],
+        algorithm_version=row["algorithm_version"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _facet_capability_evidence(row: sqlite3.Row) -> FacetCapabilityEvidence:
+    return FacetCapabilityEvidence(
+        facet_id=row["facet_id"],
+        capability=row["capability"],
+        direct_positive_mass=row["direct_positive_mass"],
+        direct_negative_mass=row["direct_negative_mass"],
+        embedded_positive_mass=row["embedded_positive_mass"],
+        embedded_negative_mass=row["embedded_negative_mass"],
+        certification_credit=row["certification_credit"],
+        independent_surface_groups=[str(g) for g in _loads(row["independent_surface_groups_json"], [])],
+        algorithm_version=row["algorithm_version"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _resolve_merge(facet_id: str, merge_map: Mapping[str, str]) -> str:
+    """Follow retired->surviving edges to the terminal survivor.
+
+    Assumes the map is acyclic (enforced at write time by ``insert_facet_merge``);
+    a defensive visited-set still guards against a malformed table."""
+
+    seen: set[str] = set()
+    current = facet_id
+    while current in merge_map and current not in seen:
+        seen.add(current)
+        current = merge_map[current]
+    return current
+
+
+def _reaches(start: str, target: str, merge_map: Mapping[str, str]) -> bool:
+    seen: set[str] = set()
+    current = start
+    while current in merge_map and current not in seen:
+        if current == target:
+            return True
+        seen.add(current)
+        current = merge_map[current]
+    return current == target
 
 
 def _facet_uncertainty_state(row: sqlite3.Row) -> FacetUncertaintyState:

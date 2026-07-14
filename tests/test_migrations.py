@@ -37,6 +37,9 @@ def test_fresh_db_applies_all_migrations(tmp_path):
         "scheduler_slate_candidates",
         "learning_outcome_labels",
         "facet_uncertainty",
+        "facet_recall_state",
+        "facet_capability_evidence",
+        "facet_merges",
     }:
         assert required in tables
 
