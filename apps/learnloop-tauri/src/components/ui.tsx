@@ -8,9 +8,10 @@ export const navTabs = [
   { id: "graph", key: "3", label: "Graph" },
   { id: "ingest", key: "4", label: "Ingest" },
   { id: "proposals", key: "5", label: "Proposals" },
-  { id: "library", key: "6", label: "Library" },
-  { id: "errors", key: "7", label: "Errors" },
-  { id: "doctor", key: "8", label: "Doctor" }
+  { id: "registry", key: "6", label: "Registry" },
+  { id: "library", key: "7", label: "Library" },
+  { id: "errors", key: "8", label: "Errors" },
+  { id: "doctor", key: "9", label: "Doctor" }
 ] as const;
 
 export type TopTab = (typeof navTabs)[number]["id"];

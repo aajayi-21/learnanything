@@ -19,6 +19,7 @@ from learnloop_sidecar.handlers import (  # noqa: F401
     proposals,
     provenance,
     queue,
+    registry,
     sessions,
     sqlite_admin,
     teach_back,

@@ -5,7 +5,17 @@ import type {
   CliCommandResult,
   CommandError,
   ConceptGraphSnapshot,
+  ConfirmQuickAddInput,
   EntityProvenance,
+  FacetMergeResultDto,
+  PlanQuickAddInput,
+  ProposeFacetMergeInput,
+  QuickAddConfirmationDto,
+  QuickAddPlanDto,
+  QuickAddResultDto,
+  SpanViewDto,
+  SpanViewInput,
+  SubjectRegistryDto,
   FacetMasterySnapshot,
   AttemptTraceDto,
   CapabilityGridResult,
@@ -203,6 +213,19 @@ export const api = {
     call<IngestBatchDto>("start_inventory", { input }),
   createStudyMap: (input: CreateStudyMapInput) =>
     call<{ version: number; studyMap: StudyMapDto }>("create_study_map", { input }),
+  planQuickAdd: (input: PlanQuickAddInput) =>
+    call<{ version: number; plan: QuickAddPlanDto }>("plan_quick_add", { input }),
+  confirmQuickAdd: (input: ConfirmQuickAddInput) =>
+    call<{ version: number; quickAdd: QuickAddResultDto; batch: IngestBatchDto; confirmation: QuickAddConfirmationDto }>(
+      "confirm_quick_add",
+      { input },
+    ),
+  getSpanView: (input: SpanViewInput) =>
+    call<{ version: number; spanView: SpanViewDto }>("get_span_view", { input }),
+  getSubjectRegistry: (subjectId: string) =>
+    call<SubjectRegistryDto>("get_subject_registry", { input: { subjectId } }),
+  proposeFacetMerge: (input: ProposeFacetMergeInput) =>
+    call<{ version: number } & FacetMergeResultDto>("propose_facet_merge", { input }),
   readVaultFile: (path: string) => call<VaultFileContent>("read_vault_file", { path }),
   writeVaultFile: (path: string, body: string) => call<VaultFileContent>("write_vault_file", { path, body }),
   createVaultFile: (path: string, body = "") =>

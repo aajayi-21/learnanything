@@ -412,6 +412,8 @@ append_output_tokens = 10000
 # Span-request protocol caps (§8.5): one bounded request round only.
 synthesis_span_request_max_count = 12
 synthesis_span_char_cap = 4000
+# Quick add (§1): ToC-guided relevant-scope cap.
+quick_add_scope_input_tokens = 40000
 
 # Per-provider context/output limits consulted by preflight, keyed by the
 # [ai.providers.<name>] entries (source-ingestion spec §3.1), e.g.
@@ -1192,6 +1194,10 @@ class IngestBudgetsConfig(BaseModel):
     # Span-request protocol caps (§8.5): one bounded request round only.
     synthesis_span_request_max_count: int = 12
     synthesis_span_char_cap: int = 4000
+    # Quick add (§1): the ToC-guided relevant-scope cap. When a source's whole
+    # outline fits under this, Quick add selects the whole thing; otherwise it
+    # selects the brief/subject-matching chapters up to this token size.
+    quick_add_scope_input_tokens: int = 40000
 
 
 class IngestProviderLimits(BaseModel):

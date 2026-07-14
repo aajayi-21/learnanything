@@ -841,6 +841,7 @@ class IngestRunner:
         *,
         subject_id: str | None = None,
         source_set_id: str | None = None,
+        priority: int = 0,
     ) -> str:
         if not jobs:
             raise IngestRunnerError("a batch needs at least one job.")
@@ -853,6 +854,7 @@ class IngestRunner:
             workflow_type=workflow_type,
             subject_id=subject_id,
             source_set_id=source_set_id,
+            priority=priority,
             clock=self.clock,
         )
         job_ids: list[str] = []

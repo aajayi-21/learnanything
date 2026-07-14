@@ -1284,6 +1284,196 @@ export interface StudyMapDto {
   resolvedSpanHashes: string[];
 }
 
+// --- Quick add (§1) ---------------------------------------------------------
+
+export interface StudyMapBriefDto {
+  outcome?: "general_learning" | "reference_mastery" | "exam_prep" | string;
+  level?: string;
+  depth?: string;
+  scope?: string;
+  subject?: string;
+  includeTopics?: string[];
+  excludeTopics?: string[];
+  notation?: string;
+  // exam-prep goal fields (createGoal path)
+  goalTitle?: string;
+  targetRecall?: number;
+  dueAt?: string;
+  examItemCount?: number;
+  [key: string]: unknown;
+}
+
+export interface PlanQuickAddInput {
+  source: string;
+  subjectId?: string | null;
+  brief?: StudyMapBriefDto;
+}
+
+export interface ConfirmQuickAddInput {
+  source: string;
+  subjectId: string;
+  brief?: StudyMapBriefDto;
+  roleOverride?: string | null;
+}
+
+export interface ProposeFacetMergeInput {
+  subjectId: string;
+  retiredFacetId: string;
+  survivingFacetId: string;
+  rationale?: string | null;
+  needId?: string | null;
+}
+
+export interface QuickAddConsentDto {
+  kind: string;
+  stage: string;
+  reason?: string;
+  provider?: string;
+  [key: string]: unknown;
+}
+
+export interface QuickAddConfirmationDto {
+  id: string;
+  title: string;
+  source: string;
+  normalizedUri: string;
+  suggestedRole: string;
+  roleAmbiguous: boolean;
+  selectedUnitIds: string[];
+  selectedUnitLabels: string[];
+  selectedUnitCount: number;
+  selectedTokens: number;
+  wholeSource: boolean;
+  estimatedInputTokens: number;
+  estimatedCalls: number | null;
+  externalAiConsent: QuickAddConsentDto[];
+  requiresExternalAi: boolean;
+}
+
+export interface QuickAddPlanDto {
+  source: string;
+  normalizedUri: string;
+  category: string | null;
+  subjectId: string | null;
+  sourceId: string;
+  revisionId: string;
+  extractionId: string;
+  sourceSetId: string;
+  title: string;
+  suggestedRole: string;
+  roleAmbiguous: boolean;
+  selectedUnitIds: string[];
+  selectedUnitLabels: string[];
+  selectedTokens: number;
+  outlineTokens: number;
+  wholeSource: boolean;
+  brief: StudyMapBriefDto;
+  tokenEstimate: BuildPlan;
+  externalAiConsent: QuickAddConsentDto[];
+  confirmation: QuickAddConfirmationDto;
+}
+
+export interface QuickAddResultDto {
+  batchId: string;
+  sourceSetId: string;
+  subjectId: string;
+  role: string;
+  selectedUnitIds: string[];
+}
+
+// --- Open in source (§9.2) --------------------------------------------------
+
+export interface SpanViewInput {
+  extractionId: string;
+  spanId: string;
+  context?: string;
+  entityType?: string | null;
+  entityId?: string | null;
+}
+
+export interface SpanNeighborDto {
+  spanId: string;
+  blockType: string;
+  page: number | null;
+  ordinal: number;
+  text: string;
+  truncated: boolean;
+}
+
+export interface SpanViewDto {
+  extractionId: string;
+  spanId: string;
+  sourceId: string | null;
+  revisionId: string | null;
+  originalUri: string | null;
+  canonicalUri: string | null;
+  acquisitionKind: string | null;
+  viewerMode: "pdf_text" | "text_anchor";
+  blockType: string;
+  page: number | null;
+  bbox: number[] | null;
+  polygon: number[][] | null;
+  sectionPath: string[];
+  text: string;
+  locator: string;
+  locatorScheme: string;
+  pageRender: string | null;
+  pageSpans: { spanId: string; bbox: number[] | null; polygon: number[][] | null }[];
+  previousSpans: SpanNeighborDto[];
+  nextSpans: SpanNeighborDto[];
+  entityType: string | null;
+  entityId: string | null;
+  exposureEventId: string | null;
+}
+
+// --- Registry review (§5.7) -------------------------------------------------
+
+export interface FacetContractCardDto {
+  facetId: string;
+  title: string | null;
+  conceptId: string | null;
+  kind: string | null;
+  claim: string | null;
+  conditions: { preconditions: string[]; postconditions: string[]; applicability: string[] };
+  examples: { positive: string[]; negative: string[] };
+  nonGoals: string[];
+  errorSignatures: string[];
+  instructionalRepairs: string[];
+  status: string;
+  version: number;
+  locked: boolean;
+  lockReasons: { source: string; entityType: string; entityId: string; detail: string }[];
+  canMerge: boolean;
+  requiresReview: boolean;
+}
+
+export interface IdentifiabilityWarningDto {
+  id: string | null;
+  kind: string;
+  targetKey: string;
+  missingCapability: string;
+  facetIds: string[];
+  detail: string | null;
+  status: string;
+}
+
+export interface SubjectRegistryDto {
+  version?: number;
+  subjectId: string;
+  facets: FacetContractCardDto[];
+  identifiabilityWarnings: IdentifiabilityWarningDto[];
+  facetCount: number;
+  lockedCount: number;
+}
+
+export interface FacetMergeResultDto {
+  proposalId: string;
+  retiredFacetId: string;
+  survivingFacetId: string;
+  needId: string | null;
+  resolvedNeed: boolean;
+}
+
 export interface AcquisitionPreviewItem {
   input: string;
   recognized: boolean;

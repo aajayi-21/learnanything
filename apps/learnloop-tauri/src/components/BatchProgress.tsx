@@ -98,10 +98,12 @@ export function IngestViewTabs({ view, onChange }: { view: IngestView; onChange:
 // ── Source library card grid ────────────────────────────────────────────
 export function SourceLibraryView({
   onOpenBatch,
-  onOpenOutline
+  onOpenOutline,
+  onCreateStudyMap
 }: {
   onOpenBatch: (batchId: string) => void;
   onOpenOutline: (card: SourceLibraryCard) => void;
+  onCreateStudyMap?: () => void;
 }) {
   const [sources, setSources] = useState<SourceLibraryCard[]>([]);
   const [loading, setLoading] = useState(true);
@@ -146,6 +148,25 @@ export function SourceLibraryView({
       <div style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
         <SectionHeader style={{ marginTop: 0 }}>Quick add</SectionHeader>
         <Faint>fetch → extract → durable queue, defaults auto-chosen</Faint>
+        {onCreateStudyMap ? (
+          <span
+            onClick={onCreateStudyMap}
+            title="Paste one source → study map, one confirmation"
+            style={{
+              marginLeft: "auto",
+              border: `1px solid ${COLOR.amber}`,
+              background: "#241d12",
+              color: COLOR.amber,
+              fontFamily: FONT_MONO,
+              fontSize: 11,
+              fontWeight: 600,
+              padding: "5px 12px",
+              cursor: "pointer"
+            }}
+          >
+            ＋ Create study map
+          </span>
+        ) : null}
       </div>
       <div
         style={{
