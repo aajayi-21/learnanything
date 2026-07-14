@@ -19,10 +19,12 @@ import type {
   NoteInspectorDetail,
   PracticeItemDetail,
   ErrorEventDto,
+  CapabilityGridResult,
   SchedulerComponents,
   SchedulerExplanationDto
 } from "../api/dto";
 import { BlockBar, COLOR, Dim, Divider, Faint, FONT_MONO, Meta, modePillColor, Pill, SectionHeader, type PillColor } from "./term";
+import { CapabilityGridView } from "./KnowledgeModel";
 import { MarkdownMath } from "../render/MarkdownMath";
 
 // ── kind → header pill ──────────────────────────────────────────────────
@@ -501,6 +503,55 @@ function LearningObjectBody({
       <PillList label="Prerequisites" items={detail.prerequisites} onGo={onGo} color="amber" />
       <PillList label="Confusables" items={detail.confusables} onGo={onGo} color="pink" />
       <PillList label="Tags" items={detail.tags} color="slate" />
+
+      <LoCapabilitySection loId={detail.id} />
+    </div>
+  );
+}
+
+// KM3b §9.6: the capability grid (Demonstrated vs Ready per facet×capability)
+// and blueprint recipe tree — the diagnostic drill-down that supersedes the
+// per-LO facet radar. Fetched on demand (one tap from the Demonstrated surface).
+function LoCapabilitySection({ loId }: { loId: string }) {
+  const [open, setOpen] = useState(false);
+  const [grid, setGrid] = useState<CapabilityGridResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || grid) return;
+    let alive = true;
+    api
+      .getCapabilityGrid(loId)
+      .then((result) => { if (alive) setGrid(result); })
+      .catch((e) => { if (alive) setError(e?.message ?? "failed to load capability grid"); });
+    return () => { alive = false; };
+  }, [open, loId, grid]);
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 12,
+          background: "transparent",
+          border: `1px solid ${COLOR.border}`,
+          borderRadius: 3,
+          color: COLOR.amberLink,
+          padding: "3px 10px",
+          cursor: "pointer",
+        }}
+      >
+        {open ? "▾" : "▸"} capability grid & recipe tree
+      </button>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          {error && <Faint>{error}</Faint>}
+          {grid && <CapabilityGridView result={grid} />}
+          {!grid && !error && <Faint>loading…</Faint>}
+        </div>
+      )}
     </div>
   );
 }

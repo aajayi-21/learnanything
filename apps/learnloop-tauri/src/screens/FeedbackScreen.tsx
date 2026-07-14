@@ -13,6 +13,8 @@ import type {
 } from "../api/dto";
 import { EntityLink, KeyBar, Pill } from "../components/ui";
 import { modePillColor } from "../components/term";
+import { AttemptTraceView, UnresolvedCauseCard } from "../components/KnowledgeModel";
+import type { AttemptTraceDto } from "../api/dto";
 import { algoConfig, masteryTone } from "../app/algoConfig";
 import { MarkdownMath } from "../render/MarkdownMath";
 
@@ -796,6 +798,7 @@ export function FeedbackScreen({
 }) {
   const [feedback, setFeedback] = useState<FeedbackBundle | null>(null);
   const [item, setItem] = useState<PracticeItemDetail | null>(null);
+  const [trace, setTrace] = useState<AttemptTraceDto | null>(null);
   const [regrading, setRegrading] = useState(false);
   const [triggeringFollowup, setTriggeringFollowup] = useState(false);
   const [addingError, setAddingError] = useState(false);
@@ -832,6 +835,12 @@ export function FeedbackScreen({
           .getPracticeItem(bundle.practiceItemId)
           .then((detail) => { if (!cancelled) setItem(detail); })
           .catch(() => {});
+        // KM3b §9.6 attempt trace: the criterion DAG for this attempt. Best
+        // effort — a stale sidecar simply omits the trace section.
+        api
+          .getAttemptTrace(attemptId)
+          .then((t) => { if (!cancelled) setTrace(t); })
+          .catch(() => { if (!cancelled) setTrace(null); });
       })
       .catch((error) => { if (!cancelled) onError(error.message); });
     return () => { cancelled = true; };
@@ -1162,6 +1171,24 @@ export function FeedbackScreen({
             </div>
           )}
         </div>
+
+        {/* ── attempt trace (criterion DAG) ── */}
+        {trace && trace.criteria.length > 0 && (
+          <>
+            <FbHeader>Attempt trace</FbHeader>
+            <AttemptTraceView trace={trace} />
+          </>
+        )}
+
+        {/* ── unresolved-cause diagnostic card ── */}
+        {(f.unresolvedCauses?.length ?? 0) > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <UnresolvedCauseCard
+              causes={f.unresolvedCauses ?? []}
+              onRunDiagnostic={() => void handleTriggerFollowup()}
+            />
+          </div>
+        )}
 
         {/* ── error attribution ── */}
         {f.errorAttributions.length > 0 && (

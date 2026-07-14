@@ -13,6 +13,7 @@ from learnloop_sidecar.handlers import (  # noqa: F401
     ingest,
     inspector,
     knowledge_map,
+    knowledge_model,
     library,
     practice,
     proposals,
