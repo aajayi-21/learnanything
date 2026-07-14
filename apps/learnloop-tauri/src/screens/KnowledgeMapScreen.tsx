@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { KnowledgeMapHistory, KnowledgeMapPoint, KnowledgeMapSnapshot } from "../api/dto";
+import type { KnowledgeMapFacetFieldEntry, KnowledgeMapHistory, KnowledgeMapPoint, KnowledgeMapSnapshot } from "../api/dto";
 import { EntityLink } from "../components/ui";
 import { COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader } from "../components/term";
+import { FacetInspector } from "../components/FacetInspector";
 import { masteryTone } from "../app/algoConfig";
 import { KnowledgeTerrainView } from "./KnowledgeTerrainView";
 import { KnowledgeStrataView } from "./KnowledgeStrataView";
@@ -31,6 +32,9 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
   const [selected, setSelected] = useState<string | null>(null);
   const [mode, setMode] = useState<"terrain" | "strata">("terrain");
   const [history, setHistory] = useState<KnowledgeMapHistory | null>(null);
+  // Facet chosen for the FacetInspector overlay (opened from the item detail's
+  // facet list). Facets themselves have no map coordinate — we join by id.
+  const [inspectFacetId, setInspectFacetId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,6 +71,19 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
   }, [mode, history, onError]);
 
   const points = snapshot?.points ?? [];
+
+  // Per-facet lock state (§3.4), joined by canonical facet id. Legacy items with
+  // no facetField entry are absent from these maps → treated as unlocked.
+  const facetLockById = useMemo(() => {
+    const map = new Map<string, KnowledgeMapFacetFieldEntry>();
+    for (const entry of snapshot?.facetField ?? []) map.set(entry.id, entry);
+    return map;
+  }, [snapshot]);
+  const lockedFacets = useMemo(() => {
+    const set = new Set<string>();
+    for (const entry of snapshot?.facetField ?? []) if (entry.locked) set.add(entry.id);
+    return set;
+  }, [snapshot]);
 
   if (!snapshot) {
     return <div style={{ padding: 30, color: COLOR.textFaint, fontSize: 13 }}>loading knowledge map…</div>;
@@ -143,7 +160,7 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
               <div style={{ color: COLOR.textFaint, fontSize: 13, padding: 30 }}>no practice items yet</div>
             ) : mode === "terrain" ? (
               <div style={{ display: "flex", justifyContent: "center" }}>
-                <KnowledgeTerrainView points={points} selected={selected} onSelect={setSelected} onInspect={onInspect} />
+                <KnowledgeTerrainView points={points} selected={selected} onSelect={setSelected} onInspect={onInspect} lockedFacets={lockedFacets} />
               </div>
             ) : history == null ? (
               <div style={{ color: COLOR.textFaint, fontSize: 13, padding: 30 }}>loading strata…</div>
@@ -161,8 +178,17 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
           </div>
         </div>
 
-        <PointDetail point={active} onInspect={onInspect} />
+        <PointDetail point={active} onInspect={onInspect} facetLockById={facetLockById} onInspectFacet={setInspectFacetId} />
       </div>
+
+      {inspectFacetId ? (
+        <FacetInspector
+          facetId={inspectFacetId}
+          onClose={() => setInspectFacetId(null)}
+          onInspect={onInspect}
+          onError={onError}
+        />
+      ) : null}
 
       <div
         style={{
@@ -196,6 +222,8 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
             <Dim>rows ordered by latent similarity · top band = portfolio drift</Dim>
           </>
         )}
+        <span style={{ color: COLOR.amber }}>🔒 locked facet</span>
+        <Dim>locked = history is load-bearing; unlocked facets still merge/split cheaply</Dim>
         <span style={{ flex: 1 }} />
         <Faint>similarity map — distances are approximate</Faint>
       </div>
@@ -212,7 +240,17 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
   );
 }
 
-function PointDetail({ point, onInspect }: { point: KnowledgeMapPoint | null; onInspect: (id: string) => void }) {
+function PointDetail({
+  point,
+  onInspect,
+  facetLockById,
+  onInspectFacet
+}: {
+  point: KnowledgeMapPoint | null;
+  onInspect: (id: string) => void;
+  facetLockById: Map<string, KnowledgeMapFacetFieldEntry>;
+  onInspectFacet: (facetId: string) => void;
+}) {
   if (!point) {
     return (
       <div style={{ width: 320, flexShrink: 0, borderLeft: `1px solid ${COLOR.border}`, background: COLOR.bg, padding: "16px 18px", color: COLOR.textFaint, fontSize: 13 }}>
@@ -270,11 +308,39 @@ function PointDetail({ point, onInspect }: { point: KnowledgeMapPoint | null; on
 
       <SectionHeader>Top facets</SectionHeader>
       {point.facets.length === 0 ? <Faint>none declared</Faint> : null}
-      {point.facets.map((facet) => (
-        <div key={facet} style={{ fontSize: 12, padding: "2px 0", color: COLOR.textDim, overflowWrap: "anywhere" }}>
-          {facet}
-        </div>
-      ))}
+      <Faint style={{ fontSize: 11 }}>click a facet to open its contract inspector</Faint>
+      {point.facets.map((facet) => {
+        const entry = facetLockById.get(facet);
+        const locked = entry?.locked ?? false;
+        return (
+          <div
+            key={facet}
+            role="button"
+            tabIndex={0}
+            onClick={() => onInspectFacet(facet)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onInspectFacet(facet);
+              }
+            }}
+            title={locked ? `🔒 locked · ${entry?.lockSources.join(", ") || "identity locked"}` : "unlocked (pre-lock)"}
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 8,
+              fontSize: 12,
+              padding: "2px 0",
+              color: COLOR.amberLink,
+              cursor: "pointer",
+              overflowWrap: "anywhere"
+            }}
+          >
+            <span>{facet}</span>
+            {locked ? <span style={{ color: COLOR.amber, flexShrink: 0 }}>🔒</span> : null}
+          </div>
+        );
+      })}
     </div>
   );
 }

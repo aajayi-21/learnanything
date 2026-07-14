@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { FacetMasteryFacet, FacetMasterySnapshot } from "../api/dto";
+import type { FacetMasteryFacet, FacetMasterySnapshot, KnowledgeMapFacetFieldEntry } from "../api/dto";
 import { EntityLink } from "../components/ui";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
+import { FacetInspector } from "../components/FacetInspector";
 import { masteryTone } from "../app/algoConfig";
 import { FacetWellView } from "./FacetWellView";
 import { FacetEvidenceDrawer } from "../components/KnowledgeModel";
@@ -82,6 +83,11 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
   const [itemFilter, setItemFilter] = useState<"queue" | "all">("queue");
   // Flat radar vs 3D gravity well (radial displacement of the facet fabric).
   const [mode, setMode] = useState<"2d" | "well">("2d");
+  // Per-facet lock state (§3.4) joined by facet id from the knowledge map's
+  // facetField; the facet-mastery snapshot itself carries no lock info.
+  const [facetLockById, setFacetLockById] = useState<Map<string, KnowledgeMapFacetFieldEntry>>(new Map());
+  // Facet chosen for the FacetInspector overlay.
+  const [inspectFacetId, setInspectFacetId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,8 +106,33 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
     };
   }, [onError]);
 
+  // Lock state rides on the knowledge map snapshot; fetch it once for the
+  // padlock glyphs. Failure degrades to "no locks known" (never crashes).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getKnowledgeMap()
+      .then((data) => {
+        if (cancelled) return;
+        const map = new Map<string, KnowledgeMapFacetFieldEntry>();
+        for (const entry of data.facetField ?? []) map.set(entry.id, entry);
+        setFacetLockById(map);
+      })
+      .catch(() => {
+        /* lock glyphs are best-effort — leave the map empty */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const facets = snapshot?.facets ?? [];
   const order = useMemo(() => facets.map((f) => f.facetId), [facets]);
+  const lockedFacetSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const [id, entry] of facetLockById) if (entry.locked) set.add(id);
+    return set;
+  }, [facetLockById]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -231,6 +262,8 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
                   onSelect={setSelected}
                   onHoverItem={setHoveredItem}
                   onInspect={onInspect}
+                  lockedFacets={lockedFacetSet}
+                  onInspectFacet={setInspectFacetId}
                 />
               </div>
             ) : (
@@ -316,21 +349,40 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
                     const anchor = Math.abs(labelAnchor.x - CX) < 12 ? "middle" : labelAnchor.x > CX ? "start" : "end";
                     const tone = masteryTone(facet.mastery, COLOR);
                     const hasGap = facet.stateCounts.knownGap > 0;
+                    const lockEntry = facetLockById.get(facet.facetId);
+                    const locked = lockEntry?.locked ?? false;
                     const lines = labelLines(facet.facetId);
                     // Vertically center the label block on its anchor; labels in
                     // the lower half hang downward so they clear the radar rim.
                     const blockShift = labelAnchor.y > CY + 12
                       ? 4
                       : -((lines.length - 1) * LABEL_LINE_H) / 2;
+                    const vertexTip = `${facet.facetId} · mastery ${facet.mastery.toFixed(2)} · ${facet.practiceItems.length} practice item${facet.practiceItems.length === 1 ? "" : "s"}${locked ? `\n🔒 locked · ${lockEntry?.lockSources.join(", ") || "identity locked"}` : ""}\n(click: open facet inspector)`;
                     return (
                       <g
                         key={facet.facetId}
                         style={{ cursor: "pointer" }}
                         onMouseEnter={() => setSelected(facet.facetId)}
-                        onClick={() => setSelected(facet.facetId)}
+                        onClick={() => {
+                          setSelected(facet.facetId);
+                          setInspectFacetId(facet.facetId);
+                        }}
                       >
                         {/* invisible wide hit line so the whole axis is hoverable */}
                         <line x1={CX} y1={CY} x2={tip.x} y2={tip.y} stroke="transparent" strokeWidth={18} />
+                        {/* padlock ring on locked facets (§3.4) */}
+                        {locked ? (
+                          <circle
+                            cx={vertex.x}
+                            cy={vertex.y}
+                            r={(isActive ? 5 : 3.5) + 3.5}
+                            fill="none"
+                            stroke={COLOR.amber}
+                            strokeWidth={1}
+                            strokeDasharray="2 2"
+                            opacity={isActive ? 1 : 0.75}
+                          />
+                        ) : null}
                         <circle
                           cx={vertex.x}
                           cy={vertex.y}
@@ -340,7 +392,7 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
                           strokeWidth={1}
                           style={{ transition: EASE }}
                         >
-                          <title>{`${facet.facetId} · mastery ${facet.mastery.toFixed(2)} · ${facet.practiceItems.length} practice item${facet.practiceItems.length === 1 ? "" : "s"}`}</title>
+                          <title>{vertexTip}</title>
                         </circle>
                         <text
                           x={labelAnchor.x}
@@ -366,7 +418,7 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
                           fill={isActive ? tone : COLOR.textFaint}
                           style={{ transition: EASE }}
                         >
-                          {facet.mastery.toFixed(2)}
+                          {facet.mastery.toFixed(2)}{locked ? " 🔒" : ""}
                         </text>
                       </g>
                     );
@@ -447,8 +499,23 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
           </div>
         </div>
 
-        <FacetDetail facet={activeFacet} hoveredItem={hoveredItem} onInspect={onInspect} />
+        <FacetDetail
+          facet={activeFacet}
+          hoveredItem={hoveredItem}
+          onInspect={onInspect}
+          lockEntry={activeFacet ? facetLockById.get(activeFacet.facetId) ?? null : null}
+          onInspectFacet={setInspectFacetId}
+        />
       </div>
+
+      {inspectFacetId ? (
+        <FacetInspector
+          facetId={inspectFacetId}
+          onClose={() => setInspectFacetId(null)}
+          onInspect={onInspect}
+          onError={onError}
+        />
+      ) : null}
 
       <div
         style={{
@@ -475,6 +542,8 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
         <span style={{ color: COLOR.amber, opacity: 0.7 }}>▒ ±uncertainty band</span>
         <Faint>dot radius = difficulty</Faint>
         {mode === "well" ? <Faint>well depth = mastery pull · ╌ equipotential</Faint> : null}
+        <span style={{ color: COLOR.amber }}>🔒 locked facet</span>
+        <Dim>locked = history load-bearing; unlocked facets still merge/split cheaply</Dim>
         <span style={{ flex: 1 }} />
         <Faint>
           {snapshot.counts.facets} facets · {snapshot.counts.learningObjects} learning objects · {snapshot.counts.practiceItems} practice items
@@ -536,11 +605,15 @@ function FacetBars({
 function FacetDetail({
   facet,
   hoveredItem,
-  onInspect
+  onInspect,
+  lockEntry,
+  onInspectFacet
 }: {
   facet: FacetMasteryFacet | null;
   hoveredItem: string | null;
   onInspect: (id: string) => void;
+  lockEntry: KnowledgeMapFacetFieldEntry | null;
+  onInspectFacet: (facetId: string) => void;
 }) {
   const [showEvidence, setShowEvidence] = useState(false);
   if (!facet) {
@@ -551,10 +624,33 @@ function FacetDetail({
     );
   }
   const tone = masteryTone(facet.mastery, COLOR);
+  const locked = lockEntry?.locked ?? false;
   return (
     <div className="ll-scroll" style={{ width: 360, flexShrink: 0, borderLeft: `1px solid ${COLOR.border}`, background: COLOR.bg, overflowY: "auto", padding: "16px 18px", fontSize: 13 }}>
       <div style={{ fontSize: 11, color: COLOR.textFaint, marginBottom: 4 }}>evidence facet</div>
       <div style={{ fontSize: 15, fontWeight: 600, color: COLOR.text, overflowWrap: "anywhere" }}>{facet.facetId}</div>
+
+      <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {locked ? <Pill color="red">🔒 locked</Pill> : <Pill color="green">pre-lock</Pill>}
+        <button
+          type="button"
+          onClick={() => onInspectFacet(facet.facetId)}
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 12,
+            background: "transparent",
+            border: `1px solid ${COLOR.borderStrong}`,
+            color: COLOR.amberLink,
+            padding: "2px 10px",
+            cursor: "pointer"
+          }}
+        >
+          inspect facet ▸
+        </button>
+      </div>
+      {locked && lockEntry && lockEntry.lockSources.length > 0 ? (
+        <Faint style={{ fontSize: 11, display: "block", marginTop: 4 }}>lock: {lockEntry.lockSources.join(", ")}</Faint>
+      ) : null}
 
       <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10 }}>
         <BlockBar value={facet.mastery} width={16} color={tone} />

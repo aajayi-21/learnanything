@@ -4,12 +4,16 @@ from collections import deque
 from math import sqrt
 from typing import Any
 
+from pydantic import Field
+
+from learnloop.services.curriculum_locks import identity_locks
 from learnloop.services.mastery import display_mastery, sigmoid
 from learnloop.services.probes import resolve_item_irt
 from learnloop.services.recall_coverage import predicted_correctness
 from learnloop.services.scheduler import build_due_queue
 from learnloop_sidecar.context import SidecarContext
-from learnloop_sidecar.dto import versioned
+from learnloop_sidecar.dto import ParamsModel, versioned
+from learnloop_sidecar.errors import SidecarError
 from learnloop_sidecar.registry import method
 
 # Distance blend for the 2D knowledge map. Facet similarity dominates (items
@@ -56,13 +60,13 @@ def get_knowledge_map(ctx: SidecarContext, _params) -> dict[str, Any]:
     ``stress`` is Kruskal stress-1 between the blended input distances and the
     embedded 2D distances — an honesty number: the plane is an approximation,
     and this is how approximate.
+
+    The ``facet_field`` companion array carries lock state for every registered
+    evidence facet (padlock UI): ``locked`` and the distinct ``lock_sources``
+    driving it, computed via a single ``identity_locks`` closure pass (§3.4).
     """
 
     vault, repository = ctx.require_vault()
-
-    item_ids = sorted(vault.practice_items)
-    items = [vault.practice_items[item_id] for item_id in item_ids]
-    n = len(items)
 
     # Probe/queued flags from one read-only scheduler pass (no persisted
     # explanations), same convention as get_facet_mastery.
@@ -74,15 +78,13 @@ def get_knowledge_map(ctx: SidecarContext, _params) -> dict[str, Any]:
         if scheduled.components.get("probe_eig", 0.0) > 0.0
     }
 
-    vectors = [_facet_vector(item) for item in items]
-    concept_of = {
-        item.id: (lo.concept if (lo := vault.learning_object_for_item(item)) is not None else None)
-        for item in items
-    }
-    hops = _concept_geodesics(vault, {c for c in concept_of.values() if c is not None})
-
-    distances = _blended_distances(items, vectors, concept_of, hops)
-    coords, stress = _classical_mds(distances)
+    # Item-map geometry (the only edge-sensitive term is the concept geodesic);
+    # the shared pipeline lets preview_knowledge_map recompute it against a
+    # hypothetical edge set without duplicating the MDS.
+    items, concept_of, distances, coords, stress = _item_map_geometry(
+        vault, _vault_edge_tuples(vault)
+    )
+    n = len(items)
 
     # Top-K neighbors per item from the true blended distances (ties broken by
     # id so repeat calls stay byte-identical).
@@ -147,6 +149,7 @@ def get_knowledge_map(ctx: SidecarContext, _params) -> dict[str, Any]:
                 "facets": facet_count,
             },
             "stress": stress,
+            "facet_field": _facet_field(vault, repository),
         }
     )
 
@@ -242,7 +245,129 @@ def _cosine_distance(u: dict[str, float], v: dict[str, float]) -> float:
     return max(0.0, min(1.0, 1.0 - dot))
 
 
-def _concept_geodesics(vault, concepts: set[str]) -> dict[tuple[str, str], int | None]:
+def _vault_edge_tuples(vault) -> list[tuple[str, str, str]]:
+    """The loaded vault's semantic edges as ``(source, target, relation_type)``."""
+
+    return [(edge.source, edge.target, edge.relation_type) for edge in vault.edges]
+
+
+def _item_map_geometry(
+    vault, edges: list[tuple[str, str, str]]
+) -> tuple[list, dict[str, str | None], list[list[float]], list[tuple[float, float]], float]:
+    """Pure item-map geometry against an explicit semantic edge set.
+
+    Shared by ``get_knowledge_map`` (real edges) and ``preview_knowledge_map``
+    (hypothetical edges). Returns the sorted-id item list, each item's concept,
+    the blended distance matrix, the 2D MDS coordinates, and Kruskal stress-1.
+    Deterministic in ``vault`` + ``edges`` alone (edge order is irrelevant — BFS
+    hop counts are order-independent), so ``get_knowledge_map`` stays byte
+    identical on unchanged input.
+    """
+
+    item_ids = sorted(vault.practice_items)
+    items = [vault.practice_items[item_id] for item_id in item_ids]
+    vectors = [_facet_vector(item) for item in items]
+    concept_of: dict[str, str | None] = {
+        item.id: (lo.concept if (lo := vault.learning_object_for_item(item)) is not None else None)
+        for item in items
+    }
+    hops = _concept_geodesics(edges, {c for c in concept_of.values() if c is not None})
+    distances = _blended_distances(items, vectors, concept_of, hops)
+    coords, stress = _classical_mds(distances)
+    return items, concept_of, distances, coords, stress
+
+
+def _facet_field(vault, repository) -> list[dict[str, Any]]:
+    """Per-facet lock state for the knowledge field (padlock UI, §3.4).
+
+    ``locked``/``lock_sources`` come from a single ``identity_locks`` closure
+    pass over every registered facet — not a per-facet ``can_apply`` loop in the
+    handler. ``lock_sources`` are the distinct ``LockReason.source`` values.
+    """
+
+    locks = identity_locks(vault, repository)
+    field: list[dict[str, Any]] = []
+    for facet_id in sorted(vault.evidence_facets):
+        facet = vault.evidence_facets[facet_id]
+        reasons = locks.get(facet_id, [])
+        field.append(
+            {
+                "id": facet_id,
+                "title": facet.title,
+                "kind": facet.kind,
+                "status": facet.status,
+                "locked": bool(reasons),
+                "lock_sources": sorted({reason.source for reason in reasons}),
+            }
+        )
+    return field
+
+
+class PreviewEdge(ParamsModel):
+    source: str
+    target: str
+    relation_type: str
+
+
+class PreviewKnowledgeMapParams(ParamsModel):
+    added_edges: list[PreviewEdge] = Field(default_factory=list)
+    removed_edge_ids: list[str] = Field(default_factory=list)
+
+
+@method("preview_knowledge_map", PreviewKnowledgeMapParams)
+def preview_knowledge_map(ctx: SidecarContext, params: PreviewKnowledgeMapParams) -> dict[str, Any]:
+    """Item-map MDS against a hypothetical semantic edge set (§8 layer honesty).
+
+    Only the concept-geodesic term of the blended distance changes, so this
+    reruns the same ``_item_map_geometry`` pipeline as ``get_knowledge_map``
+    against ``current edges − removed + added``. Returns the recomputed
+    ``points``/``stress`` plus the unchanged ``baseline`` so the UI can draw
+    displacement without a second call. Added-edge endpoints must refer to
+    existing concepts; unknown ``removed_edge_ids`` are silently ignored.
+    """
+
+    vault, _repository = ctx.require_vault()
+
+    concept_ids = set(vault.concepts)
+    for edge in params.added_edges:
+        if edge.source not in concept_ids or edge.target not in concept_ids:
+            raise SidecarError(
+                "invalid_request",
+                f"Edge endpoint refers to an unknown concept: {edge.source} -> {edge.target}.",
+            )
+
+    removed = set(params.removed_edge_ids)
+    baseline_edges = _vault_edge_tuples(vault)
+    hypothetical_edges = [
+        (edge.source, edge.target, edge.relation_type)
+        for edge in vault.edges
+        if edge.id not in removed
+    ] + [(edge.source, edge.target, edge.relation_type) for edge in params.added_edges]
+
+    base_items, _bc, _bd, base_coords, base_stress = _item_map_geometry(vault, baseline_edges)
+    items, _c, _d, coords, stress = _item_map_geometry(vault, hypothetical_edges)
+
+    return versioned(
+        {
+            "points": [
+                {"id": item.id, "x": coords[i][0], "y": coords[i][1]}
+                for i, item in enumerate(items)
+            ],
+            "stress": stress,
+            "baseline": {
+                "points": [
+                    {"id": item.id, "x": base_coords[i][0], "y": base_coords[i][1]}
+                    for i, item in enumerate(base_items)
+                ],
+                "stress": base_stress,
+            },
+        }
+    )
+
+
+def _concept_geodesics(
+    edges: list[tuple[str, str, str]], concepts: set[str]
+) -> dict[tuple[str, str], int | None]:
     """BFS hop counts between concepts over undirected structural edges.
 
     ``None`` marks unreachable pairs (different components); the blend treats
@@ -250,11 +375,11 @@ def _concept_geodesics(vault, concepts: set[str]) -> dict[tuple[str, str], int |
     """
 
     adjacency: dict[str, set[str]] = {}
-    for edge in vault.edges:
-        if edge.relation_type not in _GRAPH_RELATIONS:
+    for source, target, relation_type in edges:
+        if relation_type not in _GRAPH_RELATIONS:
             continue
-        adjacency.setdefault(edge.source, set()).add(edge.target)
-        adjacency.setdefault(edge.target, set()).add(edge.source)
+        adjacency.setdefault(source, set()).add(target)
+        adjacency.setdefault(target, set()).add(source)
 
     hops: dict[tuple[str, str], int | None] = {}
     for start in concepts:

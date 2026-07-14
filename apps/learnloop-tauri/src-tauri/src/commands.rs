@@ -994,3 +994,56 @@ pub async fn end_probe_dialogue(
     )
     .await
 }
+
+#[tauri::command]
+pub async fn propose_graph_edits(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "propose_graph_edits", input).await
+}
+
+#[tauri::command]
+pub async fn queue_restructure_request(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "queue_restructure_request", input).await
+}
+
+#[tauri::command]
+pub async fn resolve_edge_direction(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "resolve_edge_direction", input).await
+}
+
+#[tauri::command]
+pub async fn get_facet_detail(
+    facet_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_facet_detail", json!({"facetId": facet_id})).await
+}
+
+#[tauri::command]
+pub async fn list_facets(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "list_facets", json!({})).await
+}
+
+#[tauri::command]
+pub async fn preview_knowledge_map(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "preview_knowledge_map", input).await
+}
+
+#[tauri::command]
+pub async fn preview_blueprint_readiness(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "preview_blueprint_readiness", input).await
+}

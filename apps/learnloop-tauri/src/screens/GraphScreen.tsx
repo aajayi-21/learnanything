@@ -6,13 +6,28 @@ import type {
   ConceptGraphNode,
   ConceptGraphSnapshot,
   GoalDto,
-  GoalReportSnapshot
+  GoalReportSnapshot,
+  KnowledgeMapPreviewDto
 } from "../api/dto";
 import { EntityLink } from "../components/ui";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
 import { masteryTone } from "../app/algoConfig";
 import { FacetRadarView } from "./FacetRadarScreen";
 import { KnowledgeMapView } from "./KnowledgeMapScreen";
+import {
+  compileEdits,
+  effectivePrereqEdges,
+  inferReorderEdits,
+  newPid,
+  previewInput,
+  resolvePending,
+  topoOrder,
+  type PendingEdit
+} from "../components/graphedit/pending";
+import { EdgePopover, RelationPicker } from "../components/graphedit/EditPopovers";
+import { PendingStrip } from "../components/graphedit/PendingStrip";
+import { GeometryPreview } from "../components/graphedit/GeometryPreview";
+import { SyllabusColumn, type ReorderPrompt } from "../components/graphedit/SyllabusColumn";
 
 const NODE_W = 200;
 const NODE_H = 36;
@@ -127,6 +142,15 @@ function edgePath(source: Position, target: Position): string {
   return `M ${sx} ${sy} L ${mid} ${sy} L ${mid} ${ty} L ${tx} ${ty}`;
 }
 
+// Center point between two nodes — used to anchor the edge popover and the
+// retire marker over an existing edge.
+function edgeMidpoint(source: Position, target: Position): Position {
+  return {
+    x: (source.x + target.x) / 2 + NODE_W / 2,
+    y: (source.y + target.y) / 2 + NODE_H / 2
+  };
+}
+
 type GraphView = "map" | "facets" | "knowledge";
 
 export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) => void; onError: (message: string) => void }) {
@@ -140,6 +164,52 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
   const [goal, setGoal] = useState<GoalDto | null>(null);
   const [goalReport, setGoalReport] = useState<GoalReportSnapshot | null>(null);
   const [goalError, setGoalError] = useState<string | null>(null);
+
+  // ── Edit mode ─────────────────────────────────────────────────────────────
+  const [editMode, setEditMode] = useState(false);
+  const [pending, setPending] = useState<PendingEdit[]>([]);
+  const [rationale, setRationale] = useState("");
+  // Edge-creation gesture: the armed source node, then a relation picker over the
+  // target. `edgePopover` is the flip/retype/retire menu for an existing edge.
+  const [armedSource, setArmedSource] = useState<string | null>(null);
+  const [relationPicker, setRelationPicker] = useState<{ source: string; target: string; x: number; y: number } | null>(null);
+  const [edgePopover, setEdgePopover] = useState<{ edge: ConceptGraphEdge; x: number; y: number } | null>(null);
+  // Filing state + per-item receipts.
+  const [filing, setFiling] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<{ batchId: string } | null>(null);
+  const [errorsByPid, setErrorsByPid] = useState<Map<string, string[]>>(new Map());
+  // Syllabus column + geometry preview.
+  const [syllabusCollapsed, setSyllabusCollapsed] = useState(false);
+  const [reorderPrompt, setReorderPrompt] = useState<ReorderPrompt | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [preview, setPreview] = useState<KnowledgeMapPreviewDto | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  const cancelGesture = () => {
+    setArmedSource(null);
+    setRelationPicker(null);
+    setEdgePopover(null);
+  };
+
+  // Stage a create edit (append). Update/delete edits are keyed by the live edge
+  // id, so a fresh gesture on the same edge replaces the earlier staged one.
+  const stageEdit = (edit: PendingEdit) => {
+    setConfirmation(null);
+    setPending((prev) => {
+      if (edit.op === "create") return [...prev, edit];
+      const filtered = prev.filter((p) => (p.op === "create" ? true : p.edgeId !== edit.edgeId));
+      return [...filtered, edit];
+    });
+  };
+
+  const removePending = (pid: string) => setPending((prev) => prev.filter((p) => p.pid !== pid));
+  const clearPending = () => {
+    setPending([]);
+    setErrorsByPid(new Map());
+    setReorderPrompt(null);
+  };
 
   // Lazily load the active goal + its at-risk report the first time the overlay
   // is switched on. Failures degrade to a dim legend note (never crash).
@@ -193,6 +263,85 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
     [snapshot]
   );
 
+  // Resolved pending state for ghost rendering, and the syllabus order derived
+  // from committed + pending prerequisite edges.
+  const resolved = useMemo(() => resolvePending(pending), [pending]);
+  const syllabusOrder = useMemo(() => {
+    if (!snapshot) return [] as string[];
+    return topoOrder(snapshot.concepts, effectivePrereqEdges(snapshot.edges, pending));
+  }, [snapshot, pending]);
+
+  const conceptTitle = useMemo(() => {
+    const map = new Map((snapshot?.concepts ?? []).map((c) => [c.id, c.title || c.id] as const));
+    return (id: string) => map.get(id) ?? id;
+  }, [snapshot]);
+
+  // File the staged batch through the one write path. All-valid → clear + confirm;
+  // any invalid item → keep pending and surface its errors inline (aligned by the
+  // order the edits were sent).
+  const fileEdits = () => {
+    if (!snapshot || pending.length === 0 || !rationale.trim() || filing) return;
+    setFiling(true);
+    setFileError(null);
+    setErrorsByPid(new Map());
+    const batch = [...pending];
+    api
+      .proposeGraphEdits({ rationale: rationale.trim(), edits: compileEdits(batch) })
+      .then((result) => {
+        const invalid = result.items.filter((item) => item.validationStatus === "invalid");
+        if (invalid.length > 0) {
+          const map = new Map<string, string[]>();
+          result.items.forEach((item, index) => {
+            const pid = batch[index]?.pid;
+            if (pid && item.validationErrors.length > 0) map.set(pid, item.validationErrors);
+          });
+          setErrorsByPid(map);
+          setFileError(`${invalid.length} item(s) rejected — fix or drop them, then re-file.`);
+          return;
+        }
+        setConfirmation({ batchId: result.batchId });
+        setPending([]);
+        setRationale("");
+        setErrorsByPid(new Map());
+        setPreviewOpen(false);
+      })
+      .catch((error) => setFileError((error as CommandError).message))
+      .finally(() => setFiling(false));
+  };
+
+  const runGeometryPreview = () => {
+    if (pending.length === 0) return;
+    setPreviewOpen(true);
+    setPreviewLoading(true);
+    setPreviewError(null);
+    api
+      .previewKnowledgeMap(previewInput(pending))
+      .then((dto) => setPreview(dto))
+      .catch((error) => setPreviewError((error as CommandError).message))
+      .finally(() => setPreviewLoading(false));
+  };
+
+  const handleReorderDrop = (movedId: string, fromIndex: number, toIndex: number) => {
+    if (!snapshot) return;
+    const { edits, error } = inferReorderEdits({
+      movedId,
+      fromIndex,
+      toIndex,
+      ordered: syllabusOrder,
+      edges: snapshot.edges,
+      pending
+    });
+    setReorderPrompt({ movedId, edits, error });
+  };
+
+  const confirmReorder = () => {
+    if (reorderPrompt) {
+      setConfirmation(null);
+      setPending((prev) => [...prev, ...reorderPrompt.edits]);
+    }
+    setReorderPrompt(null);
+  };
+
   // Per-concept goal status: a concept is in-scope if it's named in the goal's
   // facet scope or owns a learning object with an at-risk facet; "at risk" if any
   // owned LO has an at-risk (non-solid) facet, else "on track". Concepts outside
@@ -230,6 +379,20 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
     return () => window.removeEventListener("keydown", onKey);
   }, [order, selected, view]);
 
+  // Esc cancels an in-progress edit gesture (armed source, open picker/popover).
+  useEffect(() => {
+    if (!editMode) return;
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (armedSource || relationPicker || edgePopover) {
+        event.preventDefault();
+        cancelGesture();
+      }
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [editMode, armedSource, relationPicker, edgePopover]);
+
   const viewToggle = (
     <div
       style={{
@@ -260,6 +423,31 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
           {id === "map" ? "concept map" : id === "facets" ? "facet radar" : "knowledge map"}
         </button>
       ))}
+      {/* Edit mode is only meaningful on the concept-map view. */}
+      {view === "map" ? (
+        <>
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={() => {
+              setEditMode((on) => {
+                if (on) cancelGesture();
+                return !on;
+              });
+            }}
+            style={{
+              background: editMode ? "#241d12" : "transparent",
+              border: `1px solid ${editMode ? COLOR.amber : COLOR.border}`,
+              color: editMode ? COLOR.amber : COLOR.textDim,
+              font: "inherit",
+              padding: "3px 12px",
+              cursor: "pointer"
+            }}
+          >
+            {editMode ? "● edit mode" : "edit"}
+          </button>
+        </>
+      ) : null}
     </div>
   );
 
@@ -419,20 +607,121 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
                 const incidentHover = hovered != null && (edge.source === hovered || edge.target === hovered);
                 const incidentSelected = selected != null && (edge.source === selected || edge.target === selected);
                 const incident = incidentHover || incidentSelected;
+                // A pending retire/rewrite fades the committed edge to a ghost of
+                // its former self so the staged replacement reads clearly.
+                const isRetired = resolved.deletedById.has(edge.id);
+                const isUpdated = resolved.updatedById.has(edge.id);
+                const touched = isRetired || isUpdated;
                 return (
                   <path
                     key={edge.id}
                     d={edgePath(source, target)}
                     fill="none"
                     stroke={style.stroke}
-                    strokeWidth={incidentHover ? 2.2 : incident ? 1.8 : 1}
-                    strokeDasharray={style.dash}
-                    opacity={incidentHover ? 0.6 : incident ? 0.9 : hovered ? 0.15 : 0.45}
-                    markerEnd={edge.relationType === "confusable_with" ? undefined : `url(#${style.marker})`}
-                    style={incidentHover ? { filter: `drop-shadow(0 0 6px ${style.stroke})` } : undefined}
+                    strokeWidth={touched ? 1 : incidentHover ? 2.2 : incident ? 1.8 : 1}
+                    strokeDasharray={isRetired ? "2 3" : style.dash}
+                    opacity={touched ? 0.18 : incidentHover ? 0.6 : incident ? 0.9 : hovered ? 0.15 : 0.45}
+                    markerEnd={touched || edge.relationType === "confusable_with" ? undefined : `url(#${style.marker})`}
+                    style={incidentHover && !touched ? { filter: `drop-shadow(0 0 6px ${style.stroke})` } : undefined}
                   />
                 );
               })}
+
+              {/* Ghost overlays for pending edits: retire markers, rewritten edges,
+                  and freshly-created edges — all dashed so nothing looks committed. */}
+              {editMode
+                ? snapshot.edges
+                    .filter((edge) => resolved.deletedById.has(edge.id))
+                    .map((edge) => {
+                      const source = layout.positions[edge.source];
+                      const target = layout.positions[edge.target];
+                      if (!source || !target) return null;
+                      const mid = edgeMidpoint(source, target);
+                      return (
+                        <g key={`retire-${edge.id}`}>
+                          <line
+                            x1={source.x + NODE_W}
+                            y1={source.y + NODE_H / 2}
+                            x2={target.x}
+                            y2={target.y + NODE_H / 2}
+                            stroke={COLOR.red}
+                            strokeWidth={1.4}
+                            opacity={0.7}
+                          />
+                          <text x={mid.x} y={mid.y} fill={COLOR.red} fontSize={11} fontFamily={FONT_MONO} textAnchor="middle">
+                            ✕ retire
+                          </text>
+                        </g>
+                      );
+                    })
+                : null}
+              {editMode
+                ? [...resolved.updatedById.values()].map((up) => {
+                    const source = layout.positions[up.source];
+                    const target = layout.positions[up.target];
+                    if (!source || !target) return null;
+                    const style = relationStyle(up.relationType);
+                    return (
+                      <path
+                        key={`ghost-up-${up.pid}`}
+                        d={edgePath(source, target)}
+                        fill="none"
+                        stroke={style.stroke}
+                        strokeWidth={1.8}
+                        strokeDasharray="5 4"
+                        opacity={0.95}
+                        markerEnd={up.relationType === "confusable_with" ? undefined : `url(#${style.marker})`}
+                        style={{ filter: `drop-shadow(0 0 4px ${style.stroke})` }}
+                      />
+                    );
+                  })
+                : null}
+              {editMode
+                ? resolved.creates.map((create) => {
+                    const source = layout.positions[create.source];
+                    const target = layout.positions[create.target];
+                    if (!source || !target) return null;
+                    const style = relationStyle(create.relationType);
+                    return (
+                      <path
+                        key={`ghost-new-${create.pid}`}
+                        d={edgePath(source, target)}
+                        fill="none"
+                        stroke={style.stroke}
+                        strokeWidth={2}
+                        strokeDasharray="6 4"
+                        opacity={0.95}
+                        markerEnd={create.relationType === "confusable_with" ? undefined : `url(#${style.marker})`}
+                        style={{ filter: `drop-shadow(0 0 5px ${style.stroke})` }}
+                      />
+                    );
+                  })
+                : null}
+
+              {/* Wide invisible hit-paths so 1px edges are clickable in edit mode. */}
+              {editMode
+                ? snapshot.edges.map((edge) => {
+                    const source = layout.positions[edge.source];
+                    const target = layout.positions[edge.target];
+                    if (!source || !target) return null;
+                    return (
+                      <path
+                        key={`hit-${edge.id}`}
+                        d={edgePath(source, target)}
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={14}
+                        style={{ pointerEvents: "stroke", cursor: "pointer" }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const mid = edgeMidpoint(source, target);
+                          cancelGesture();
+                          setEdgePopover({ edge, x: mid.x + 10, y: mid.y });
+                        }}
+                      />
+                    );
+                  })
+                : null}
             </svg>
 
             {snapshot.concepts.map((concept) => {
@@ -446,14 +735,40 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
               // track), dim off-goal ones. Null when the overlay is off → no change.
               const gstat = goalScope?.status.get(concept.id) ?? null;
               const dimmed = goalScope != null && gstat == null;
+              const isArmed = armedSource === concept.id;
               const goalRing =
                 gstat === "atRisk" ? `0 0 0 2px ${COLOR.amber}` : gstat === "onTrack" ? `0 0 0 2px ${COLOR.green}` : null;
+              // In edit mode the armed source gets a cyan ring; a live target
+              // candidate (armed + hovered) previews the edge direction.
+              const armedRing = isArmed
+                ? `0 0 0 2px ${COLOR.cyan}`
+                : editMode && armedSource && isHovered
+                  ? `0 0 0 2px ${COLOR.green}`
+                  : null;
               const boxShadow =
-                [isSelected ? `0 0 0 1px ${COLOR.amber}` : null, goalRing].filter(Boolean).join(", ") || "none";
+                [isSelected ? `0 0 0 1px ${COLOR.amber}` : null, goalRing, armedRing].filter(Boolean).join(", ") || "none";
+              const onNodeClick = () => {
+                if (!editMode) {
+                  setSelected(concept.id);
+                  return;
+                }
+                setEdgePopover(null);
+                if (!armedSource) {
+                  setSelected(concept.id);
+                  setArmedSource(concept.id);
+                  setRelationPicker(null);
+                  return;
+                }
+                if (armedSource === concept.id) {
+                  setArmedSource(null);
+                  return;
+                }
+                setRelationPicker({ source: armedSource, target: concept.id, x: pos.x + NODE_W + 8, y: pos.y });
+              };
               return (
                 <div
                   key={concept.id}
-                  onClick={() => setSelected(concept.id)}
+                  onClick={onNodeClick}
                   onMouseEnter={() => setHovered(concept.id)}
                   onMouseLeave={() => setHovered(null)}
                   style={{
@@ -466,7 +781,7 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
                     alignItems: "center",
                     justifyContent: "space-between",
                     padding: "0 10px",
-                    border: `1px solid ${isSelected ? COLOR.amber : isHovered ? hoverAccent : isMisc ? COLOR.red : COLOR.borderStrong}`,
+                    border: `1px solid ${isArmed ? COLOR.cyan : isSelected ? COLOR.amber : isHovered ? hoverAccent : isMisc ? COLOR.red : COLOR.borderStrong}`,
                     background: isSelected ? "#241d12" : isHovered ? COLOR.bgElev : COLOR.bg,
                     color: isSelected ? COLOR.amber : isHovered ? hoverAccent : COLOR.text,
                     fontFamily: FONT_MONO,
@@ -488,8 +803,89 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
                 </div>
               );
             })}
+
+            {/* Edge-creation relation picker (over the chosen target). */}
+            {editMode && relationPicker ? (
+              <RelationPicker
+                x={relationPicker.x}
+                y={relationPicker.y}
+                sourceTitle={conceptTitle(relationPicker.source)}
+                targetTitle={conceptTitle(relationPicker.target)}
+                onPick={(relation: Relation) => {
+                  stageEdit({
+                    pid: newPid(),
+                    op: "create",
+                    source: relationPicker.source,
+                    target: relationPicker.target,
+                    relationType: relation
+                  });
+                  cancelGesture();
+                }}
+                onCancel={cancelGesture}
+              />
+            ) : null}
+
+            {/* Existing-edge flip / retype / retire popover. */}
+            {editMode && edgePopover ? (
+              <EdgePopover
+                x={edgePopover.x}
+                y={edgePopover.y}
+                sourceTitle={conceptTitle(edgePopover.edge.source)}
+                targetTitle={conceptTitle(edgePopover.edge.target)}
+                relationType={edgePopover.edge.relationType as Relation}
+                onFlip={() => {
+                  const edge = edgePopover.edge;
+                  stageEdit({
+                    pid: newPid(),
+                    op: "update",
+                    edgeId: edge.id,
+                    source: edge.target,
+                    target: edge.source,
+                    relationType: edge.relationType as Relation,
+                    kind: "flip"
+                  });
+                  setEdgePopover(null);
+                }}
+                onRetype={(relation: Relation) => {
+                  const edge = edgePopover.edge;
+                  stageEdit({
+                    pid: newPid(),
+                    op: "update",
+                    edgeId: edge.id,
+                    source: edge.source,
+                    target: edge.target,
+                    relationType: relation,
+                    kind: "retype"
+                  });
+                  setEdgePopover(null);
+                }}
+                onRetire={() => {
+                  const edge = edgePopover.edge;
+                  stageEdit({
+                    pid: newPid(),
+                    op: "delete",
+                    edgeId: edge.id,
+                    source: edge.source,
+                    target: edge.target,
+                    relationType: edge.relationType as Relation
+                  });
+                  setEdgePopover(null);
+                }}
+                onClose={() => setEdgePopover(null)}
+              />
+            ) : null}
           </div>
           </div>{/* end scrollable content */}
+
+          {/* Geometry-preview overlay (pending semantic edges → item-map shift). */}
+          {editMode && previewOpen ? (
+            <GeometryPreview
+              preview={preview}
+              loading={previewLoading}
+              error={previewError}
+              onClose={() => setPreviewOpen(false)}
+            />
+          ) : null}
           {/* Vignette overlay — last child so it paints above the scroll layer without a z-index war */}
           <div
             style={{
@@ -502,7 +898,38 @@ export function GraphScreen({ onInspect, onError }: { onInspect: (id: string) =>
         </div>
 
         <ConceptDetail concept={selectedConcept} edges={snapshot.edges} onInspect={onInspect} />
+
+        {editMode ? (
+          <SyllabusColumn
+            concepts={snapshot.concepts}
+            ordered={syllabusOrder}
+            conceptTitle={conceptTitle}
+            collapsed={syllabusCollapsed}
+            onToggleCollapse={() => setSyllabusCollapsed((c) => !c)}
+            onDrop={handleReorderDrop}
+            prompt={reorderPrompt}
+            onConfirm={confirmReorder}
+            onCancel={() => setReorderPrompt(null)}
+          />
+        ) : null}
       </div>
+
+      {editMode ? (
+        <PendingStrip
+          pending={pending}
+          conceptTitle={conceptTitle}
+          rationale={rationale}
+          onRationale={setRationale}
+          filing={filing}
+          onFile={fileEdits}
+          onPreview={runGeometryPreview}
+          onRemove={removePending}
+          onClear={clearPending}
+          errorsByPid={errorsByPid}
+          confirmation={confirmation}
+          fileError={fileError}
+        />
+      ) : null}
 
       <Legend counts={snapshot.counts} />
 

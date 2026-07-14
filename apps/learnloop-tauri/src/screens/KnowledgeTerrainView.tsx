@@ -108,12 +108,16 @@ export function KnowledgeTerrainView({
   points,
   selected,
   onSelect,
-  onInspect
+  onInspect,
+  lockedFacets
 }: {
   points: KnowledgeMapPoint[];
   selected: string | null;
   onSelect: (id: string) => void;
   onInspect: (id: string) => void;
+  /** Canonical ids of locked facets (§3.4); an item pin whose facets include one
+   *  gets a padlock ring. Missing/legacy items are treated as unlocked. */
+  lockedFacets?: Set<string>;
 }) {
   const { cam, onMouseDown, pauseDrift, dragging } = useOrbitCamera({ yaw: -0.62, pitch: 1.02 });
   const geometry = useMemo(() => buildGeometry(points), [points]);
@@ -208,13 +212,16 @@ export function KnowledgeTerrainView({
         const tone = point.mastery != null ? masteryTone(point.mastery, COLOR) : COLOR.textFaint;
         const fade = depthFade(top.depth, 0.55, 1);
         const size = (isActive ? 5.5 : 4.2) * top.k;
+        const lockedHere = lockedFacets ? point.facets.filter((f) => lockedFacets.has(f)) : [];
+        const isLocked = lockedHere.length > 0;
         const tooltip = [
           point.title,
           point.learningObjectId,
           point.mastery != null ? `mastery ${point.mastery.toFixed(2)}` : "mastery —",
           point.difficulty != null ? `difficulty ${point.difficulty.toFixed(2)}` : null,
           point.isProbe ? "probe" : null,
-          point.queued ? "queued" : null
+          point.queued ? "queued" : null,
+          isLocked ? `🔒 locked facet: ${lockedHere.join(", ")}` : null
         ]
           .filter(Boolean)
           .join("\n");
@@ -265,6 +272,30 @@ export function KnowledgeTerrainView({
                 opacity={0.85}
                 style={{ transition: EASE }}
               />
+            ) : null}
+            {/* padlock ring — this item exercises a locked (identity-pinned) facet */}
+            {isLocked ? (
+              <>
+                <circle
+                  cx={top.x}
+                  cy={top.y}
+                  r={size + 5}
+                  fill="none"
+                  stroke={COLOR.amber}
+                  strokeWidth={1}
+                  strokeDasharray="2 2"
+                  opacity={isActive ? 1 : 0.7}
+                />
+                <text
+                  x={top.x + size + 5}
+                  y={top.y - size - 3}
+                  fontSize={9}
+                  fill={COLOR.amber}
+                  opacity={isActive ? 1 : 0.8}
+                >
+                  🔒
+                </text>
+              </>
             ) : null}
             <title>{tooltip}</title>
           </g>

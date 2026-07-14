@@ -161,6 +161,10 @@ def learning_object_detail(vault: LoadedVault, repository: Repository, learning_
             "difficulty_prior": learning_object.difficulty_prior,
             "tags": learning_object.tags,
             "mastery": mastery_dto(repository, learning_object.id, vault),
+            # Raw on-disk requirement recipes (§7.2) so the recipe-tree editor can
+            # seed and round-trip the exact all_of/any_of/integration/modality
+            # structure; to_camel camelCases the keys (all_of -> allOf).
+            "blueprints": list(learning_object.blueprints),
         }
     )
 

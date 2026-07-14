@@ -237,7 +237,9 @@ export function FacetWellView({
   itemFilter,
   onSelect,
   onHoverItem,
-  onInspect
+  onInspect,
+  lockedFacets,
+  onInspectFacet
 }: {
   facets: FacetMasteryFacet[];
   selected: string | null;
@@ -246,6 +248,10 @@ export function FacetWellView({
   onSelect: (id: string) => void;
   onHoverItem: (id: string) => void;
   onInspect: (id: string) => void;
+  /** Canonical ids of locked facets (§3.4) → padlock ring on the bead. */
+  lockedFacets?: Set<string>;
+  /** Open the FacetInspector for a facet (bead / wire / label click). */
+  onInspectFacet?: (facetId: string) => void;
 }) {
   const { cam, onMouseDown, pauseDrift, dragging } = useOrbitCamera({ yaw: -0.5, pitch: 0.98 });
   const geometry = useMemo(() => buildGeometry(facets, itemFilter), [facets, itemFilter]);
@@ -339,7 +345,10 @@ export function FacetWellView({
                 onSelect(facet.facetId);
                 pauseDrift();
               }}
-              onClick={() => onSelect(facet.facetId)}
+              onClick={() => {
+                onSelect(facet.facetId);
+                onInspectFacet?.(facet.facetId);
+              }}
             />
           </g>
         );
@@ -395,6 +404,7 @@ export function FacetWellView({
         const p = proj(pos);
         const isActive = facet.facetId === selected;
         const hasGap = facet.stateCounts.knownGap > 0;
+        const locked = lockedFacets?.has(facet.facetId) ?? false;
         const anchor = Math.abs(p.x - CX) < 14 ? "middle" : p.x > CX ? "start" : "end";
         const lines = labelLines(facet.facetId);
         const LINE_H = 12;
@@ -409,7 +419,10 @@ export function FacetWellView({
               onSelect(facet.facetId);
               pauseDrift();
             }}
-            onClick={() => onSelect(facet.facetId)}
+            onClick={() => {
+              onSelect(facet.facetId);
+              onInspectFacet?.(facet.facetId);
+            }}
           >
             <text
               x={p.x}
@@ -435,7 +448,7 @@ export function FacetWellView({
               fill={isActive ? masteryTone(facet.mastery, COLOR) : COLOR.textFaint}
               style={{ transition: EASE }}
             >
-              {facet.mastery.toFixed(2)}
+              {facet.mastery.toFixed(2)}{locked ? " 🔒" : ""}
             </text>
           </g>
         );
@@ -447,25 +460,46 @@ export function FacetWellView({
           const facet = facets[marker.index];
           const tone = masteryTone(facet.mastery, COLOR);
           const isActive = facet.facetId === selected;
+          const locked = lockedFacets?.has(facet.facetId) ?? false;
           const size = (isActive ? 5 : 3.6) * marker.p.k;
           return (
-            <circle
+            <g
               key={`bead-${facet.facetId}`}
-              cx={marker.p.x}
-              cy={marker.p.y}
-              r={size}
-              fill={tone}
-              stroke={isActive ? COLOR.text : "transparent"}
-              strokeWidth={1}
-              opacity={depthFade(marker.p.depth, 0.65, 1)}
-              style={{ transition: EASE, cursor: "pointer" }}
+              style={{ cursor: "pointer" }}
               onMouseEnter={() => {
                 onSelect(facet.facetId);
                 pauseDrift();
               }}
+              onClick={() => {
+                onSelect(facet.facetId);
+                onInspectFacet?.(facet.facetId);
+              }}
             >
-              <title>{`${facet.facetId} · mastery ${facet.mastery.toFixed(2)} · ${facet.practiceItems.length} practice item${facet.practiceItems.length === 1 ? "" : "s"}`}</title>
-            </circle>
+              {locked ? (
+                <circle
+                  cx={marker.p.x}
+                  cy={marker.p.y}
+                  r={size + 3}
+                  fill="none"
+                  stroke={COLOR.amber}
+                  strokeWidth={1}
+                  strokeDasharray="2 2"
+                  opacity={isActive ? 1 : 0.75}
+                />
+              ) : null}
+              <circle
+                cx={marker.p.x}
+                cy={marker.p.y}
+                r={size}
+                fill={tone}
+                stroke={isActive ? COLOR.text : "transparent"}
+                strokeWidth={1}
+                opacity={depthFade(marker.p.depth, 0.65, 1)}
+                style={{ transition: EASE }}
+              >
+                <title>{`${facet.facetId} · mastery ${facet.mastery.toFixed(2)} · ${facet.practiceItems.length} practice item${facet.practiceItems.length === 1 ? "" : "s"}${locked ? "\n🔒 locked facet" : ""}`}</title>
+              </circle>
+            </g>
           );
         }
         const item = geometry.items[marker.index];

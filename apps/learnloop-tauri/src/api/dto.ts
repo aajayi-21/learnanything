@@ -106,12 +106,27 @@ export interface KnowledgeMapPoint {
   neighbors: Array<{ id: string; distance: number }>;
 }
 
+/** One registered evidence facet with its padlock state (§3.4), carried on the
+ *  knowledge map alongside the item points so the knowledge field can render a
+ *  lock glyph before any gesture. `lockSources` are the distinct
+ *  `LockReason.source` values driving the lock. */
+export interface KnowledgeMapFacetFieldEntry {
+  id: string;
+  title: string;
+  kind: string;
+  status: string;
+  locked: boolean;
+  lockSources: string[];
+}
+
 export interface KnowledgeMapSnapshot {
   version: number;
   points: KnowledgeMapPoint[];
   counts: { items: number; learningObjects: number; concepts: number; facets: number };
   /** Kruskal stress-1 of the 2D embedding — how approximate the map is. */
   stress: number;
+  /** Per-facet lock state for the knowledge field padlock UI (§3.4). */
+  facetField: KnowledgeMapFacetFieldEntry[];
 }
 
 export interface KnowledgeHistoryAttempt {
@@ -967,6 +982,10 @@ export interface LearningObjectDetail {
   difficultyPrior: number | null;
   tags: string[];
   mastery: MasteryDto | null;
+  // Raw on-disk requirement recipes (§7.2) — the editable source of readiness,
+  // distinct from the readiness *projection* in LoReadinessDto. Absent on legacy
+  // LOs that predate blueprints. See LoBlueprintDto (graph-editor section).
+  blueprints?: LoBlueprintDto[];
 }
 
 export interface CommandError {
@@ -2380,4 +2399,317 @@ export interface ExamReadinessReportDto {
    *  fraction — reported side by side, never blended. */
   predictedScore: { mean: number; variance: number; std: number } | null;
   demonstratedScore: number | null;
+}
+
+// ── Graph / knowledge-map editor (spec §8 three graphs, §12 mutation contract) ─
+//
+// One write path: every user edit compiles to items in the existing proposals
+// machinery (provider "user", purpose "graph_editor"). Preview endpoints are
+// pure reads. Method names: proposeGraphEdits, queueRestructureRequest,
+// resolveEdgeDirection, getFacetDetail, listFacets, previewKnowledgeMap,
+// previewBlueprintReadiness.
+
+export type GraphEditItemType =
+  | "concept_edge"
+  | "learning_object"
+  | "task_blueprint"
+  | "concept";
+
+export type GraphEditOperation = "create" | "update" | "delete";
+
+/** One edit in a graph-editor batch. `payload` is the edited entity in its
+ *  on-disk YAML shape; `targetEntityId` is required for update/delete. */
+export interface GraphEditInput {
+  itemType: GraphEditItemType;
+  operation: GraphEditOperation;
+  payload: Record<string, unknown>;
+  targetEntityId: string | null;
+}
+
+export interface ProposeGraphEditsInput {
+  rationale: string;
+  edits: GraphEditInput[];
+}
+
+/** The compact per-item receipt returned alongside the refreshed inbox. Note
+ *  `operation` is the proposal-vocabulary operation — the editor's "delete"
+ *  compiles to "deactivate". */
+export interface GraphEditItemDto {
+  id: string;
+  clientItemId: string | null;
+  itemType: string;
+  operation: string;
+  decision: ProposalDecision;
+  validationStatus: "valid" | "warning" | "invalid";
+  validationErrors: string[];
+  targetEntityId: string | null;
+}
+
+/** propose_graph_edits: the refreshed proposals inbox (one new pending batch)
+ *  plus this batch's id and its item receipts. */
+export interface ProposeGraphEditsResult extends ProposalsSnapshot {
+  batchId: string;
+  items: GraphEditItemDto[];
+}
+
+export interface QueueRestructureRequestInput {
+  facetIds: string[];
+  requestedOperation: "merge" | "split";
+  rationale: string;
+}
+
+/** A durable restructure-intent record for locked facets (spec §17 machinery
+ *  does not exist yet — this only queues intent, surfaced in the maintenance
+ *  feed). `lockedFacetIds` is the subset of `facetIds` actually locked. */
+export interface RestructureRequestDto {
+  needId: string;
+  subjectId: string;
+  facetIds: string[];
+  lockedFacetIds: string[];
+  requestedOperation: "merge" | "split";
+  rationale: string;
+  status: string;
+}
+
+export interface QueueRestructureRequestResult {
+  version: number;
+  request: RestructureRequestDto;
+}
+
+export type EdgeDirectionResolution = "keep" | "flip" | "retype_related" | "retire";
+
+export interface ResolveEdgeDirectionInput {
+  edgeId: string;
+  resolution: EdgeDirectionResolution;
+  rationale: string;
+}
+
+/** The outcome of resolving an ambiguous-direction notice. `keep` files no edit
+ *  (`batchId` null, `filedEdit` false); the others compile a concept_edge edit.
+ *  `resolvedNoticeIds` are the maintenance notices marked resolved. */
+export interface EdgeDirectionResolutionDto {
+  edgeId: string;
+  resolution: EdgeDirectionResolution;
+  batchId: string | null;
+  filedEdit: boolean;
+  items: GraphEditItemDto[];
+  resolvedNoticeIds: string[];
+}
+
+/** resolve_edge_direction: the refreshed proposals inbox plus the resolution. */
+export interface ResolveEdgeDirectionResult extends ProposalsSnapshot {
+  resolution: EdgeDirectionResolutionDto;
+}
+
+// -- get_facet_detail (FacetInspector panel, §9.6) ---------------------------
+
+export interface FacetDetailContractDto {
+  id: string;
+  title: string;
+  kind: string;
+  claim: string | null;
+  preconditions: string[];
+  positiveExamples: string[];
+  negativeExamples: string[];
+  nonGoals: string[];
+  errorSignatures: string[];
+  aliases: string[];
+  status: string;
+}
+
+export interface FacetLockReasonDto {
+  source: string;
+  detail: string;
+}
+
+export interface FacetLockDto {
+  locked: boolean;
+  reasons: FacetLockReasonDto[];
+}
+
+/** One blueprint-recipe component that references the facet, across every LO. */
+export interface FacetMembershipRowDto {
+  learningObjectId: string;
+  loTitle: string;
+  blueprintId: string;
+  recipeId: string;
+  capability: string;
+  modality: string;
+  role: "all_of" | "any_of" | "integration";
+}
+
+export interface FacetCapabilityLedgerRowDto {
+  capability: string;
+  directPositiveMass: number;
+  directNegativeMass: number;
+  certificationCredit: number;
+  /** capability-matched certification credit > 0. */
+  demonstrated: boolean;
+}
+
+/** `ready` blends LO mastery with accrued facet recall evidence; `readyGhost`
+ *  is the mastery-only prior (evidence removed). Both null when no LO exercises
+ *  the facet. */
+export interface FacetEvidenceDto {
+  ready: number | null;
+  readyGhost: number | null;
+  evidenceMass: number;
+  capabilityLedger: FacetCapabilityLedgerRowDto[];
+}
+
+export interface FacetDetailDto {
+  version: number;
+  facet: FacetDetailContractDto;
+  lock: FacetLockDto;
+  membership: FacetMembershipRowDto[];
+  evidence: FacetEvidenceDto;
+  /** LOs beyond the first that touch this facet (cross-links). */
+  sharedWith: string[];
+}
+
+// -- list_facets (autocomplete pickers) --------------------------------------
+
+export interface FacetSummaryDto {
+  id: string;
+  title: string;
+  kind: string;
+  status: string;
+  locked: boolean;
+}
+
+export interface FacetListDto {
+  version: number;
+  facets: FacetSummaryDto[];
+}
+
+// -- preview_knowledge_map (geometry displacement, §8 layer honesty) ----------
+
+export interface PreviewEdgeInput {
+  source: string;
+  target: string;
+  relationType: string;
+}
+
+export interface PreviewKnowledgeMapInput {
+  addedEdges: PreviewEdgeInput[];
+  removedEdgeIds: string[];
+}
+
+export interface KnowledgeMapPreviewPoint {
+  id: string;
+  x: number;
+  y: number;
+}
+
+/** Recomputed item-map MDS against a hypothetical edge set, plus the unchanged
+ *  `baseline` so the UI can draw displacement without a second call. */
+export interface KnowledgeMapPreviewDto {
+  version: number;
+  points: KnowledgeMapPreviewPoint[];
+  stress: number;
+  baseline: { points: KnowledgeMapPreviewPoint[]; stress: number };
+}
+
+// -- preview_blueprint_readiness (recipe-tree blast radius, §9.2) -------------
+
+export interface PreviewBlueprintReadinessInput {
+  learningObjectId: string;
+  /** Edited blueprints in the LO YAML shape (list of blueprint dicts). */
+  blueprints: Record<string, unknown>[];
+}
+
+/** `bottleneck` is the gating component of the best recipe (ComponentReadinessDto). */
+export interface BlueprintReadinessSummaryDto {
+  readiness: number | null;
+  bottleneck: ComponentReadinessDto | null;
+}
+
+export interface BlueprintReadinessPreviewDto {
+  version: number;
+  current: BlueprintReadinessSummaryDto;
+  proposed: BlueprintReadinessSummaryDto;
+  identifiabilityWarnings: string[];
+  affectedGoals: Array<{ goalId: string; title: string }>;
+}
+
+// -- Graph-editor maintenance notices ----------------------------------------
+//
+// MaintenanceNoticeDto.noticeType is an open string and `detail` is
+// Record<string, unknown> | null, so these are not a closed union to extend.
+// These interfaces type the `detail` payloads (produced by
+// services/maintenance_feed.py) for the two graph-editor notice kinds; cast
+// `notice.detail` to them when `noticeType` matches.
+
+export type GraphEditorNoticeType = "ambiguous_edge_direction" | "restructure_request";
+
+/** `detail` payload of an `ambiguous_edge_direction` notice. `evidence` is
+ *  attempt-ordering stats on the target's items before vs after the first
+ *  correct source attempt — null (omitted, never fabricated) on sparse data. */
+export interface AmbiguousEdgeDirectionDetail {
+  edgeId: string | null;
+  reason: "bidirectional" | "cycle" | "proposed";
+  relationType: string;
+  sourceConcept: { id: string; title: string };
+  targetConcept: { id: string; title: string };
+  rationale: string | null;
+  evidence: {
+    firstCorrectSourceAt: string;
+    targetSuccessBefore: number;
+    targetSuccessAfter: number;
+    targetAttemptsBefore: number;
+    targetAttemptsAfter: number;
+  } | null;
+  resolutionOptions: EdgeDirectionResolution[];
+  proposalItemId: string | null;
+}
+
+/** `detail` payload of a `restructure_request` notice (queued locked-facet intent). */
+export interface RestructureRequestDetail {
+  facetIds: string[];
+  operation: "merge" | "split";
+  rationale: string | null;
+}
+
+// -- Raw on-disk blueprints (recipe-tree editor source shape) -----------------
+//
+// Exposed on LearningObjectDetail.blueprints so the recipe editor can seed and
+// round-trip the EXACT on-disk recipe structure (all_of / any_of / integration
+// / modality) — the readiness projection (LoReadinessDto) flattens these and
+// drops the role distinction, so it cannot reconstruct the YAML shape. Keys are
+// camelCased by the sidecar's to_camel; when filing edits back, the editor
+// re-serializes to the snake_case YAML shape the write path expects.
+
+/** Closed capability vocabulary (§7.2). */
+export type RecipeCapability =
+  | "retrieval"
+  | "schema_interpretation"
+  | "procedure_execution"
+  | "method_selection"
+  | "coordination";
+
+/** Requirement modality (§8.2). */
+export type RecipeModality =
+  | "hard"
+  | "path_specific"
+  | "facilitating"
+  | "instructional_order";
+
+export interface RecipeComponentDto {
+  facet: string;
+  capability: string;
+  modality: string;
+}
+
+export interface BlueprintRecipeDto {
+  id: string;
+  composition: string;
+  allOf: RecipeComponentDto[];
+  anyOf: RecipeComponentDto[];
+  integration: RecipeComponentDto | null;
+}
+
+export interface LoBlueprintDto {
+  id: string;
+  weight: number;
+  recipes: BlueprintRecipeDto[];
 }
