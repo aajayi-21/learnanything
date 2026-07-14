@@ -28,6 +28,11 @@ _LEGACY_JOB_TYPES = ("legacy_ingest", "exam_ingest")
 _ACTIVE_STATUSES = {"queued", "running", "waiting_for_input"}
 _RECENT_LIMIT = 30
 
+# Quick-add build batches drain ahead of bulk import/inventory batches (§1). The
+# drain orders by batch priority DESC first, so anything above the default 0
+# jumps the queue between checkpoints. Bulk batches stay at 0.
+QUICK_ADD_PRIORITY = 100
+
 
 class ActiveIngestJobError(RuntimeError):
     def __init__(self, job_id: str) -> None:
@@ -160,6 +165,7 @@ class DurableIngestJobs:
         subject_id: str | None = None,
         inventory: bool = False,
         estimate: dict[str, Any] | None = None,
+        priority: int = 0,
     ) -> str:
         """Enqueue an Import (or Import & inventory) batch (§6.1). One import job
         per source; when ``inventory`` is set, a dependent inventory job is queued
@@ -179,7 +185,7 @@ class DurableIngestJobs:
             if inventory:
                 specs.append(JobSpec("inventory", {"source": source}, depends_on=(import_index,)))
         workflow = "import_inventory" if inventory else "import"
-        batch_id = runner.enqueue_batch(workflow, specs, subject_id=subject_id)
+        batch_id = runner.enqueue_batch(workflow, specs, subject_id=subject_id, priority=priority)
         self._ensure_worker()
         return batch_id
 
@@ -223,6 +229,7 @@ class DurableIngestJobs:
         subject_id: str | None = None,
         source_set_id: str | None = None,
         input_budget_tokens: int | None = None,
+        priority: int = 0,
     ) -> str:
         """Enqueue a role-aware unit-inventory batch (§7). Cached units cost zero
         tokens; only semantic-hash-changed units re-inventory."""
@@ -236,6 +243,46 @@ class DurableIngestJobs:
             [JobSpec("inventory", payload)],
             subject_id=subject_id,
             source_set_id=source_set_id,
+            priority=priority,
+        )
+        self._ensure_worker()
+        return batch_id
+
+    def enqueue_quick_add_build(
+        self,
+        *,
+        extraction_id: str,
+        units: list[dict[str, Any]],
+        source_set_id: str,
+        subject_id: str | None = None,
+        brief: dict[str, Any] | None = None,
+        mode: str = "auto",
+        input_budget_tokens: int | None = None,
+        priority: int = QUICK_ADD_PRIORITY,
+    ) -> str:
+        """Enqueue the Quick-add build batch (§1): inventory(selected units) then
+        bootstrap_synthesis over the freshly-created source set, as one batch that
+        drains ahead of bulk work. The synthesis job depends on the inventory job,
+        so gates only run once the selected units carry inventories."""
+
+        runner = self._require_runner()
+        inventory_payload: dict[str, Any] = {"extraction_id": extraction_id, "units": units}
+        if input_budget_tokens is not None:
+            inventory_payload["input_budget_tokens"] = input_budget_tokens
+        synthesis_payload: dict[str, Any] = {
+            "source_set_id": source_set_id,
+            "brief": dict(brief or {}),
+            "mode": mode,
+        }
+        batch_id = runner.enqueue_batch(
+            "bootstrap_synthesis",
+            [
+                JobSpec("inventory", inventory_payload),
+                JobSpec("bootstrap_synthesis", synthesis_payload, depends_on=(0,)),
+            ],
+            subject_id=subject_id,
+            source_set_id=source_set_id,
+            priority=priority,
         )
         self._ensure_worker()
         return batch_id

@@ -476,11 +476,13 @@ function splitFrontmatter(raw: string): { frontmatter: string | null; body: stri
 export function IngestScreen({
   jobId,
   onJobIdChange,
-  onProceedToPropose
+  onProceedToPropose,
+  onCreateStudyMap
 }: {
   jobId: string | null;
   onJobIdChange: (jobId: string | null) => void;
   onProceedToPropose: (patchId: string) => void;
+  onCreateStudyMap?: () => void;
 }) {
   // A running legacy job forces the Add-source view so its progress stays visible.
   const [view, setView] = useState<IngestView>(jobId ? "add" : "library");
@@ -517,6 +519,7 @@ export function IngestScreen({
             setView("batches");
           }}
           onOpenOutline={(card) => setOutlineCard(card)}
+          onCreateStudyMap={onCreateStudyMap}
         />
       )}
       {view === "batches" && <BatchProgressView selectedBatchId={selectedBatchId} onSelect={setSelectedBatchId} />}

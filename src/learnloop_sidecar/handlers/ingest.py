@@ -486,6 +486,89 @@ def create_study_map(ctx: SidecarContext, params: CreateStudyMapInput) -> dict[s
     return versioned({"studyMap": result.as_dict()})
 
 
+class PlanQuickAddInput(ParamsModel):
+    source: str
+    subject_id: str | None = None
+    brief: dict[str, Any] = {}
+
+
+class ConfirmQuickAddInput(ParamsModel):
+    source: str
+    subject_id: str
+    brief: dict[str, Any] = {}
+    role_override: str | None = None
+
+
+@method("plan_quick_add", PlanQuickAddInput)
+def plan_quick_add_rpc(ctx: SidecarContext, params: PlanQuickAddInput) -> dict[str, Any]:
+    """Quick add step 1 (§1): the single-confirmation plan for an imported source.
+
+    Pure — reads the extracted outline, ToC-selects the relevant scope, suggests a
+    role, fills a default brief, and estimates tokens. ``quick_add_requires_import``
+    (retryable) means the source must be imported first."""
+
+    from learnloop.services.quick_add import QuickAddError, plan_quick_add
+
+    vault, repository = ctx.require_vault()
+    if params.subject_id is not None and params.subject_id not in vault.subjects:
+        raise SidecarError("unknown_subject", f"Subject '{params.subject_id}' does not exist.")
+    try:
+        plan = plan_quick_add(
+            repository,
+            vault.config,
+            vault,
+            params.source.strip(),
+            subject_id=params.subject_id,
+            brief_overrides=dict(params.brief or {}),
+        )
+    except QuickAddError as exc:
+        raise SidecarError(
+            exc.code,
+            str(exc),
+            details=exc.details,
+            retryable=exc.code == "quick_add_requires_import",
+        ) from exc
+    return versioned({"plan": plan.as_dict()})
+
+
+@method("confirm_quick_add", ConfirmQuickAddInput)
+def confirm_quick_add_rpc(ctx: SidecarContext, params: ConfirmQuickAddInput) -> dict[str, Any]:
+    """Quick add step 2 (§1): the post-confirmation step. Re-plans deterministically
+    (honouring an edited role/brief), creates the source set, and enqueues the
+    priority [inventory(selected) -> bootstrap_synthesis] build batch."""
+
+    from learnloop.services.quick_add import QuickAddError, enqueue_quick_add, plan_quick_add
+
+    vault, repository = ctx.require_vault()
+    if params.subject_id not in vault.subjects:
+        raise SidecarError("unknown_subject", f"Subject '{params.subject_id}' does not exist.")
+    try:
+        plan = plan_quick_add(
+            repository,
+            vault.config,
+            vault,
+            params.source.strip(),
+            subject_id=params.subject_id,
+            brief_overrides=dict(params.brief or {}),
+        )
+        result = enqueue_quick_add(vault, ctx.ingest_jobs, plan, role_override=params.role_override)
+    except QuickAddError as exc:
+        raise SidecarError(
+            exc.code,
+            str(exc),
+            details=exc.details,
+            retryable=exc.code == "quick_add_requires_import",
+        ) from exc
+    ctx.reload(maintenance=False)
+    return versioned(
+        {
+            "quickAdd": result,
+            "batch": ctx.ingest_jobs.get_batch(result["batch_id"]),
+            "confirmation": plan.confirmation(),
+        }
+    )
+
+
 @method("start_inventory", StartInventoryInput)
 def start_inventory(ctx: SidecarContext, params: StartInventoryInput) -> dict[str, Any]:
     """Enqueue a role-aware unit-inventory batch (§7). Cache hits cost zero tokens."""

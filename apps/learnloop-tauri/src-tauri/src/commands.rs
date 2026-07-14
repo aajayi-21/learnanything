@@ -517,6 +517,46 @@ pub async fn get_entity_provenance(
 }
 
 #[tauri::command]
+pub async fn plan_quick_add(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "plan_quick_add", input).await
+}
+
+#[tauri::command]
+pub async fn confirm_quick_add(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "confirm_quick_add", input).await
+}
+
+#[tauri::command]
+pub async fn get_span_view(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_span_view", input).await
+}
+
+#[tauri::command]
+pub async fn get_subject_registry(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_subject_registry", input).await
+}
+
+#[tauri::command]
+pub async fn propose_facet_merge(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "propose_facet_merge", input).await
+}
+
+#[tauri::command]
 pub async fn accept_proposal_items(
     input: Value,
     sidecar: State<'_, SidecarManager>,

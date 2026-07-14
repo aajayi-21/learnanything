@@ -30,16 +30,28 @@ function truncate(value: string, max = 12): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
+// A block_span_v1 locator is stored as "span:<span_id>"; Open-in-source needs
+// the bare span id + the extraction it belongs to.
+function spanFromLocator(locator: string | null): string | null {
+  if (!locator) return null;
+  const match = /^span:(.+)$/.exec(locator.trim());
+  return match ? match[1] : null;
+}
+
 function SourceRow({
   link,
   isAuthority,
-  overrideChip
+  overrideChip,
+  onOpenSource
 }: {
   link: EntitySourceLink;
   isAuthority?: boolean;
   overrideChip?: { label: string; color: PillColor };
+  onOpenSource?: (extractionId: string, spanId: string) => void;
 }) {
   const chip = overrideChip ?? relationChip(link.relation);
+  const spanId = spanFromLocator(link.locator);
+  const canOpen = Boolean(onOpenSource && link.extractionId && spanId);
   return (
     <div
       style={{
@@ -64,6 +76,21 @@ function SourceRow({
       {link.sourceId ? (
         <Faint style={{ marginLeft: "auto" }}>{truncate(link.sourceId, 18)}</Faint>
       ) : null}
+      {canOpen ? (
+        <span
+          onClick={() => onOpenSource!(link.extractionId as string, spanId as string)}
+          title="Open in source"
+          style={{
+            marginLeft: link.sourceId ? 8 : "auto",
+            color: COLOR.amberLink,
+            cursor: "pointer",
+            fontFamily: FONT_MONO,
+            fontSize: 11
+          }}
+        >
+          open ↗
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -83,11 +110,13 @@ function Section({ title, count, children }: { title: string; count?: number; ch
 export function ProvenancePanel({
   entityType,
   entityId,
-  onClose
+  onClose,
+  onOpenSource
 }: {
   entityType: string;
   entityId: string;
   onClose?: () => void;
+  onOpenSource?: (extractionId: string, spanId: string) => void;
 }) {
   const [provenance, setProvenance] = useState<EntityProvenance | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -160,7 +189,7 @@ export function ProvenancePanel({
             {provenance.semanticSources.length > 0 ? (
               <div style={{ display: "grid", gap: 6 }}>
                 {provenance.semanticSources.map((link) => (
-                  <SourceRow key={link.id} link={link} isAuthority={link.id === authorityId} />
+                  <SourceRow key={link.id} link={link} isAuthority={link.id === authorityId} onOpenSource={onOpenSource} />
                 ))}
               </div>
             ) : (
@@ -177,6 +206,7 @@ export function ProvenancePanel({
                     key={link.id}
                     link={link}
                     overrideChip={{ label: "assessment", color: "amber" }}
+                    onOpenSource={onOpenSource}
                   />
                 ))}
               </div>

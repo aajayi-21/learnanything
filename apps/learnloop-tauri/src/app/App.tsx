@@ -15,9 +15,20 @@ import { IngestScreen } from "../screens/IngestScreen";
 import { LibraryScreen } from "../screens/LibraryScreen";
 import { PracticeScreen } from "../screens/PracticeScreen";
 import { ProposalsScreen } from "../screens/ProposalsScreen";
+import { RegistryReviewScreen } from "../screens/RegistryReviewScreen";
 import { StartScreen } from "../screens/StartScreen";
 import { TodayScreen } from "../screens/TodayScreen";
+import { OpenInSource } from "../components/OpenInSource";
+import { QuickAddDialog } from "../components/QuickAddDialog";
 import { setAlgoConfig } from "./algoConfig";
+
+type OpenSourceTarget = {
+  extractionId: string;
+  spanId: string;
+  context?: string;
+  entityType?: string | null;
+  entityId?: string | null;
+};
 
 type TodayStage = "queue" | "practice" | "feedback" | "blockReview";
 
@@ -25,6 +36,10 @@ export function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [tab, setTab] = useState<TopTab>("start");
+  // Registry review (§5.7) + Open-in-source (§9.2) + Quick add (§1) surfaces.
+  const [registrySubjectId, setRegistrySubjectId] = useState<string | null>(null);
+  const [openSource, setOpenSource] = useState<OpenSourceTarget | null>(null);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [todayStage, setTodayStage] = useState<TodayStage>("queue");
   const [practiceItemId, setPracticeItemId] = useState<string | null>(null);
   // The current practice item is a primed retry (opened from the feedback
@@ -153,6 +168,10 @@ export function App() {
       teachBack: checkpoint.teachBack ?? null
     };
   }, [session, practiceItemId, localDraft]);
+  const subjectOptions = useMemo(
+    () => (snapshot?.vault?.subjects ?? []).map((id) => ({ id, title: id })),
+    [snapshot?.vault?.subjects]
+  );
   const manualGrading = snapshot?.health.ai?.manualGrading ?? false;
   // In manual mode the sidecar reports ready=true (it's an intentional choice,
   // not an outage) — but practice screens must still start in self-grade mode.
@@ -458,6 +477,7 @@ export function App() {
           jobId={ingestJobId}
           onJobIdChange={setIngestJobId}
           onProceedToPropose={gotoProposalBatch}
+          onCreateStudyMap={() => setQuickAddOpen(true)}
         />
       );
     }
@@ -488,6 +508,18 @@ export function App() {
         />
       );
     }
+    if (tab === "registry") {
+      return (
+        <RegistryReviewScreen
+          subjectId={registrySubjectId}
+          subjects={subjectOptions}
+          onSelectSubject={setRegistrySubjectId}
+          onOpenSource={(extractionId, spanId, entityType, entityId) =>
+            setOpenSource({ extractionId, spanId, context: "registry_review", entityType, entityId })
+          }
+        />
+      );
+    }
     return <EmptyPlaceholder title={tab} />;
   }
 
@@ -514,6 +546,29 @@ export function App() {
         onError={onError}
       />
       <AskOverlay target={askTarget} onClose={() => setAskTarget(null)} onToast={setToast} />
+      {openSource ? (
+        <OpenInSource
+          extractionId={openSource.extractionId}
+          spanId={openSource.spanId}
+          context={openSource.context}
+          entityType={openSource.entityType}
+          entityId={openSource.entityId}
+          onClose={() => setOpenSource(null)}
+        />
+      ) : null}
+      {quickAddOpen ? (
+        <QuickAddDialog
+          subjects={subjectOptions}
+          defaultSubjectId={registrySubjectId ?? subjectOptions[0]?.id ?? null}
+          onClose={() => setQuickAddOpen(false)}
+          onEnqueued={() => {
+            setQuickAddOpen(false);
+            setIngestJobId(null);
+            setTab("ingest");
+            setToast("Study map building — track it in Ingest");
+          }}
+        />
+      ) : null}
       <SessionFinishHud summary={finishSummary} onDismiss={() => setFinishSummary(null)} />
       <CommandPalette
         open={paletteOpen}

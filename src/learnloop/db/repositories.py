@@ -1856,6 +1856,81 @@ class Repository:
             connection.commit()
         return event_id
 
+    def insert_source_exposure_event(
+        self, event: Mapping[str, Any], *, clock: Clock | None = None
+    ) -> str:
+        """Record one Open-in-source view (§9.2). Called on every span view."""
+
+        event_id = str(event.get("id") or new_ulid())
+        now = event.get("created_at") or utc_now_iso(clock)
+        section_path = event.get("section_path") or []
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO source_exposure_events(
+                  id, context, extraction_id, span_id, revision_id, source_id,
+                  entity_type, entity_id, page, locator, section_path_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    event.get("context") or "other",
+                    event["extraction_id"],
+                    event["span_id"],
+                    event.get("revision_id"),
+                    event.get("source_id"),
+                    event.get("entity_type"),
+                    event.get("entity_id"),
+                    event.get("page"),
+                    event.get("locator"),
+                    _json(list(section_path)),
+                    now,
+                ),
+            )
+            connection.commit()
+        return event_id
+
+    def source_exposure_events(
+        self,
+        *,
+        extraction_id: str | None = None,
+        span_id: str | None = None,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if extraction_id is not None:
+            clauses.append("extraction_id = ?")
+            params.append(extraction_id)
+        if span_id is not None:
+            clauses.append("span_id = ?")
+            params.append(span_id)
+        if entity_type is not None:
+            clauses.append("entity_type = ?")
+            params.append(entity_type)
+        if entity_id is not None:
+            clauses.append("entity_id = ?")
+            params.append(entity_id)
+        query = "SELECT * FROM source_exposure_events"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self.connection() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            raw = data.pop("section_path_json", None)
+            data["section_path"] = json.loads(raw) if raw else []
+            events.append(data)
+        return events
+
     def update_question_event_answer(
         self,
         event_id: str,
@@ -8058,6 +8133,7 @@ class Repository:
         source_set_id: str | None = None,
         payload_schema_version: int = 1,
         status: str = "queued",
+        priority: int = 0,
         clock: Clock | None = None,
     ) -> None:
         now = utc_now_iso(clock)
@@ -8066,11 +8142,11 @@ class Repository:
                 """
                 INSERT INTO ingest_batches(
                   id, workflow_type, payload_schema_version, subject_id,
-                  source_set_id, status, created_at, cancel_requested
+                  source_set_id, status, priority, created_at, cancel_requested
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
-                (id, workflow_type, payload_schema_version, subject_id, source_set_id, status, now),
+                (id, workflow_type, payload_schema_version, subject_id, source_set_id, status, priority, now),
             )
             connection.commit()
 
@@ -8247,7 +8323,7 @@ class Repository:
                       JOIN ingest_jobs dep ON dep.id = d.depends_on_job_id
                       WHERE d.job_id = j.id AND dep.status != 'completed'
                    )
-                 ORDER BY b.created_at, j.ordinal, j.id
+                 ORDER BY b.priority DESC, b.created_at, j.ordinal, j.id
                  LIMIT 1
                 """
             ).fetchone()

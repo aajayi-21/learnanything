@@ -791,6 +791,80 @@ def import_sources(
         typer.echo(f"  {job['ordinal']:>2} {job['job_type']:<16} {job['status']:<12} {detail or ''}")
 
 
+@app.command("quick-add")
+def quick_add_cmd(
+    source: Annotated[str, typer.Argument(help="URL or local file to turn into a study map.")],
+    subject: Annotated[str | None, typer.Option("--subject", help="Target subject id for the study map.")] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the single confirmation prompt.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Quick add (§1): paste one source -> auto-selected units, suggested role,
+    default brief, ONE confirmation, then a priority build batch to a study map.
+
+    Imports the source first when it has no completed extraction (acquisition is
+    deterministic and token-free — not a consent checkpoint), then plans, confirms
+    once, and drains the priority [inventory -> synthesis] batch."""
+
+    from learnloop.services.quick_add import QuickAddError, enqueue_quick_add, plan_quick_add
+    from learnloop_sidecar.ingest_jobs import DurableIngestJobs
+
+    vault_root = _root(vault)
+    loaded = _load_vault_or_exit(vault_root, json_output=json_output)
+    if subject is not None and subject not in loaded.subjects:
+        message = f"Subject '{subject}' does not exist."
+        typer.echo(_dump({"version": 1, "error": "unknown_subject", "message": message}) if json_output else message, err=not json_output)
+        raise typer.Exit(code=1)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    jobs = DurableIngestJobs()
+    jobs.bind(repository, vault_root, background=False, lease_ttl_seconds=loaded.config.ingest.runner.lease_ttl_seconds)
+
+    def _plan():
+        return plan_quick_add(repository, loaded.config, loaded, source, subject_id=subject)
+
+    try:
+        try:
+            plan = _plan()
+        except QuickAddError as exc:
+            if exc.code != "quick_add_requires_import":
+                raise
+            if not json_output:
+                typer.echo(f"Importing {source} ...")
+            jobs.enqueue_import([source], subject_id=subject)  # background=False drains inline
+            plan = _plan()
+    except QuickAddError as exc:
+        typer.echo(_dump({"version": 1, "error": exc.code, "message": str(exc)}) if json_output else f"{exc.code}: {exc}", err=not json_output)
+        raise typer.Exit(code=1)
+
+    confirmation = plan.confirmation()
+    if not json_output:
+        typer.echo(f"Quick add: {confirmation['title']}")
+        scope = "whole source" if confirmation["whole_source"] else f"{confirmation['selected_unit_count']} unit(s)"
+        typer.echo(f"  role: {confirmation['suggested_role']}{' (ambiguous — flagged)' if confirmation['role_ambiguous'] else ''}")
+        typer.echo(f"  scope: {scope}, ~{confirmation['selected_tokens']} tokens")
+        typer.echo(f"  estimated input: ~{confirmation['estimated_input_tokens']} tokens")
+        if confirmation["requires_external_ai"]:
+            stages = ", ".join(sorted({str(c.get('stage')) for c in confirmation['external_ai_consent']}))
+            typer.echo(f"  external AI: yes ({stages})")
+    if not yes and not json_output:
+        typer.confirm("Proceed with import + synthesis?", abort=True)
+
+    try:
+        result = enqueue_quick_add(loaded, jobs, plan)  # background=False drains inline
+    except QuickAddError as exc:
+        typer.echo(_dump({"version": 1, "error": exc.code, "message": str(exc)}) if json_output else f"{exc.code}: {exc}", err=not json_output)
+        raise typer.Exit(code=1)
+
+    batch = _batch_json(jobs._require_runner(), result["batch_id"])
+    if json_output:
+        typer.echo(_dump({"version": 1, "quick_add": result, "batch": batch}))
+        return
+    typer.echo(f"Batch {batch['id']} [{batch['status']}] -> source set {result['source_set_id']}")
+    for job in batch["jobs"]:
+        detail = job.get("error", {}).get("message") if job.get("error") else job.get("message")
+        typer.echo(f"  {job['ordinal']:>2} {job['job_type']:<20} {job['status']:<12} {detail or ''}")
+
+
 ingest_batches_app = typer.Typer(no_args_is_help=True, help="Inspect and control durable ingest batches (§6.2).")
 app.add_typer(ingest_batches_app, name="ingest-batches")
 
