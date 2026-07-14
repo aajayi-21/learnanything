@@ -16,7 +16,7 @@ import type {
   TeachBackTurnDto
 } from "../api/dto";
 import { Card, EntityLink, KeyBar, Pill, SectionHeader } from "../components/ui";
-import { BlockBar, COLOR, Faint, FONT_MONO, modePillColor } from "../components/term";
+import { BlockBar, COLOR, Faint, FONT_MONO, modePillColor, TermSelect } from "../components/term";
 import { masteryTone } from "../app/algoConfig";
 import { MarkdownMath } from "../render/MarkdownMath";
 import { MathLiveEditor } from "../render/MathLiveEditor";
@@ -934,13 +934,12 @@ function SelfGradePanel({
         ) : null}
         <label>
           confidence
-          <select
-            className="text-input"
-            value={value.confidence}
-            onChange={(event) => setValue({ ...value, confidence: Number(event.target.value) })}
-          >
-            {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
+          <TermSelect
+            value={String(value.confidence)}
+            options={[1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: String(n) }))}
+            onChange={(v) => setValue({ ...value, confidence: Number(v) })}
+            width={110}
+          />
           {fieldErrors.confidence ? <span className="field-error">{fieldErrors.confidence}</span> : null}
         </label>
         <label>

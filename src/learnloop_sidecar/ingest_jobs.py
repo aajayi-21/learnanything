@@ -291,6 +291,118 @@ class DurableIngestJobs:
         self._ensure_worker()
         return batch_id
 
+    def enqueue_source_set_build(
+        self,
+        *,
+        members: list[dict[str, Any]],
+        source_set_id: str,
+        subject_id: str | None = None,
+        brief: dict[str, Any] | None = None,
+        mode: str = "auto",
+        input_budget_tokens: int | None = None,
+        priority: int = QUICK_ADD_PRIORITY,
+    ) -> str:
+        """Enqueue a study-map build batch for an EXISTING source set (§1/§8): one
+        inventory job per member (over its scoped units) followed by a
+        bootstrap_synthesis job that depends on all of them, so gates only run once
+        every member's units carry inventories. This is the multi-member, in-app
+        counterpart to :meth:`enqueue_quick_add_build` (single-source Quick add) —
+        it lets a collection assembled in the app synthesize a study map without the
+        CLI, surfacing as one durable Activity batch.
+
+        Each ``members`` entry is ``{"extraction_id": str, "units": [...]}`` where
+        units are ``[{unit_id, role, profile?}]`` (the inventory job's shape)."""
+
+        runner = self._require_runner()
+        if not members:
+            raise ValueError("a study-map build needs at least one member.")
+        specs: list[JobSpec] = []
+        for member in members:
+            inventory_payload: dict[str, Any] = {
+                "extraction_id": member["extraction_id"],
+                "units": member["units"],
+            }
+            if input_budget_tokens is not None:
+                inventory_payload["input_budget_tokens"] = input_budget_tokens
+            specs.append(JobSpec("inventory", inventory_payload))
+        synthesis_payload: dict[str, Any] = {
+            "source_set_id": source_set_id,
+            "brief": dict(brief or {}),
+            "mode": mode,
+            # Synthesizing a collection is itself the learner's explicit confirmation
+            # (the "synthesize →" click), so apply so it yields a usable study map —
+            # mirroring Quick add rather than leaving a second review step.
+            "apply": True,
+        }
+        specs.append(
+            JobSpec("bootstrap_synthesis", synthesis_payload, depends_on=tuple(range(len(members))))
+        )
+        batch_id = runner.enqueue_batch(
+            "bootstrap_synthesis",
+            specs,
+            subject_id=subject_id,
+            source_set_id=source_set_id,
+            priority=priority,
+        )
+        self._ensure_worker()
+        return batch_id
+
+    def enqueue_source_set_append(
+        self,
+        *,
+        members: list[dict[str, Any]],
+        source_set_id: str,
+        new_revision_ids: list[str] | None = None,
+        change_kind: str = "source_added",
+        subject_id: str | None = None,
+        brief: dict[str, Any] | None = None,
+        input_budget_tokens: int | None = None,
+        priority: int = QUICK_ADD_PRIORITY,
+    ) -> str:
+        """Enqueue a bounded-neighborhood APPEND batch for a collection whose subject
+        already carries a study map (§10). One inventory job per NEW (not-yet-synthesized)
+        member — same scoping/roles shape as the bootstrap build — followed by a single
+        ``append_synthesis`` job that depends on all of them and reconciles ONLY the new
+        material against the existing map through the bounded affected neighborhood. The
+        map is never resent or rebuilt; ``new_revision_ids`` pins the append scope.
+
+        The append counterpart to :meth:`enqueue_source_set_build`. ``members`` may be
+        empty (nothing new to inventory), in which case the append job runs alone and
+        reconciles the set's current membership (cache-reused when unchanged)."""
+
+        runner = self._require_runner()
+        specs: list[JobSpec] = []
+        for member in members:
+            inventory_payload: dict[str, Any] = {
+                "extraction_id": member["extraction_id"],
+                "units": member["units"],
+            }
+            if input_budget_tokens is not None:
+                inventory_payload["input_budget_tokens"] = input_budget_tokens
+            specs.append(JobSpec("inventory", inventory_payload))
+        append_payload: dict[str, Any] = {
+            "source_set_id": source_set_id,
+            "brief": dict(brief or {}),
+            "change_kind": change_kind,
+            "new_revision_ids": list(new_revision_ids or []),
+            # The "synthesize →" click is the learner's explicit confirmation, so
+            # routine span/assessment attachments auto-apply (§10.3); everything else
+            # stays a pending review proposal.
+            "apply": True,
+        }
+        specs.append(
+            JobSpec("append_synthesis", append_payload, depends_on=tuple(range(len(members))))
+        )
+        batch_id = runner.enqueue_batch(
+            "append_synthesis",
+            specs,
+            subject_id=subject_id,
+            source_set_id=source_set_id,
+            priority=priority,
+        )
+        self._ensure_worker()
+        return batch_id
+
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
         runner = self._require_runner()
         batch = runner.repo.get_ingest_batch(batch_id)

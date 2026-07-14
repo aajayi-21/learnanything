@@ -348,6 +348,22 @@ pub async fn get_source_outline(
 }
 
 #[tauri::command]
+pub async fn get_selection_preview(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_selection_preview", input).await
+}
+
+#[tauri::command]
+pub async fn get_effective_outline(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_effective_outline", input).await
+}
+
+#[tauri::command]
 pub async fn save_unit_selection(
     input: Value,
     sidecar: State<'_, SidecarManager>,
@@ -414,6 +430,14 @@ pub async fn create_study_map(
     sidecar: State<'_, SidecarManager>,
 ) -> Result<Value, CommandError> {
     blocking_sidecar_call(sidecar, "create_study_map", input).await
+}
+
+#[tauri::command]
+pub async fn build_study_map(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "build_study_map", input).await
 }
 
 #[tauri::command]

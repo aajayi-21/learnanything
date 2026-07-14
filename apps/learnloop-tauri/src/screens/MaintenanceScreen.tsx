@@ -23,7 +23,7 @@ import type {
   EdgeDirectionResolution
 } from "../api/dto";
 import { OpenInSource } from "../components/OpenInSource";
-import { COLOR, Dim, Divider, Faint, FONT_MONO, Pill, SectionHeader, type PillColor } from "../components/term";
+import { COLOR, Dim, Divider, Faint, FONT_MONO, Pill, SectionHeader, TermSelect, type PillColor } from "../components/term";
 
 // Canonical locators are `span:<extraction>/<span>`; the optional extraction
 // group preserves the malformed pre-v2 `span:<span>` compatibility shape.
@@ -162,16 +162,11 @@ export function MaintenanceScreen({
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
         <SectionHeader>Maintain</SectionHeader>
         {subjects.length > 0 ? (
-          <select
+          <TermSelect
             value={subjectId ?? ""}
-            onChange={(e) => setSubjectId(e.target.value || null)}
-            style={{ ...btn, cursor: "default" }}
-          >
-            <option value="">all subjects</option>
-            {subjects.map((s) => (
-              <option key={s.id} value={s.id}>{s.title}</option>
-            ))}
-          </select>
+            options={[{ value: "", label: "all subjects" }, ...subjects.map((s) => ({ value: s.id, label: s.title }))]}
+            onChange={(v) => setSubjectId(v || null)}
+          />
         ) : null}
         <button style={btn} onClick={load}>↻ refresh</button>
       </div>

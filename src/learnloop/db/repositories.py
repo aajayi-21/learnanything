@@ -8422,6 +8422,7 @@ class Repository:
         canonical_uri: str | None = None,
         work_id: str | None = None,
         current_revision_id: str | None = None,
+        display_title: str | None = None,
         clock: Clock | None = None,
     ) -> None:
         now = utc_now_iso(clock)
@@ -8430,17 +8431,18 @@ class Repository:
                 """
                 INSERT INTO source_artifacts(
                   id, acquisition_kind, canonical_uri, work_id,
-                  current_revision_id, created_at, updated_at
+                  current_revision_id, display_title, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   acquisition_kind = excluded.acquisition_kind,
                   canonical_uri = excluded.canonical_uri,
                   work_id = excluded.work_id,
                   current_revision_id = COALESCE(excluded.current_revision_id, source_artifacts.current_revision_id),
+                  display_title = COALESCE(excluded.display_title, source_artifacts.display_title),
                   updated_at = excluded.updated_at
                 """,
-                (id, acquisition_kind, canonical_uri, work_id, current_revision_id, now, now),
+                (id, acquisition_kind, canonical_uri, work_id, current_revision_id, display_title, now, now),
             )
             connection.commit()
 
@@ -8857,6 +8859,7 @@ class Repository:
         needs_review: list[str] | None = None,
         exam_use_modes: Mapping[str, str] | None = None,
         exam_paper_metadata: Mapping[str, Any] | None = None,
+        role_override: str | None = None,
         clock: Clock | None = None,
     ) -> None:
         now = utc_now_iso(clock)
@@ -8866,10 +8869,10 @@ class Repository:
                 INSERT INTO source_unit_selections(
                   extraction_id, source_id, revision_id, selected_unit_ids_json,
                   boundary_overrides_json, needs_review_json,
-                  exam_use_modes_json, exam_paper_metadata_json,
+                  exam_use_modes_json, exam_paper_metadata_json, role_override,
                   created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(extraction_id) DO UPDATE SET
                   source_id = excluded.source_id,
                   revision_id = excluded.revision_id,
@@ -8878,6 +8881,7 @@ class Repository:
                   needs_review_json = excluded.needs_review_json,
                   exam_use_modes_json = excluded.exam_use_modes_json,
                   exam_paper_metadata_json = excluded.exam_paper_metadata_json,
+                  role_override = excluded.role_override,
                   updated_at = excluded.updated_at
                 """,
                 (
@@ -8889,6 +8893,7 @@ class Repository:
                     _json(list(needs_review or [])),
                     _json(dict(exam_use_modes or {})),
                     _json(dict(exam_paper_metadata or {})),
+                    role_override,
                     now,
                     now,
                 ),

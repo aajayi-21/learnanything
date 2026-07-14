@@ -44,6 +44,8 @@ import type {
   StartImportBatchInput,
   SourceLibrarySnapshot,
   SourceOutline,
+  SelectionPreviewDto,
+  EffectiveOutlineDto,
   SaveUnitSelectionInput,
   UnitSelectionState,
   AcquisitionPreview,
@@ -97,6 +99,7 @@ import type {
   SourceCoverageDto,
   StartInventoryInput,
   CreateStudyMapInput,
+  BuildStudyMapInput,
   StudyMapDto,
   AppendResultDto,
   AppendSourceInput,
@@ -228,6 +231,12 @@ export const api = {
   getSourceLibrary: () => call<SourceLibrarySnapshot>("get_source_library"),
   getSourceOutline: (extractionRef: string) =>
     call<SourceOutline>("get_source_outline", { extractionRef }),
+  getSelectionPreview: (extractionRef: string, selectedUnitIds?: string[] | null) =>
+    call<SelectionPreviewDto>("get_selection_preview", {
+      input: { extractionRef, selectedUnitIds: selectedUnitIds ?? null }
+    }),
+  getEffectiveOutline: (extractionRef: string, boundaryOverrides: Record<string, unknown>[]) =>
+    call<EffectiveOutlineDto>("get_effective_outline", { input: { extractionRef, boundaryOverrides } }),
   saveUnitSelection: (input: SaveUnitSelectionInput) =>
     call<{ version: number } & UnitSelectionState & { extractionId: string }>("save_unit_selection", { input }),
   getAcquisitionPreview: (inputs: string[]) =>
@@ -247,6 +256,10 @@ export const api = {
     call<IngestBatchDto>("start_inventory", { input }),
   createStudyMap: (input: CreateStudyMapInput) =>
     call<{ version: number; studyMap: StudyMapDto }>("create_study_map", { input }),
+  // Enqueue a collection's study-map build as a durable Activity batch (inventory
+  // members → bootstrap_synthesis). The multi-member, in-app counterpart to Quick
+  // add's confirm step; returns the batch view (IngestBatchDto).
+  buildStudyMap: (input: BuildStudyMapInput) => call<IngestBatchDto>("build_study_map", { input }),
   // ING M7 — Update study map (§10), maintenance feed (§11), exam readiness (§15).
   appendSource: (input: AppendSourceInput) =>
     call<{ version: number; append: AppendResultDto }>("append_source", { input }),

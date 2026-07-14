@@ -256,7 +256,7 @@ def test_batch_status_derivation():
 def _stub_ir() -> DocumentIR:
     block = DocumentBlock.build(span_id="s1", block_type="Text", text="An eigenvector of A is a vector v.", ordinal=1, page=1)
     unit = DocumentUnit(unit_id="u1", label="Chapter 1", ordinal=1, semantic_hash="sha256:x", page_start=1, page_end=1, span_ids=["s1"])
-    return DocumentIR(extractor="text", extractor_version="1", blocks=[block], units=[unit])
+    return DocumentIR(extractor="text", extractor_version="2", blocks=[block], units=[unit])
 
 
 def _import_services():
@@ -362,14 +362,14 @@ def test_import_retry_replaces_ir_left_by_interrupted_run(tmp_path):
     request_hash = extraction_request_hash(
         revision_id=registered.revision_id,
         extractor="text",
-        extractor_version="1",
+        extractor_version="2",
         ir_schema_version=IR_SCHEMA_VERSION,
     )
     runner.repo.insert_extraction_run(
         id="ext_interrupted",
         revision_id=registered.revision_id,
         extractor="text",
-        extractor_version="1",
+        extractor_version="2",
         extraction_request_hash=request_hash,
         ir_schema_version=IR_SCHEMA_VERSION,
         status="running",
@@ -531,3 +531,103 @@ def test_youtube_import_routes_caption_cues_to_time_range_ir(tmp_path):
     assert ir.extractor == "youtube"
     assert len(ir.blocks) == 2
     assert ir.blocks[0].text.startswith("Singular value decomposition")
+
+
+# --------------------------------------------------------------------------- #
+# YouTube display title: "<video title> — <author>" captured at import time.
+# --------------------------------------------------------------------------- #
+
+def test_compose_display_title_variants():
+    from learnloop.services.ingest_runner import _compose_display_title
+
+    assert _compose_display_title("SVD explained", ["3Blue1Brown"]) == "SVD explained — 3Blue1Brown"
+    assert _compose_display_title("SVD explained", []) == "SVD explained"
+    assert _compose_display_title("  SVD  ", ["  ", "Grant"]) == "SVD — Grant"
+    # No title captured → None so the caller falls back to the URL title.
+    assert _compose_display_title(None, ["3Blue1Brown"]) is None
+    assert _compose_display_title("", []) is None
+
+
+def test_youtube_oembed_metadata_parses_and_falls_back(monkeypatch):
+    from learnloop.ingest import fetchers
+
+    monkeypatch.setattr(
+        fetchers,
+        "_http_get_text",
+        lambda url, timeout=10: '{"title": "SVD explained", "author_name": "3Blue1Brown"}',
+    )
+    assert fetchers.youtube_oembed_metadata("abc123") == ("SVD explained", "3Blue1Brown")
+
+    def _boom(url, timeout=10):
+        raise OSError("offline")
+
+    monkeypatch.setattr(fetchers, "_http_get_text", _boom)
+    # A failed oEmbed never raises — it degrades to (None, None).
+    assert fetchers.youtube_oembed_metadata("abc123") == (None, None)
+
+
+def test_fetch_metadata_only_resolves_youtube():
+    from learnloop.services.ingest_runner import _fetch_metadata
+
+    assert _fetch_metadata("https://example.org/page.html", "web") == (None, ())
+
+
+def _youtube_import_services(title="SVD explained", authors=("3Blue1Brown",)):
+    import json as _json
+
+    from learnloop.services.ingest_runner import FetchedBytes
+
+    cues = {"cues": [{"start": 0.0, "duration": 2.0, "text": "Singular value decomposition."}]}
+
+    def fetch(source, category, ctx):
+        return FetchedBytes(
+            raw_bytes=_json.dumps(cues).encode(),
+            content_type="application/json",
+            original_uri=source,
+            retrieved_at="2026-07-13T12:00:00Z",
+            title=title,
+            authors=authors,
+        )
+
+    # No extract override → the real default_extract routes caption cues.
+    return RunnerServices(fetch=fetch)
+
+
+def test_youtube_import_stores_display_title_and_labels_transcript_unit(tmp_path):
+    runner = _runner(tmp_path, services=_youtube_import_services())
+    batch_id = runner.enqueue_batch(
+        "import", [JobSpec("import", {"source": "https://youtu.be/qs1qcpemCIE"})]
+    )
+    runner.drain()
+
+    job = runner.repo.ingest_jobs_for_batch(batch_id)[0]
+    assert job["status"] == "completed"
+    # Stored artifact + result title carry the combined "<title> — <author>".
+    assert job["result"]["title"] == "SVD explained — 3Blue1Brown"
+    artifact = runner.repo.get_source_artifact(job["result"]["source_id"])
+    assert artifact["display_title"] == "SVD explained — 3Blue1Brown"
+    # The single transcript unit is labeled by the real video title (no author).
+    ir = runner.repo.load_document_ir(job["result"]["extraction_id"])
+    assert ir.units[0].label == "SVD explained"
+
+
+def test_youtube_import_without_metadata_falls_back_to_url(tmp_path):
+    runner = _runner(tmp_path, services=_youtube_import_services(title=None, authors=()))
+    batch_id = runner.enqueue_batch(
+        "import", [JobSpec("import", {"source": "https://youtu.be/qs1qcpemCIE"})]
+    )
+    runner.drain()
+
+    job = runner.repo.ingest_jobs_for_batch(batch_id)[0]
+    assert job["status"] == "completed"
+    assert job["result"]["title"] is None
+    artifact = runner.repo.get_source_artifact(job["result"]["source_id"])
+    assert artifact["display_title"] is None
+    # The sidecar's card title then falls back to the source URL.
+    from learnloop_sidecar.handlers.ingest import _artifact_title
+
+    revision = runner.repo.get_source_revision(job["result"]["revision_id"])
+    assert _artifact_title(artifact, revision) == "https://youtu.be/qs1qcpemCIE"
+    # Transcript unit keeps the neutral default label when no title is known.
+    ir = runner.repo.load_document_ir(job["result"]["extraction_id"])
+    assert ir.units[0].label == "Transcript"

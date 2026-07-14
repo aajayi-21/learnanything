@@ -1243,6 +1243,10 @@ export interface IngestBatchDto {
   startedAt: string | null;
   finishedAt: string | null;
   jobs: IngestJobView[];
+  // Present on build_study_map results: which routing was chosen for the
+  // collection — "bootstrap" creates the map, "append" reconciles new material
+  // into an existing one via the bounded neighborhood.
+  mode?: "bootstrap" | "append";
 }
 
 export interface IngestBatchesSnapshot {
@@ -1305,10 +1309,40 @@ export interface OutlineUnit {
   inventory: UnitInventoryMarker;
 }
 
+// Byte-exact display markdown the authoring model receives for a selection.
+export interface SelectionPreviewDto {
+  version?: number;
+  extractionId: string;
+  selectedUnitIds: string[];
+  markdown: string;
+  approxTokens: number;
+}
+
+// ── ING: live effective-unit shape from boundary overrides (§5.3) ──────────
+// Deterministic backend preview of how merge/split intents reshape the units;
+// zero LLM. `kind` drives the row glyph, `splitNoop` flags a split with no
+// level-2 headings to partition on.
+export interface EffectiveUnitDto {
+  effectiveId: string;
+  label: string;
+  sourceUnitIds: string[];
+  blockCount: number;
+  approxTokens: number;
+  kind: "merged" | "split" | "unchanged";
+  splitNoop?: boolean;
+}
+
+export interface EffectiveOutlineDto {
+  version?: number;
+  extractionId: string;
+  units: EffectiveUnitDto[];
+}
+
 export interface UnitSelectionState {
   selectedUnitIds: string[];
   boundaryOverrides: Record<string, unknown>[];
   needsReview: string[];
+  roleOverride: string | null;
 }
 
 export interface SourceOutline {
@@ -1333,6 +1367,7 @@ export interface SaveUnitSelectionInput {
   extractionId: string;
   selectedUnitIds: string[];
   boundaryOverrides?: Record<string, unknown>[];
+  roleOverride?: string | null;
 }
 
 // ── ING M4: source sets, role-aware inventories, coverage (§4.3/§7/§9.3) ──
@@ -1408,6 +1443,12 @@ export interface CreateStudyMapInput {
   brief?: Record<string, unknown>;
   apply?: boolean;
   createGoal?: boolean;
+}
+
+export interface BuildStudyMapInput {
+  sourceSetId: string;
+  brief?: Record<string, unknown>;
+  mode?: "auto" | "bootstrap";
 }
 
 export interface StudyMapDto {

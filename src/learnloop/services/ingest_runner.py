@@ -100,6 +100,12 @@ class FetchedBytes:
     content_type: str | None
     original_uri: str
     retrieved_at: str
+    # Human-readable metadata captured during the fetch phase, when the source
+    # kind exposes it cheaply (e.g. a YouTube video's title + channel via oEmbed).
+    # Absent (None/()) for sources with no knowable metadata — the import then
+    # falls back to the URL title as before.
+    title: str | None = None
+    authors: tuple[str, ...] = ()
 
 
 @dataclass
@@ -243,12 +249,35 @@ def default_fetch(source: str, category: str, ctx: JobContext) -> FetchedBytes:
         allow_auto_captions=True,
         clock=ctx.clock,
     )
+    title, authors = _fetch_metadata(source, category)
     return FetchedBytes(
         raw_bytes=fetched.source_bytes or fetched.raw_bytes,
         content_type=fetched.content_type,
         original_uri=fetched.original_uri,
         retrieved_at=fetched.retrieved_at,
+        title=title,
+        authors=authors,
     )
+
+
+def _fetch_metadata(source: str, category: str) -> tuple[str | None, tuple[str, ...]]:
+    """Best-effort human-readable (title, authors) for the fetched source.
+
+    Only YouTube is resolvable cheaply today: its public oEmbed endpoint returns
+    the video title + channel with no API key. This runs in the import's fetch
+    phase — the same phase that already made a network request for the transcript,
+    so it adds one small extra egress (oEmbed) and never a new phase. Any failure
+    degrades to ``(None, ())`` so the import proceeds with a URL title."""
+
+    if category != "youtube":
+        return None, ()
+    try:
+        from learnloop.ingest.fetchers import youtube_oembed_metadata, youtube_video_id
+
+        video_title, author = youtube_oembed_metadata(youtube_video_id(source))
+    except Exception:  # pragma: no cover - metadata is strictly best-effort
+        return None, ()
+    return video_title, (author,) if author else ()
 
 
 def default_extract(fetched: FetchedBytes, category: str, ctx: JobContext) -> Any:
@@ -312,14 +341,16 @@ def default_extraction_identity(
             "config": config,
         }
     if category == "youtube":
-        name = "youtube"
-    else:
-        text = fetched.raw_bytes[:512].decode("utf-8", errors="replace")
-        looks_html = (fetched.content_type or "").lower().startswith("text/html") or bool(
-            re.match(r"\s*(?:<!doctype\s+html|<html)", text, re.IGNORECASE)
-        )
-        name = "html" if category in ("web", "arxiv") or looks_html else "text"
-    return {"extractor": name, "extractor_version": "1", "model_versions": {}, "config": {}}
+        # Captions normalizer (captions_to_ir) is unchanged → still version "1".
+        return {"extractor": "youtube", "extractor_version": "1", "model_versions": {}, "config": {}}
+    text = fetched.raw_bytes[:512].decode("utf-8", errors="replace")
+    looks_html = (fetched.content_type or "").lower().startswith("text/html") or bool(
+        re.match(r"\s*(?:<!doctype\s+html|<html)", text, re.IGNORECASE)
+    )
+    name = "html" if category in ("web", "arxiv") or looks_html else "text"
+    # Markdown normalizer (markdown_to_ir) is at version "2" (level-2 unit fallback);
+    # must match markdown_to_ir's default so preflight cache keys line up.
+    return {"extractor": name, "extractor_version": "2", "model_versions": {}, "config": {}}
 
 
 def _caption_cues(text: str) -> list[dict[str, Any]] | None:
@@ -568,14 +599,12 @@ def handle_bootstrap_synthesis(ctx: JobContext) -> dict[str, Any]:
     # has a live map, new sources reconcile into it through the bounded append
     # vocabulary instead of tripping the identity-lock refusal.
     if str(payload.get("mode") or "auto") == "auto":
+        from learnloop.services.source_append import subject_has_applied_study_map
         from learnloop.vault.loader import load_vault
 
         vault = load_vault(ctx.vault_root)
         source_set = next((item for item in vault.source_sets if item.id == source_set_id), None)
-        if source_set is not None and any(
-            source_set.subject_id in learning_object.subjects
-            for learning_object in vault.learning_objects.values()
-        ):
+        if source_set is not None and subject_has_applied_study_map(vault, source_set.subject_id):
             return handle_append_synthesis(ctx)
 
     ctx.report("inventoried", message="Preparing study-map synthesis")
@@ -666,6 +695,7 @@ def handle_import(ctx: JobContext) -> dict[str, Any]:
     ctx.report("acquired", message="Fetching source material")
     fetched = ctx.services.fetch_bytes(resolved.source, category, ctx)
 
+    display_title = _compose_display_title(fetched.title, fetched.authors)
     registered = register_source_revision(
         ctx.repo,
         acquisition_kind=category,
@@ -673,9 +703,14 @@ def handle_import(ctx: JobContext) -> dict[str, Any]:
         raw_bytes=fetched.raw_bytes,
         original_uri=fetched.original_uri,
         retrieved_at=fetched.retrieved_at,
+        display_title=display_title,
         clock=ctx.clock,
     )
     ctx.job["_revision_id"] = registered.revision_id
+    # Label the extracted transcript unit by the real video title (not the
+    # "<title> — <author>" display form) when the fetch captured one.
+    if fetched.title and not ctx.payload.get("title"):
+        ctx.job["payload"] = {**ctx.payload, "title": fetched.title}
     ctx.report("registered", message="Registered source revision")
 
     identity = dict(ctx.services.extraction_identity(fetched, category, ctx))
@@ -748,6 +783,7 @@ def handle_import(ctx: JobContext) -> dict[str, Any]:
     return {
         "source_id": registered.source_id,
         "revision_id": registered.revision_id,
+        "title": display_title,
         "asset_hash": registered.asset_hash,
         "reused_revision": registered.reused_revision,
         "extraction_id": extraction_id,
@@ -759,6 +795,18 @@ def handle_import(ctx: JobContext) -> dict[str, Any]:
             "flagged_pages": ir.health.flagged_pages(),
         },
     }
+
+
+def _compose_display_title(title: str | None, authors: Sequence[str]) -> str | None:
+    """Assemble the artifact's stored label: "<title> — <author>" when both are
+    known, the title alone when there is no author, and ``None`` (→ URL fallback)
+    when the fetch captured no title at all."""
+
+    clean_title = (title or "").strip()
+    author = next((a.strip() for a in authors if a and a.strip()), "")
+    if clean_title and author:
+        return f"{clean_title} — {author}"
+    return clean_title or None
 
 
 def handle_legacy_ingest(ctx: JobContext) -> dict[str, Any]:
