@@ -94,6 +94,10 @@ def replay_learning_object(
     # so replaying any subset of LOs reproduces byte-identical canonical state.
     from learnloop.services.canonical_projection import project_canonical_facet_state
 
+    # project_canonical_facet_state also derives KM5 §4.2 capability-residual
+    # activation from the same event history (a no-op unless
+    # [capabilities].residual_activation_enabled), so a rebuild reproduces
+    # activation deterministically with the feature on or off.
     project_canonical_facet_state(vault, repository)
     return ReplayResult(
         learning_object_id=learning_object_id,

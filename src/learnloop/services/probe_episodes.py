@@ -1823,4 +1823,20 @@ def next_probe_item(
         hypothesis_set=hypothesis_set,
         posterior=posterior.posterior if posterior is not None else None,
     )
-    return candidates[0] if candidates else None
+    if not candidates:
+        return None
+    # §11.1 priority 1: when this LO carries an open, repair-divergent cause set,
+    # serve the instrument that DISCRIMINATES the candidate causes (KM4 contrast
+    # bindings) instead of the plain top-EIG pick. Gated on a cause set existing,
+    # so ordinary diagnostic serving is unchanged.
+    from learnloop.services.probe_targeting import (
+        open_cause_sets_for_learning_object,
+        select_discriminating_instrument,
+    )
+
+    cause_sets = open_cause_sets_for_learning_object(vault, repository, learning_object_id)
+    if cause_sets:
+        discriminating = select_discriminating_instrument(cause_sets[0], candidates)
+        if discriminating is not None:
+            return discriminating
+    return candidates[0]

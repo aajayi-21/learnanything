@@ -151,6 +151,7 @@ def run_doctor(root: Path, *, fix_state: bool = False, ai: bool = False, ai_prov
     _check_learning_object_merge_candidates(vault, issues)
     _check_duplicate_diagnostic_proposals(vault, repository, issues)
     _check_mvp07_canonical_state(vault, repository, issues)
+    _check_pre_first_practice_identifiability(vault, repository, issues, fix_state=fix_state)
 
     return DoctorReport(
         root=vault_root,
@@ -1263,6 +1264,72 @@ def _facet_tokens(value: str) -> set[str]:
     stop = {"formula", "rule", "concept"}
     normalized = value.replace("_", "-").lower()
     return {token for token in normalized.split("-") if token and token not in stop}
+
+
+def _check_pre_first_practice_identifiability(
+    vault: LoadedVault, repository: Repository, issues: list[HealthIssue], *, fix_state: bool
+) -> None:
+    """Pre-first-practice identifiability doctor check (knowledge-model §11.3).
+
+    Runs the seven-warning identifiability doctor over any subject whose registry
+    changed since the last check (a persisted registry-hash watermark gates it),
+    so non-identifiable distinctions are coarsened before evidence starts accruing
+    against them. Findings surface as warnings (review severity, never a hard
+    error that blocks a legacy vault); with ``fix_state`` a discriminating probe /
+    coarsen need is scheduled per finding and the watermark advances.
+    """
+
+    if vault.config.algorithms.algorithm_version != KM_ALGORITHM_VERSION:
+        return
+
+    from learnloop.services.identifiability import (
+        analyze_identifiability,
+        build_registry_view,
+        schedule_discriminating_probes,
+    )
+    from learnloop.services.identifiability import _registry_hash
+
+    reader = getattr(repository, "misconceptions_for_learning_object", None)
+    for subject_id in sorted(vault.subjects):
+        scoped_los = {
+            lo.id
+            for lo in vault.learning_objects.values()
+            if lo.subjects and subject_id in lo.subjects
+        }
+        records: list[Any] = []
+        if reader is not None:
+            for lo_id in sorted(scoped_los):
+                records.extend(reader(lo_id))
+        view = build_registry_view(vault, subject_id, misconception_records=records)
+        registry_hash = _registry_hash(view)
+        watermark = repository.identifiability_watermark(subject_id)
+        if watermark is not None and watermark["registry_hash"] == registry_hash:
+            continue  # registry unchanged since the last check — already analyzed
+        findings = analyze_identifiability(view)
+        for finding in findings:
+            issues.append(
+                _issue(
+                    "warning",
+                    f"identifiability:{finding.detail}",
+                    finding.message,
+                    entity_id=finding.facet_ids[0] if finding.facet_ids else None,
+                    details={
+                        "subject_id": subject_id,
+                        "check": finding.check,
+                        "kind": finding.kind,
+                        "target_key": finding.target_key,
+                        "facet_ids": list(finding.facet_ids),
+                        "suggested_action": finding.suggested_action,
+                    },
+                )
+            )
+        if fix_state:
+            schedule_discriminating_probes(repository, subject_id, findings)
+            repository.upsert_identifiability_watermark(
+                subject_id=subject_id,
+                registry_hash=registry_hash,
+                finding_count=len(findings),
+            )
 
 
 def _issue(

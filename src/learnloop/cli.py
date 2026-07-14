@@ -3406,6 +3406,77 @@ def probe_audit_command(
     )
 
 
+@app.command("graph-identifiability")
+def graph_identifiability_command(
+    subject: Annotated[str | None, typer.Option("--subject", help="Restrict to one subject id.")] = None,
+    schedule_probes: Annotated[bool, typer.Option("--schedule-probes", help="Persist a discriminating probe / coarsen need per finding (§11.3).")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the full JSON report.")] = False,
+    output: Annotated[Path | None, typer.Option("--output", "-o", help="Write the full JSON report to a file.")] = None,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Assessment identifiability doctor (knowledge-model §11.3).
+
+    Analyzes each subject's criterion-by-facet-capability matrix, recipe
+    structure, and compositional records for the seven non-identifiability
+    warnings, reporting unresolved bundles rather than false facet-specific
+    precision. Findings can be turned into discriminating-probe generation needs.
+    """
+
+    from learnloop.services.identifiability import graph_identifiability_report
+
+    root = _root(vault)
+    loaded = load_vault(root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    report = graph_identifiability_report(
+        loaded, repository, subject_id=subject, schedule_probes=schedule_probes
+    )
+    _write_or_echo_report(report, json_output=json_output, output=output)
+    if json_output and output is None:
+        return
+    totals = report["totals"]
+    typer.echo(
+        f"Identifiability: {totals['findings']} non-identifiable distinction(s), "
+        f"{totals['scheduled_probes']} discriminating probe(s) scheduled."
+    )
+    for subject_report in report["subjects"]:
+        if not subject_report["findings"]:
+            continue
+        typer.echo(f"  {subject_report['subject_id']}: {subject_report['counts']['findings']} finding(s)")
+        for bundle in subject_report["unresolved_bundles"]:
+            typer.echo(f"    [check {bundle['check']}] {bundle['message']}")
+
+
+@app.command("residual-diagnostics")
+def residual_diagnostics_command(
+    subject: Annotated[str | None, typer.Option("--subject", help="Restrict to one subject id.")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit the full JSON report.")] = False,
+    output: Annotated[Path | None, typer.Option("--output", "-o", help="Write the full JSON report to a file.")] = None,
+    vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
+) -> None:
+    """Residual-dependence diagnostics (knowledge-model §8.4).
+
+    Report-only, deterministic structure hints from residual dependence between
+    facets sharing tasks, systematic combined-task failure, context-specific
+    residuals, and indistinguishable response signatures. Never mutates structure.
+    """
+
+    from learnloop.services.residual_diagnostics import residual_dependence_report
+
+    root = _root(vault)
+    loaded = load_vault(root)
+    repository = Repository(VaultPaths(loaded.root, loaded.config).sqlite_path)
+    report = residual_dependence_report(loaded, repository, subject_id=subject)
+    _write_or_echo_report(report, json_output=json_output, output=output)
+    if json_output and output is None:
+        return
+    typer.echo(
+        f"Residual diagnostics: {report['totals']['suggestions']} structure suggestion(s) "
+        f"across {report['totals']['facet_pairs']} co-tasked facet pair(s)."
+    )
+    for suggestion in report["suggestions"]:
+        typer.echo(f"  [{suggestion['kind']}] {suggestion['message']}")
+
+
 @app.command("probe-regrade")
 def probe_regrade_command(
     vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,

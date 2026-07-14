@@ -658,6 +658,36 @@ def planner_shadow_report(repository: Repository) -> dict[str, Any]:
     }
 
 
+def shadow_intent_report(repository: Repository) -> dict[str, Any]:
+    """§11.2 intent-first session-composition shadow comparison (log-only).
+
+    Over scheduler slates that logged a ``shadow_intent`` plan: which intents the
+    shadow planner selected, and how often the intent-first head agreed with the
+    live queue's head. Purely observational — the live composition is unchanged,
+    and promotion of an intent-first policy requires held-out gains (not shipped).
+    """
+
+    slates = 0
+    agreements = 0
+    intent_counts: dict[str, int] = {}
+    for slate in repository.all_scheduler_slates():
+        context = slate.get("session_context") or {}
+        plan = context.get("shadow_intent")
+        if not isinstance(plan, Mapping):
+            continue
+        slates += 1
+        selected = plan.get("selected_intent")
+        if selected:
+            intent_counts[str(selected)] = intent_counts.get(str(selected), 0) + 1
+        if plan.get("agrees_with_live"):
+            agreements += 1
+    return {
+        "slates_with_shadow_intent": slates,
+        "intent_selection_counts": intent_counts,
+        "live_agreement_rate": _round(agreements / slates) if slates else None,
+    }
+
+
 # --- Pilot bundle (Checkpoint 4.1) ---------------------------------------------------------
 
 
@@ -679,5 +709,6 @@ def pilot_report(vault: LoadedVault, repository: Repository) -> dict[str, Any]:
         "calibration_evidence": calibration_evidence_report(repository),
         "shadow_policies": shadow_policy_report(repository),
         "planner_shadow": planner_shadow_report(repository),
+        "shadow_intent": shadow_intent_report(repository),
         "replay_determinism": replay_determinism_report(vault, repository),
     }

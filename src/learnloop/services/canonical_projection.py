@@ -299,6 +299,136 @@ def project_canonical_facet_state(
         clock=clock,
     )
     _sync_unresolved_cause_factors(repository, unresolved, clock=clock)
+    # KM5 §4.2: lazy capability-residual activation is derived from the same
+    # just-written ledgers (a no-op unless [capabilities].residual_activation_enabled),
+    # so it runs on every path that recomputes canonical state — live attempts and
+    # replay alike — and a rebuild reproduces activation deterministically.
+    project_capability_residuals(vault, repository, clock=clock)
+
+
+def project_capability_residuals(
+    vault: LoadedVault, repository: Repository, *, clock: Clock | None = None
+) -> None:
+    """Derive lazy capability-residual activation state (§4.2, KM5; DEFAULT OFF).
+
+    A pure fold over the just-written canonical ledgers (``facet_capability_evidence``
+    for the capability slices, pooled into a per-facet shared parent) plus the set
+    of closed diagnostic episodes. For each ``(facet, capability)`` cell it decides
+    activation deterministically:
+
+    * **persistent capability-sliced residual disagreement** — the slice diverges
+      from the pooled parent by ``residual_divergence_threshold`` with at least
+      ``residual_min_independent_groups`` surface groups and
+      ``residual_min_independent_mass`` independent mass; or
+    * a **closed diagnostic episode** on the facet demonstrated divergence (the
+      episode already paid for the evidence, so a lower
+      ``residual_episode_divergence_threshold`` applies).
+
+    Activation writes learner-model state only — a row per activated
+    ``(facet, capability)`` — never a curriculum mutation or lock event. The
+    residual belief uses the shared parent as a shrinkage prior; genuinely
+    ambiguous (no-capability) observations never reach a slice and so stay pooled
+    at the parent. Because it is derived here in the projection fold (replace on
+    rebuild), replay reproduces activation byte-identically.
+
+    With the feature disabled (the default) this is a complete no-op: the table is
+    never touched, so rebuild determinism is identical with the feature on OR off.
+    """
+
+    if vault.config.algorithms.algorithm_version != KM_ALGORITHM_VERSION:
+        return
+    cfg = vault.config.capabilities
+    if not getattr(cfg, "residual_activation_enabled", False):
+        return
+
+    divergence_threshold = float(getattr(cfg, "residual_divergence_threshold", 0.20))
+    min_mass = float(getattr(cfg, "residual_min_independent_mass", 2.0))
+    min_groups = int(getattr(cfg, "residual_min_independent_groups", 2))
+    episode_threshold = float(getattr(cfg, "residual_episode_divergence_threshold", 0.12))
+    shrinkage = float(getattr(cfg, "residual_shrinkage_pseudo_count", 4.0))
+
+    merge_map = repository.facet_merge_map()
+
+    def resolve(facet_id: str) -> str:
+        canonical = vault.canonical_facet_id(facet_id)
+        current = canonical
+        seen: set[str] = set()
+        while current in merge_map and current not in seen:
+            seen.add(current)
+            current = merge_map[current]
+        return current
+
+    # Facets with at least one closed diagnostic episode (lower activation bar).
+    episode_facets: set[str] = set()
+    for episode in repository.list_probe_episodes(statuses=("complete",)):
+        for facet_id in episode.required_facets:
+            episode_facets.add(resolve(facet_id))
+
+    # Capability slices + pooled shared parent per facet.
+    cells = repository.facet_capability_evidence_all()
+    parent_pos: dict[str, float] = defaultdict(float)
+    parent_neg: dict[str, float] = defaultdict(float)
+    for cell in cells:
+        parent_pos[cell.facet_id] += cell.direct_positive_mass + cell.embedded_positive_mass
+        parent_neg[cell.facet_id] += cell.direct_negative_mass + cell.embedded_negative_mass
+
+    rows: list[dict[str, object]] = []
+    for cell in cells:
+        facet = cell.facet_id
+        capability = cell.capability
+        p_alpha = 1.0 + parent_pos[facet]
+        p_beta = 1.0 + parent_neg[facet]
+        parent_mean = p_alpha / (p_alpha + p_beta)
+
+        cap_pos = cell.direct_positive_mass + cell.embedded_positive_mass
+        cap_neg = cell.direct_negative_mass + cell.embedded_negative_mass
+        independent_mass = cap_pos + cap_neg
+        independent_groups = len(cell.independent_surface_groups)
+        cap_alpha = 1.0 + cap_pos
+        cap_beta = 1.0 + cap_neg
+        cap_mean = cap_alpha / (cap_alpha + cap_beta)
+        divergence = abs(cap_mean - parent_mean)
+
+        has_episode = facet in episode_facets
+        persistent = (
+            independent_groups >= min_groups
+            and independent_mass >= min_mass
+            and divergence >= divergence_threshold
+        )
+        episode_trigger = (
+            has_episode and independent_mass > 0.0 and divergence >= episode_threshold
+        )
+        if not (persistent or episode_trigger):
+            continue
+
+        # Shared parent as a shrinkage prior over the capability slice.
+        prior_alpha = shrinkage * parent_mean
+        prior_beta = shrinkage * (1.0 - parent_mean)
+        residual_alpha = prior_alpha + cap_pos
+        residual_beta = prior_beta + cap_neg
+        residual_mean = residual_alpha / (residual_alpha + residual_beta)
+        reason = "persistent_residual_disagreement" if persistent else "closed_diagnostic_episode"
+        rows.append(
+            {
+                "facet_id": facet,
+                "capability": capability,
+                "active": True,
+                "activation_reason": reason,
+                "residual_alpha": residual_alpha,
+                "residual_beta": residual_beta,
+                "residual_mean": residual_mean,
+                "parent_alpha": p_alpha,
+                "parent_beta": p_beta,
+                "parent_mean": parent_mean,
+                "divergence": divergence,
+                "independent_groups": independent_groups,
+                "independent_mass": independent_mass,
+            }
+        )
+
+    repository.replace_capability_residual_state(
+        rows=rows, algorithm_version=KM_ALGORITHM_VERSION, clock=clock
+    )
 
 
 def _sync_unresolved_cause_factors(
