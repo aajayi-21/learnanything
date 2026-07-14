@@ -84,6 +84,47 @@ class GoalsFile(VaultModel):
     goals: list[Goal] = Field(default_factory=list)
 
 
+class SourceSetScope(VaultModel):
+    """One unit in a member's scope, with an optional per-unit role override
+    (spec_source_ingestion_v2 §4.3 — a textbook chapter's exercise section can
+    act as a problem set)."""
+
+    unit_id: str
+    role_override: str | None = None
+
+
+class SourceSetMember(VaultModel):
+    """A pinned source in a set. Authoritative role/scope/priority live HERE, not
+    on the source note — one source of truth (§4.3). ``revision_id`` is required
+    and pinned; ``source_id`` lets the system discover later revisions without
+    silently changing the collection. Empty scope = whole artifact."""
+
+    source_id: str
+    revision_id: str
+    default_role: str = "reference"
+    scope: list[SourceSetScope] = Field(default_factory=list)
+    priority: int = 1
+
+
+class SourceSet(VaultModel):
+    """A source collection with pinned revisions (§4.3). Scheduling-neutral: goals
+    may reference sets via ``source_set_ids``, but a set never references a goal
+    and carries no scheduling semantics."""
+
+    id: str
+    subject_id: str
+    title: str
+    members: list[SourceSetMember] = Field(default_factory=list)
+    priority: int = 1
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class SourceSetsFile(VaultModel):
+    schema_version: int = 1
+    source_sets: list[SourceSet] = Field(default_factory=list)
+
+
 class Concept(VaultModel):
     title: str
     type: Literal["concept", "procedure", "skill", "misconception"] = "concept"
@@ -481,6 +522,7 @@ class LoadedVault:
     evidence_facets: dict[str, EvidenceFacet] = field(default_factory=dict)
     facet_aliases: dict[str, str] = field(default_factory=dict)
     notes: dict[str, Note] = field(default_factory=dict)
+    source_sets: list[SourceSet] = field(default_factory=list)
     issues: list[DoctorIssue] = field(default_factory=list)
 
     def learning_object_for_item(self, item: PracticeItem) -> LearningObject | None:

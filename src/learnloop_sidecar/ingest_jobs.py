@@ -203,6 +203,31 @@ class DurableIngestJobs:
         self._ensure_worker()
         return batch_id
 
+    def enqueue_inventory(
+        self,
+        *,
+        extraction_id: str,
+        units: list[dict[str, Any]],
+        subject_id: str | None = None,
+        source_set_id: str | None = None,
+        input_budget_tokens: int | None = None,
+    ) -> str:
+        """Enqueue a role-aware unit-inventory batch (§7). Cached units cost zero
+        tokens; only semantic-hash-changed units re-inventory."""
+
+        runner = self._require_runner()
+        payload: dict[str, Any] = {"extraction_id": extraction_id, "units": units}
+        if input_budget_tokens is not None:
+            payload["input_budget_tokens"] = input_budget_tokens
+        batch_id = runner.enqueue_batch(
+            "import_inventory",
+            [JobSpec("inventory", payload)],
+            subject_id=subject_id,
+            source_set_id=source_set_id,
+        )
+        self._ensure_worker()
+        return batch_id
+
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
         runner = self._require_runner()
         batch = runner.repo.get_ingest_batch(batch_id)

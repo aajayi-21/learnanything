@@ -372,6 +372,43 @@ pub async fn get_build_plan(
 }
 
 #[tauri::command]
+pub async fn list_source_sets(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "list_source_sets", json!({})).await
+}
+
+#[tauri::command]
+pub async fn get_source_set(
+    source_set_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_source_set", json!({"sourceSetId": source_set_id})).await
+}
+
+#[tauri::command]
+pub async fn upsert_source_set(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "upsert_source_set", input).await
+}
+
+#[tauri::command]
+pub async fn get_source_coverage(
+    source_set_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_source_coverage", json!({"sourceSetId": source_set_id})).await
+}
+
+#[tauri::command]
+pub async fn start_inventory(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "start_inventory", input).await
+}
+
+#[tauri::command]
 pub async fn start_extraction_repair(
     input: Value,
     sidecar: State<'_, SidecarManager>,

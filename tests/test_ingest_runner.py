@@ -339,8 +339,10 @@ def test_legacy_ingest_handler_wraps_pipeline_with_stub_client(tmp_path):
 
 
 def test_reserved_job_types_fail_with_not_implemented_seam(tmp_path):
+    # `inventory` landed in ING M4; `bootstrap_synthesis`/`append_synthesis`
+    # remain reserved seams for M6.
     runner = _runner(tmp_path)
-    batch_id = runner.enqueue_batch("create_study_map", [JobSpec("inventory", {"unit_id": "u1"})])
+    batch_id = runner.enqueue_batch("create_study_map", [JobSpec("bootstrap_synthesis", {"set_id": "s1"})])
     runner.drain()
     job = runner.repo.ingest_jobs_for_batch(batch_id)[0]
     assert job["status"] == "failed"

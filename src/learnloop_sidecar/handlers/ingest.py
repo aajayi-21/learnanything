@@ -348,6 +348,122 @@ def start_extraction_repair(ctx: SidecarContext, params: StartExtractionRepairIn
     return versioned(ctx.ingest_jobs.get_batch(batch_id))
 
 
+class ListSourceSetsInput(ParamsModel):
+    pass
+
+
+class SourceSetRefInput(ParamsModel):
+    source_set_id: str
+
+
+class SourceSetScopeParams(ParamsModel):
+    unit_id: str
+    role_override: str | None = None
+
+
+class SourceSetMemberParams(ParamsModel):
+    source_id: str
+    revision_id: str
+    default_role: str = "reference"
+    scope: list[SourceSetScopeParams] = []
+    priority: int = 1
+
+
+class UpsertSourceSetInput(ParamsModel):
+    id: str
+    subject_id: str
+    title: str = ""
+    members: list[SourceSetMemberParams] = []
+
+
+class StartInventoryInput(ParamsModel):
+    extraction_ref: str
+    units: list[dict[str, Any]]
+    subject_id: str | None = None
+    source_set_id: str | None = None
+
+
+def _source_set_or_error(vault, set_id: str):
+    source_set = next((s for s in vault.source_sets if s.id == set_id), None)
+    if source_set is None:
+        raise SidecarError("source_set_not_found", f"Source set '{set_id}' does not exist.")
+    return source_set
+
+
+@method("list_source_sets", ListSourceSetsInput)
+def list_source_sets(ctx: SidecarContext, _params: ListSourceSetsInput) -> dict[str, Any]:
+    """List source collections (§4.3)."""
+
+    vault, _repository = ctx.require_vault()
+    return versioned(
+        {
+            "source_sets": [
+                {"id": s.id, "subject_id": s.subject_id, "title": s.title, "member_count": len(s.members)}
+                for s in vault.source_sets
+            ]
+        }
+    )
+
+
+@method("get_source_set", SourceSetRefInput)
+def get_source_set(ctx: SidecarContext, params: SourceSetRefInput) -> dict[str, Any]:
+    """Show a collection's members, roles, and scopes (§4.3)."""
+
+    vault, _repository = ctx.require_vault()
+    source_set = _source_set_or_error(vault, params.source_set_id)
+    return versioned({"source_set": source_set.model_dump(mode="json")})
+
+
+@method("upsert_source_set", UpsertSourceSetInput)
+def upsert_source_set_rpc(ctx: SidecarContext, params: UpsertSourceSetInput) -> dict[str, Any]:
+    """Create or update a collection; membership owns role/scope/priority (§4.3)."""
+
+    from learnloop.vault.writer import upsert_source_set
+
+    vault, _repository = ctx.require_vault()
+    if params.subject_id not in vault.subjects:
+        raise SidecarError("unknown_subject", f"Subject '{params.subject_id}' does not exist.")
+    members = [member.model_dump(by_alias=False) for member in params.members]
+    upsert_source_set(
+        vault.root,
+        {"id": params.id, "subject_id": params.subject_id, "title": params.title or params.id, "members": members},
+    )
+    ctx.reload(maintenance=False)
+    refreshed, _repo = ctx.require_vault()
+    return versioned({"source_set": _source_set_or_error(refreshed, params.id).model_dump(mode="json")})
+
+
+@method("get_source_coverage", SourceSetRefInput)
+def get_source_coverage(ctx: SidecarContext, params: SourceSetRefInput) -> dict[str, Any]:
+    """Deterministic coverage + readiness preview for a collection (§9.3)."""
+
+    from learnloop.services.source_coverage import build_source_coverage
+
+    vault, repository = ctx.require_vault()
+    source_set = _source_set_or_error(vault, params.source_set_id)
+    return versioned({"coverage": build_source_coverage(repository, vault, source_set)})
+
+
+@method("start_inventory", StartInventoryInput)
+def start_inventory(ctx: SidecarContext, params: StartInventoryInput) -> dict[str, Any]:
+    """Enqueue a role-aware unit-inventory batch (§7). Cache hits cost zero tokens."""
+
+    vault, repository = ctx.require_vault()
+    extraction_id = resolve_extraction_id(repository, params.extraction_ref)
+    if extraction_id is None:
+        raise SidecarError("extraction_not_found", f"No extraction resolves for '{params.extraction_ref}'.")
+    if not params.units:
+        raise SidecarError("no_units", "start_inventory requires at least one unit.")
+    batch_id = ctx.ingest_jobs.enqueue_inventory(
+        extraction_id=extraction_id,
+        units=params.units,
+        subject_id=params.subject_id,
+        source_set_id=params.source_set_id,
+        input_budget_tokens=vault.config.ingest.budgets.inventory_input_tokens,
+    )
+    return versioned(ctx.ingest_jobs.get_batch(batch_id))
+
+
 def _artifact_title(artifact: dict[str, Any], revision: dict[str, Any] | None) -> str:
     if revision is not None and revision.get("original_uri"):
         return str(revision["original_uri"])

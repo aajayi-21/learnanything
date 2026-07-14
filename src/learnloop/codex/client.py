@@ -31,6 +31,8 @@ from learnloop.codex.prompts import (
     PROBE_INSTANCE_PROMPT_VERSION,
     PROMOTION_ANALYSIS_PROMPT,
     PROMOTION_ANALYSIS_PROMPT_VERSION,
+    SOURCE_UNIT_INVENTORY_PROMPT,
+    SOURCE_UNIT_INVENTORY_PROMPT_VERSION,
     TEACH_BACK_PROMPT_VERSION,
     TUTOR_QA_PROMPT_VERSION,
 )
@@ -43,6 +45,7 @@ from learnloop.codex.schemas import (
     ProbeFamilyTrials,
     ProbeInstanceSurfaces,
     PromotionAnalysis,
+    SourceUnitInventory,
     TeachBackQuestion,
     TutorAnswer,
 )
@@ -299,6 +302,25 @@ class ProbeFamilyTrialsContext:
     non_applicable_controls: list[str] = field(default_factory=list)
     surfaces: list[dict] = field(default_factory=list)
     trials_per_hypothesis: int = 3
+
+
+@dataclass(frozen=True)
+class SourceUnitInventoryContext:
+    """Bounded input for one role-aware unit inventory (source-ingestion §7).
+
+    ``unit_view`` is the deterministic M3-style inventory view of ONE unit (or
+    one oversize-unit window): {unit_id, semantic_hash, label, section_heading,
+    blocks:[{span_id, kind, text}], window_ordinal, window_count}. ``role`` is
+    the confirmed membership/unit role (§4.2) and ``inventory_profile`` is the
+    requested profile. The source text is untrusted — the prompt delimits it and
+    instructs the model to ignore embedded instructions.
+    """
+
+    unit_id: str
+    semantic_hash: str
+    role: str
+    inventory_profile: str  # semantic | practice | assessment | combined
+    unit_view: dict = field(default_factory=dict)
 
 
 class CodexClient(Protocol):
@@ -620,6 +642,24 @@ class SdkCodexClient:
             purpose="probe_family_trials",
         )
         return ProbeFamilyTrials.model_validate_json(text)
+
+    def run_source_unit_inventory(self, context: SourceUnitInventoryContext) -> SourceUnitInventory:
+        """Role-aware unit inventory over one unit view (source-ingestion §7).
+
+        Deliberately NOT on the ``CodexClient`` Protocol / ``HttpCodexClient`` —
+        the inventory service discovers it via ``getattr(client,
+        "run_source_unit_inventory", None)`` and degrades (no inventory produced)
+        when the provider lacks it or is unavailable. The returned contract is
+        candidate-only; the service reassigns deterministic ids and validates
+        span citations before persisting.
+        """
+
+        text = self._run_structured(
+            _source_unit_inventory_prompt(context),
+            _codex_output_schema(SourceUnitInventory),
+            purpose="source_unit_inventory",
+        )
+        return SourceUnitInventory.model_validate_json(text)
 
     def _run_structured(self, prompt: str, output_schema: dict[str, Any], *, purpose: str) -> str:
         _ensure_sdk_importable(self.sdk_python_path)
@@ -1084,6 +1124,19 @@ def _probe_family_trials_prompt(context: ProbeFamilyTrialsContext) -> str:
         PROBE_FAMILY_TRIALS_PROMPT_VERSION,
         {
             "task": PROBE_FAMILY_TRIALS_PROMPT,
+            "context": asdict(context),
+        },
+    )
+
+
+def _source_unit_inventory_prompt(context: SourceUnitInventoryContext) -> str:
+    """Role-aware unit inventory prompt (source-ingestion §7)."""
+
+    return _json_prompt(
+        "learnloop source unit inventory",
+        SOURCE_UNIT_INVENTORY_PROMPT_VERSION,
+        {
+            "task": SOURCE_UNIT_INVENTORY_PROMPT,
             "context": asdict(context),
         },
     )

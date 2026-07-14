@@ -65,6 +65,12 @@ class VaultPaths:
     def sources_dir(self) -> Path:
         return self.root / "sources"
 
+    @property
+    def source_sets_path(self) -> Path:
+        # source_sets.yaml co-located with the vault-level source library, since
+        # members pin sources/<source_id> revisions (spec_source_ingestion_v2 §4.3).
+        return self.root / "sources" / "source_sets.yaml"
+
     def source_dir(self, source_id: str) -> Path:
         return self.sources_dir / source_id
 

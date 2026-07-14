@@ -7457,6 +7457,8 @@ class Repository:
         selected_unit_ids: list[str],
         boundary_overrides: list[dict] | None = None,
         needs_review: list[str] | None = None,
+        exam_use_modes: Mapping[str, str] | None = None,
+        exam_paper_metadata: Mapping[str, Any] | None = None,
         clock: Clock | None = None,
     ) -> None:
         now = utc_now_iso(clock)
@@ -7465,15 +7467,19 @@ class Repository:
                 """
                 INSERT INTO source_unit_selections(
                   extraction_id, source_id, revision_id, selected_unit_ids_json,
-                  boundary_overrides_json, needs_review_json, created_at, updated_at
+                  boundary_overrides_json, needs_review_json,
+                  exam_use_modes_json, exam_paper_metadata_json,
+                  created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(extraction_id) DO UPDATE SET
                   source_id = excluded.source_id,
                   revision_id = excluded.revision_id,
                   selected_unit_ids_json = excluded.selected_unit_ids_json,
                   boundary_overrides_json = excluded.boundary_overrides_json,
                   needs_review_json = excluded.needs_review_json,
+                  exam_use_modes_json = excluded.exam_use_modes_json,
+                  exam_paper_metadata_json = excluded.exam_paper_metadata_json,
                   updated_at = excluded.updated_at
                 """,
                 (
@@ -7483,6 +7489,8 @@ class Repository:
                     _json(list(selected_unit_ids)),
                     _json(list(boundary_overrides or [])),
                     _json(list(needs_review or [])),
+                    _json(dict(exam_use_modes or {})),
+                    _json(dict(exam_paper_metadata or {})),
                     now,
                     now,
                 ),
@@ -7503,6 +7511,190 @@ class Repository:
                 (revision_id,),
             ).fetchall()
         return [_decode_unit_selection(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Role-specific unit inventories (spec_source_ingestion_v2 §7)
+    # ------------------------------------------------------------------
+
+    def insert_unit_inventory(
+        self,
+        *,
+        id: str,
+        source_revision_id: str,
+        extraction_id: str,
+        unit_id: str,
+        unit_semantic_hash: str,
+        inventory_profile: str,
+        inventory_schema_version: int,
+        prompt_version: str,
+        provider: str,
+        model: str,
+        inventory: Mapping[str, Any],
+        usage: Mapping[str, Any] | None = None,
+        clock: Clock | None = None,
+    ) -> None:
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO source_unit_inventories(
+                  id, source_revision_id, extraction_id, unit_id, unit_semantic_hash,
+                  inventory_profile, inventory_schema_version, prompt_version,
+                  provider, model, inventory_json, usage_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_revision_id, unit_id, unit_semantic_hash,
+                            inventory_profile, inventory_schema_version,
+                            prompt_version, provider, model)
+                  DO UPDATE SET
+                    inventory_json = excluded.inventory_json,
+                    usage_json = excluded.usage_json,
+                    extraction_id = excluded.extraction_id
+                """,
+                (
+                    id,
+                    source_revision_id,
+                    extraction_id,
+                    unit_id,
+                    unit_semantic_hash,
+                    inventory_profile,
+                    inventory_schema_version,
+                    prompt_version,
+                    provider,
+                    model,
+                    _json(dict(inventory)),
+                    _json(dict(usage or {})),
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def reusable_unit_inventories(
+        self,
+        *,
+        source_revision_id: str,
+        unit_id: str,
+        unit_semantic_hash: str,
+        inventory_schema_version: int,
+        prompt_version: str,
+        provider: str,
+        model: str,
+    ) -> list[dict[str, Any]]:
+        """Cached rows sharing the non-profile cache identity (§7). The service
+        picks one whose profile satisfies the request via profile_satisfies."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM source_unit_inventories
+                 WHERE source_revision_id = ? AND unit_id = ? AND unit_semantic_hash = ?
+                   AND inventory_schema_version = ? AND prompt_version = ?
+                   AND provider = ? AND model = ?
+                 ORDER BY created_at
+                """,
+                (
+                    source_revision_id,
+                    unit_id,
+                    unit_semantic_hash,
+                    inventory_schema_version,
+                    prompt_version,
+                    provider,
+                    model,
+                ),
+            ).fetchall()
+        return [_decode_unit_inventory(row) for row in rows]
+
+    def get_unit_inventory(self, inventory_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM source_unit_inventories WHERE id = ?", (inventory_id,)
+            ).fetchone()
+        return _decode_unit_inventory(row) if row is not None else None
+
+    def unit_inventories_for_extraction(self, extraction_id: str) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM source_unit_inventories WHERE extraction_id = ? ORDER BY unit_id, created_at",
+                (extraction_id,),
+            ).fetchall()
+        return [_decode_unit_inventory(row) for row in rows]
+
+    def unit_inventories_for_revision(self, revision_id: str) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM source_unit_inventories WHERE source_revision_id = ? ORDER BY unit_id, created_at",
+                (revision_id,),
+            ).fetchall()
+        return [_decode_unit_inventory(row) for row in rows]
+
+    def source_unit_inventory_claims(self) -> list[dict[str, Any]]:
+        """Facet-candidate harvesting seam (knowledge-model §3.3).
+
+        Flattens every inventory row's claims/concept mentions into
+        {text, unit_id, refs} candidates. Candidates only — never canonical."""
+
+        candidates: list[dict[str, Any]] = []
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT id, unit_id, inventory_json FROM source_unit_inventories ORDER BY unit_id, id"
+            ).fetchall()
+        for row in rows:
+            inventory = _loads(row["inventory_json"], {})
+            unit_id = row["unit_id"]
+            for claim in inventory.get("claims", []):
+                statement = (claim.get("statement") or "").strip()
+                if statement:
+                    candidates.append(
+                        {"text": statement, "unit_id": unit_id, "refs": [row["id"], claim.get("claim_id", "")]}
+                    )
+            for mention in inventory.get("concept_mentions", []):
+                name = (mention.get("name") or "").strip()
+                if name:
+                    candidates.append(
+                        {"text": name, "unit_id": unit_id, "refs": [row["id"], mention.get("mention_id", "")]}
+                    )
+        return candidates
+
+    # ------------------------------------------------------------------
+    # Deterministic exam profiles (spec_source_ingestion_v2 §7, §4.2)
+    # ------------------------------------------------------------------
+
+    def upsert_exam_profile(
+        self,
+        *,
+        id: str,
+        scope_kind: str,
+        scope_id: str,
+        profile_hash: str,
+        profile: Mapping[str, Any],
+        clock: Clock | None = None,
+    ) -> None:
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO source_exam_profiles(
+                  id, scope_kind, scope_id, profile_hash, profile_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_kind, scope_id, profile_hash) DO UPDATE SET
+                  profile_json = excluded.profile_json
+                """,
+                (id, scope_kind, scope_id, profile_hash, _json(dict(profile)), now),
+            )
+            connection.commit()
+
+    def get_exam_profile(self, scope_kind: str, scope_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM source_exam_profiles
+                 WHERE scope_kind = ? AND scope_id = ?
+                 ORDER BY created_at DESC LIMIT 1
+                """,
+                (scope_kind, scope_id),
+            ).fetchone()
+        return _decode_exam_profile(row) if row is not None else None
 
     # ------------------------------------------------------------------
     # Durable ingest batches/jobs (spec_source_ingestion_v2 §6.2)
@@ -8562,6 +8754,21 @@ def _decode_unit_selection(row: sqlite3.Row) -> dict[str, Any]:
     payload["selected_unit_ids"] = _loads(payload.pop("selected_unit_ids_json", None), [])
     payload["boundary_overrides"] = _loads(payload.pop("boundary_overrides_json", None), [])
     payload["needs_review"] = _loads(payload.pop("needs_review_json", None), [])
+    payload["exam_use_modes"] = _loads(payload.pop("exam_use_modes_json", None), {})
+    payload["exam_paper_metadata"] = _loads(payload.pop("exam_paper_metadata_json", None), {})
+    return payload
+
+
+def _decode_unit_inventory(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["inventory"] = _loads(payload.pop("inventory_json", None), {})
+    payload["usage"] = _loads(payload.pop("usage_json", None), {})
+    return payload
+
+
+def _decode_exam_profile(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["profile"] = _loads(payload.pop("profile_json", None), {})
     return payload
 
 

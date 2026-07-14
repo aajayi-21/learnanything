@@ -1138,6 +1138,7 @@ export interface SourceLibrarySnapshot {
 export interface UnitInventoryMarker {
   inventoried: boolean;
   inventoryProfile: string | null;
+  profiles?: string[];
 }
 
 export interface OutlineUnit {
@@ -1185,6 +1186,63 @@ export interface SaveUnitSelectionInput {
   extractionId: string;
   selectedUnitIds: string[];
   boundaryOverrides?: Record<string, unknown>[];
+}
+
+// ── ING M4: source sets, role-aware inventories, coverage (§4.3/§7/§9.3) ──
+
+export interface SourceSetScopeDto {
+  unitId: string;
+  roleOverride: string | null;
+}
+
+export interface SourceSetMemberDto {
+  sourceId: string;
+  revisionId: string;
+  defaultRole: string;
+  scope: SourceSetScopeDto[];
+  priority: number;
+}
+
+export interface SourceSetDto {
+  id: string;
+  subjectId: string;
+  title: string;
+  members: SourceSetMemberDto[];
+  priority?: number;
+}
+
+export interface SourceSetSummaryDto {
+  id: string;
+  subjectId: string;
+  title: string;
+  memberCount: number;
+}
+
+export interface SourceSetsSnapshot {
+  version?: number;
+  sourceSets: SourceSetSummaryDto[];
+}
+
+export interface CoverageReadinessFlag {
+  code: string;
+  message: string;
+}
+
+export interface SourceCoverageDto {
+  sourceSetId: string;
+  subjectId: string;
+  curriculumLinkageSeam: string;
+  members: Record<string, unknown>[];
+  conceptMatrix: Record<string, unknown>[];
+  assessmentAlignment: Record<string, unknown> | null;
+  readiness: { ready: boolean; flags: CoverageReadinessFlag[]; notInventoried: Record<string, string>[] };
+}
+
+export interface StartInventoryInput {
+  extractionRef: string;
+  units: { unitId: string; role: string; profile?: string }[];
+  subjectId?: string | null;
+  sourceSetId?: string | null;
 }
 
 export interface AcquisitionPreviewItem {

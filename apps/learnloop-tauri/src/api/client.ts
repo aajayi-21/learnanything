@@ -77,6 +77,10 @@ import type {
   GoalSeriesSnapshot,
   GoalsListSnapshot,
   StartCalibrationSessionInput,
+  SourceSetDto,
+  SourceSetsSnapshot,
+  SourceCoverageDto,
+  StartInventoryInput,
 } from "./dto";
 
 async function call<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -182,6 +186,15 @@ export const api = {
     call<BuildPlan>("get_build_plan", { input: { selections, subjectId: subjectId ?? null } }),
   startExtractionRepair: (input: StartExtractionRepairInput) =>
     call<IngestBatchDto>("start_extraction_repair", { input }),
+  listSourceSets: () => call<SourceSetsSnapshot>("list_source_sets"),
+  getSourceSet: (sourceSetId: string) =>
+    call<{ version: number; sourceSet: SourceSetDto }>("get_source_set", { sourceSetId }),
+  upsertSourceSet: (input: SourceSetDto) =>
+    call<{ version: number; sourceSet: SourceSetDto }>("upsert_source_set", { input }),
+  getSourceCoverage: (sourceSetId: string) =>
+    call<{ version: number; coverage: SourceCoverageDto }>("get_source_coverage", { sourceSetId }),
+  startInventory: (input: StartInventoryInput) =>
+    call<IngestBatchDto>("start_inventory", { input }),
   readVaultFile: (path: string) => call<VaultFileContent>("read_vault_file", { path }),
   writeVaultFile: (path: string, body: string) => call<VaultFileContent>("write_vault_file", { path, body }),
   createVaultFile: (path: string, body = "") =>

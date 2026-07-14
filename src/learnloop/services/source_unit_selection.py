@@ -91,20 +91,47 @@ def validate_unit_selection(
             raise SelectionValidationError(f"split references missing span '{at_span}'.")
 
 
+# Exam per-unit use modes chosen at selection (spec_source_ingestion_v2 §4.2).
+EXAM_USE_MODES = frozenset({"held_out_evaluation", "available_for_practice", "blueprint_only"})
+# Default: a configurable held-out fraction, remainder blueprint_only (§4.2).
+DEFAULT_EXAM_USE_MODE = "blueprint_only"
+DEFAULT_HELD_OUT_FRACTION = 0.3
+
+
+def default_exam_use_modes(unit_ids: list[str], *, held_out_fraction: float = DEFAULT_HELD_OUT_FRACTION) -> dict[str, str]:
+    """Deterministic default: the first ``held_out_fraction`` of units (by sorted
+    id) are held-out evaluation, the rest blueprint_only (§4.2)."""
+
+    ordered = sorted(unit_ids)
+    held_out_count = int(len(ordered) * max(0.0, min(1.0, held_out_fraction)))
+    held_out = set(ordered[:held_out_count])
+    return {unit_id: ("held_out_evaluation" if unit_id in held_out else DEFAULT_EXAM_USE_MODE) for unit_id in ordered}
+
+
 def save_unit_selection(
     repo: Repository,
     extraction_id: str,
     selected_unit_ids: list[str],
     *,
     boundary_overrides: list[dict] | None = None,
+    exam_use_modes: dict[str, str] | None = None,
+    exam_paper_metadata: dict | None = None,
     clock: Clock | None = None,
 ) -> dict:
-    """Validate and persist a selection for one extraction run."""
+    """Validate and persist a selection for one extraction run.
+
+    ``exam_use_modes`` maps unit_id → use mode (§4.2); ``exam_paper_metadata``
+    carries administration year/syllabus/weighting for the paper. Both are chosen
+    at selection so downstream exam-profile aggregation and leakage policy read
+    them without a second decision point."""
 
     ir = repo.load_document_ir(extraction_id)
     if ir is None:
         raise SelectionValidationError(f"extraction '{extraction_id}' has no persisted IR.")
     validate_unit_selection(ir, selected_unit_ids, boundary_overrides)
+    for unit_id, mode in (exam_use_modes or {}).items():
+        if mode not in EXAM_USE_MODES:
+            raise SelectionValidationError(f"unknown exam use mode '{mode}' for unit '{unit_id}'.")
     run = repo.get_extraction_run(extraction_id)
     revision_id = run["revision_id"] if run else None
     revision = repo.get_source_revision(revision_id) if revision_id else None
@@ -116,6 +143,8 @@ def save_unit_selection(
         selected_unit_ids=list(selected_unit_ids),
         boundary_overrides=normalize_overrides(boundary_overrides),
         needs_review=[],
+        exam_use_modes=dict(exam_use_modes or {}),
+        exam_paper_metadata=dict(exam_paper_metadata or {}),
         clock=clock,
     )
     return repo.get_unit_selection(extraction_id) or {}
@@ -230,6 +259,16 @@ def reanchor_selection_to(
     revision_id = run["revision_id"] if run else None
     revision = repo.get_source_revision(revision_id) if revision_id else None
     source_id = revision["source_id"] if revision else None
+    # Carry exam use modes/metadata forward, re-anchoring per-unit modes onto the
+    # new unit ids (dropping modes for units that failed to re-anchor).
+    old_modes = stored.get("exam_use_modes") or {}
+    from_ir_units = {unit.unit_id for unit in from_ir.units}
+    reanchor_map = reanchor_units(from_ir, to_ir)
+    new_modes = {
+        reanchor_map[old_id]: mode
+        for old_id, mode in old_modes.items()
+        if old_id in from_ir_units and reanchor_map.get(old_id) is not None
+    }
     repo.upsert_unit_selection(
         extraction_id=to_extraction_id,
         source_id=source_id,
@@ -237,6 +276,8 @@ def reanchor_selection_to(
         selected_unit_ids=reanchored.selected_unit_ids,
         boundary_overrides=reanchored.boundary_overrides,
         needs_review=reanchored.needs_review,
+        exam_use_modes=new_modes,
+        exam_paper_metadata=stored.get("exam_paper_metadata") or {},
         clock=clock,
     )
     return repo.get_unit_selection(to_extraction_id) or {}

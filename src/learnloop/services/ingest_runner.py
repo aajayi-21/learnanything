@@ -108,6 +108,7 @@ class RunnerServices:
     fetch: Callable[[str, str, "JobContext"], FetchedBytes] | None = None
     extract: Callable[[FetchedBytes, str, "JobContext"], Any] | None = None
     run_legacy_ingest: Callable[..., Any] | None = None
+    inventory_client_factory: Callable[["JobContext"], Any] | None = None
 
     def fetch_bytes(self, source: str, category: str, ctx: "JobContext") -> FetchedBytes:
         return (self.fetch or default_fetch)(source, category, ctx)
@@ -117,6 +118,9 @@ class RunnerServices:
 
     def legacy_ingest(self, **kwargs: Any) -> Any:
         return (self.run_legacy_ingest or default_run_legacy_ingest)(**kwargs)
+
+    def inventory_client(self, ctx: "JobContext") -> Any:
+        return (self.inventory_client_factory or default_inventory_client)(ctx)
 
 
 @dataclass
@@ -324,9 +328,89 @@ def default_run_legacy_ingest(
     )
 
 
+def default_inventory_client(ctx: JobContext) -> Any:
+    """Resolve a codex client for unit inventory (§7). Codex-only: the inventory
+    method is getattr-discovered on the SDK client, so a provider lacking it
+    degrades to an explicit unavailable error rather than fabricating rows."""
+
+    from learnloop.codex.client import make_codex_client
+    from learnloop.codex.runtime import check_codex_runtime
+    from learnloop.vault.loader import load_vault
+
+    vault = load_vault(ctx.vault_root)
+    runtime = check_codex_runtime(ctx.vault_root, vault.config.codex)
+    if not runtime.ready:
+        raise IngestRunnerError(runtime.message or f"Codex runtime is {runtime.status}.")
+    return make_codex_client(vault.config.codex, ctx.vault_root)
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
+
+
+def handle_inventory(ctx: JobContext) -> dict[str, Any]:
+    """inventory: role-aware per-unit inventories for the selected units (§7).
+
+    Depends on extraction (the runner enforces this via job dependencies).
+    Payload: ``extraction_id`` and ``units`` = [{unit_id, role, profile?}]. Each
+    unit is inventoried through the cache: a cache hit records ZERO tokens
+    (``run_unit_inventory`` returns ``cache_hit``), and only semantic-hash-changed
+    units are ever re-inventoried across collections/revisions (§3.2)."""
+
+    from learnloop.services.source_unit_inventory import run_unit_inventory
+
+    payload = ctx.payload
+    extraction_id = str(payload.get("extraction_id") or "").strip()
+    if not extraction_id:
+        raise IngestRunnerError("inventory job requires an 'extraction_id'.")
+    units = payload.get("units") or []
+    if not units:
+        raise IngestRunnerError("inventory job requires at least one unit.")
+    budget = _optional_int(payload.get("input_budget_tokens")) or 20000
+
+    ctx.report("extracted", message="Preparing unit inventories")
+    client = ctx.services.inventory_client(ctx)
+
+    results: list[dict[str, Any]] = []
+    total = len(units)
+    for index, spec in enumerate(units):
+        unit_id = str(spec.get("unit_id") or "").strip()
+        if not unit_id:
+            raise IngestRunnerError("every inventory unit needs a 'unit_id'.")
+        ctx.report(
+            "inventoried",
+            message=f"Inventorying unit {index + 1} of {total}",
+            current_window=index + 1,
+            total_windows=total,
+        )
+        result = run_unit_inventory(
+            ctx.repo,
+            extraction_id,
+            unit_id,
+            role=str(spec.get("role") or "reference"),
+            profile=spec.get("profile"),
+            client=client,
+            input_budget_tokens=budget,
+            clock=ctx.clock,
+        )
+        ctx.record_usage(dict(result.usage or {}))
+        results.append(
+            {
+                "unit_id": unit_id,
+                "inventory_id": result.inventory_id,
+                "profile": result.profile,
+                "cache_hit": result.cache_hit,
+                "reused_profile": result.reused_profile,
+            }
+        )
+
+    ctx.report("inventoried", message="Unit inventories ready")
+    return {
+        "extraction_id": extraction_id,
+        "units": results,
+        "cache_hits": sum(1 for row in results if row["cache_hit"]),
+    }
 
 
 def handle_import(ctx: JobContext) -> dict[str, Any]:
@@ -628,7 +712,7 @@ DEFAULT_HANDLERS: dict[str, Handler] = {
     "import": handle_import,
     "legacy_ingest": handle_legacy_ingest,
     "exam_ingest": handle_legacy_ingest,
-    "inventory": _not_implemented_handler("inventory"),
+    "inventory": handle_inventory,
     "bootstrap_synthesis": _not_implemented_handler("bootstrap_synthesis"),
     "append_synthesis": _not_implemented_handler("append_synthesis"),
     "extraction_repair": handle_extraction_repair,
