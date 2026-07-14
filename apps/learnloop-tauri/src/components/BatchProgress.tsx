@@ -96,7 +96,13 @@ export function IngestViewTabs({ view, onChange }: { view: IngestView; onChange:
 }
 
 // ── Source library card grid ────────────────────────────────────────────
-export function SourceLibraryView({ onOpenBatch }: { onOpenBatch: (batchId: string) => void }) {
+export function SourceLibraryView({
+  onOpenBatch,
+  onOpenOutline
+}: {
+  onOpenBatch: (batchId: string) => void;
+  onOpenOutline: (card: SourceLibraryCard) => void;
+}) {
   const [sources, setSources] = useState<SourceLibraryCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [quickSource, setQuickSource] = useState("");
@@ -200,7 +206,7 @@ export function SourceLibraryView({ onOpenBatch }: { onOpenBatch: (batchId: stri
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
           {sources.map((card) => (
-            <SourceCard key={card.sourceId} card={card} />
+            <SourceCard key={card.sourceId} card={card} onOpenOutline={() => onOpenOutline(card)} />
           ))}
         </div>
       )}
@@ -208,8 +214,9 @@ export function SourceLibraryView({ onOpenBatch }: { onOpenBatch: (batchId: stri
   );
 }
 
-function SourceCard({ card }: { card: SourceLibraryCard }) {
+function SourceCard({ card, onOpenOutline }: { card: SourceLibraryCard; onOpenOutline: () => void }) {
   const readiness = READINESS_META[card.readiness];
+  const outlineable = card.readiness === "ready";
   return (
     <Card style={{ display: "flex", flexDirection: "column", gap: 8, borderLeft: `3px solid ${readiness.color}` }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
@@ -240,6 +247,14 @@ function SourceCard({ card }: { card: SourceLibraryCard }) {
         <Faint>role {card.suggestedRole ?? "—"}</Faint>
         <span style={{ flex: 1 }} />
         {card.updateAvailable && <Pill color="amber">update available</Pill>}
+        {outlineable && (
+          <span
+            onClick={onOpenOutline}
+            style={{ color: COLOR.amberLink, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 2, fontSize: 11 }}
+          >
+            outline &amp; select →
+          </span>
+        )}
       </div>
     </Card>
   );

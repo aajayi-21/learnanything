@@ -7120,6 +7120,66 @@ class Repository:
         return detect_locator_scheme(locator)
 
     # ------------------------------------------------------------------
+    # Unit selections (spec_source_ingestion_v2 §5.3, migration 040)
+    # ------------------------------------------------------------------
+
+    def upsert_unit_selection(
+        self,
+        *,
+        extraction_id: str,
+        source_id: str | None,
+        revision_id: str | None,
+        selected_unit_ids: list[str],
+        boundary_overrides: list[dict] | None = None,
+        needs_review: list[str] | None = None,
+        clock: Clock | None = None,
+    ) -> None:
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO source_unit_selections(
+                  extraction_id, source_id, revision_id, selected_unit_ids_json,
+                  boundary_overrides_json, needs_review_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(extraction_id) DO UPDATE SET
+                  source_id = excluded.source_id,
+                  revision_id = excluded.revision_id,
+                  selected_unit_ids_json = excluded.selected_unit_ids_json,
+                  boundary_overrides_json = excluded.boundary_overrides_json,
+                  needs_review_json = excluded.needs_review_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    extraction_id,
+                    source_id,
+                    revision_id,
+                    _json(list(selected_unit_ids)),
+                    _json(list(boundary_overrides or [])),
+                    _json(list(needs_review or [])),
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def get_unit_selection(self, extraction_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM source_unit_selections WHERE extraction_id = ?", (extraction_id,)
+            ).fetchone()
+        return _decode_unit_selection(row) if row is not None else None
+
+    def unit_selections_for_revision(self, revision_id: str) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM source_unit_selections WHERE revision_id = ? ORDER BY updated_at",
+                (revision_id,),
+            ).fetchall()
+        return [_decode_unit_selection(row) for row in rows]
+
+    # ------------------------------------------------------------------
     # Durable ingest batches/jobs (spec_source_ingestion_v2 §6.2)
     # ------------------------------------------------------------------
 
@@ -8107,6 +8167,14 @@ def _decode_extraction_run(row: sqlite3.Row) -> dict[str, Any]:
     payload["model_versions"] = _loads(payload.pop("model_versions_json", None), {})
     payload["config"] = _loads(payload.pop("config_json", None), {})
     payload["page_selection"] = _loads(payload.pop("page_selection_json", None), None)
+    return payload
+
+
+def _decode_unit_selection(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["selected_unit_ids"] = _loads(payload.pop("selected_unit_ids_json", None), [])
+    payload["boundary_overrides"] = _loads(payload.pop("boundary_overrides_json", None), [])
+    payload["needs_review"] = _loads(payload.pop("needs_review_json", None), [])
     return payload
 
 

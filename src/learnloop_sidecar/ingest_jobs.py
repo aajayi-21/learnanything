@@ -147,20 +147,59 @@ class DurableIngestJobs:
         *,
         subject_id: str | None = None,
         inventory: bool = False,
+        estimate: dict[str, Any] | None = None,
     ) -> str:
         """Enqueue an Import (or Import & inventory) batch (§6.1). One import job
         per source; when ``inventory`` is set, a dependent inventory job is queued
-        per source (an M3 seam — it fails cleanly with ``not_implemented`` today)."""
+        per source (an M3 seam — it fails cleanly with ``not_implemented`` today).
+
+        A build-plan ``estimate`` (when a batch is started from a plan) is
+        snapshotted onto each import job's payload (§8.6.2)."""
 
         runner = self._require_runner()
         specs: list[JobSpec] = []
         for source in sources:
             import_index = len(specs)
-            specs.append(JobSpec("import", {"source": source}))
+            payload: dict[str, Any] = {"source": source}
+            if estimate is not None:
+                payload["estimate"] = estimate
+            specs.append(JobSpec("import", payload))
             if inventory:
                 specs.append(JobSpec("inventory", {"source": source}, depends_on=(import_index,)))
         workflow = "import_inventory" if inventory else "import"
         batch_id = runner.enqueue_batch(workflow, specs, subject_id=subject_id)
+        self._ensure_worker()
+        return batch_id
+
+    def enqueue_extraction_repair(
+        self,
+        *,
+        revision_id: str,
+        pages: list,
+        repair_options: dict[str, Any] | None,
+        consent: dict[str, Any],
+        parent_extraction_id: str | None = None,
+        subject_id: str | None = None,
+    ) -> str:
+        """Enqueue a consent-gated extraction-repair batch (§2.5)."""
+
+        runner = self._require_runner()
+        batch_id = runner.enqueue_batch(
+            "extraction_repair",
+            [
+                JobSpec(
+                    "extraction_repair",
+                    {
+                        "revision_id": revision_id,
+                        "pages": pages,
+                        "repair_options": repair_options or {},
+                        "consent": consent,
+                        "parent_extraction_id": parent_extraction_id,
+                    },
+                )
+            ],
+            subject_id=subject_id,
+        )
         self._ensure_worker()
         return batch_id
 
