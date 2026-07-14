@@ -346,6 +346,14 @@ def build_due_queue(
     considered_queue = list(queue)
     if limit is not None:
         queue = queue[:limit]
+    # §11.2 intent-first composition — SHADOW ONLY. Compute the intent + rankings
+    # over the already-composed live queue and log them alongside live behavior;
+    # the live queue is NOT reordered (promotion needs held-out gains, not here).
+    shadow_intent = None
+    if vault.config.probe.shadow.enabled:
+        from learnloop.services.intent_planner import shadow_intent_plan
+
+        shadow_intent = shadow_intent_plan(vault, considered_queue)
     if persist_explanations and session.session_id is not None:
         selected_ids = {item.practice_item_id for item in queue}
         explanations = [
@@ -404,7 +412,7 @@ def build_due_queue(
             session_id=session.session_id,
             algorithm_version=config.algorithms.algorithm_version,
             requested_limit=limit,
-            session_context=_session_context(session, short_session=short_session, readiness_factor=readiness_factor),
+            session_context=_session_context(session, short_session=short_session, readiness_factor=readiness_factor, shadow_intent=shadow_intent),
             config_snapshot=_scheduler_config_snapshot(config),
             selection_policy="selection_reward_v1",
             probe_presentation=probe_presentation,
@@ -789,14 +797,19 @@ def _session_context(
     *,
     short_session: bool,
     readiness_factor: float | None,
+    shadow_intent: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    context: dict[str, object] = {
         "session_id": session.session_id,
         "available_minutes": session.available_minutes,
         "energy": session.energy,
         "short_session": short_session,
         "readiness_factor": readiness_factor,
     }
+    if shadow_intent is not None:
+        # §11.2 shadow log: intent + within-intent rankings, decision-inert.
+        context["shadow_intent"] = shadow_intent
+    return context
 
 
 def _scheduler_config_snapshot(config: LearnLoopConfig) -> dict[str, object]:

@@ -2928,6 +2928,118 @@ class Repository:
                 )
             connection.commit()
 
+    # -- capability residual activation (§4.2, KM5; DEFAULT OFF) -----------------
+
+    def replace_capability_residual_state(
+        self,
+        *,
+        rows: Iterable[Mapping[str, Any]],
+        algorithm_version: str,
+        clock: Clock | None = None,
+    ) -> None:
+        """Replace the derived capability-residual activation state (§4.2).
+
+        Like :meth:`replace_canonical_facet_state`, this is a full DELETE+INSERT
+        of a pure projection over the observation ledger + closed episodes, so a
+        rebuild reproduces it byte-identically. When residual activation is
+        disabled in config the projection passes ``rows=[]`` and the table stays
+        empty — determinism holds with the feature on and off.
+        """
+
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute("DELETE FROM capability_residual_state")
+            for row in rows:
+                connection.execute(
+                    """
+                    INSERT INTO capability_residual_state(
+                      id, facet_id, capability, active, activation_reason,
+                      residual_alpha, residual_beta, residual_mean,
+                      parent_alpha, parent_beta, parent_mean, divergence,
+                      independent_groups, independent_mass, algorithm_version,
+                      created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("id") or new_ulid()),
+                        row["facet_id"],
+                        row["capability"],
+                        1 if row.get("active") else 0,
+                        row.get("activation_reason"),
+                        float(row["residual_alpha"]),
+                        float(row["residual_beta"]),
+                        float(row["residual_mean"]),
+                        float(row["parent_alpha"]),
+                        float(row["parent_beta"]),
+                        float(row["parent_mean"]),
+                        float(row.get("divergence", 0.0)),
+                        int(row.get("independent_groups", 0)),
+                        float(row.get("independent_mass", 0.0)),
+                        algorithm_version,
+                        row.get("created_at", now),
+                        now,
+                    ),
+                )
+            connection.commit()
+
+    def capability_residual_states(self) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM capability_residual_state ORDER BY facet_id, capability"
+            ).fetchall()
+        return [_capability_residual_row(row) for row in rows]
+
+    def capability_residual_state(
+        self, facet_id: str, capability: str
+    ) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM capability_residual_state WHERE facet_id = ? AND capability = ?",
+                (facet_id, capability),
+            ).fetchone()
+        return _capability_residual_row(row) if row is not None else None
+
+    # -- pre-first-practice identifiability watermark (§11.3, KM5) ---------------
+
+    def identifiability_watermark(self, subject_id: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM subject_identifiability_watermarks WHERE subject_id = ?",
+                (subject_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "subject_id": row["subject_id"],
+            "registry_hash": row["registry_hash"],
+            "finding_count": int(row["finding_count"]),
+            "checked_at": row["checked_at"],
+        }
+
+    def upsert_identifiability_watermark(
+        self,
+        *,
+        subject_id: str,
+        registry_hash: str,
+        finding_count: int,
+        clock: Clock | None = None,
+    ) -> None:
+        now = utc_now_iso(clock)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO subject_identifiability_watermarks(
+                  subject_id, registry_hash, finding_count, checked_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(subject_id) DO UPDATE SET
+                  registry_hash = excluded.registry_hash,
+                  finding_count = excluded.finding_count,
+                  checked_at = excluded.checked_at
+                """,
+                (subject_id, registry_hash, int(finding_count), now),
+            )
+            connection.commit()
+
     # -- facet_merges: transitive resolution, cycle-rejected at write (§3.4) ------
 
     def facet_merge_map(self) -> dict[str, str]:
@@ -5444,6 +5556,15 @@ class Repository:
                 (session_id,),
             ).fetchone()
         return _decode_scheduler_slate(row) if row is not None else None
+
+    def all_scheduler_slates(self) -> list[dict[str, Any]]:
+        """Every scheduler slate in chronological order (for shadow reports)."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM scheduler_slates ORDER BY generated_at ASC, id ASC"
+            ).fetchall()
+        return [_decode_scheduler_slate(row) for row in rows]
 
     def scheduler_slate_candidates(self, slate_id: str) -> list[dict[str, Any]]:
         with self.connection() as connection:
@@ -9107,6 +9228,28 @@ def _facet_capability_evidence(row: sqlite3.Row) -> FacetCapabilityEvidence:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _capability_residual_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "facet_id": row["facet_id"],
+        "capability": row["capability"],
+        "active": bool(row["active"]),
+        "activation_reason": row["activation_reason"],
+        "residual_alpha": row["residual_alpha"],
+        "residual_beta": row["residual_beta"],
+        "residual_mean": row["residual_mean"],
+        "parent_alpha": row["parent_alpha"],
+        "parent_beta": row["parent_beta"],
+        "parent_mean": row["parent_mean"],
+        "divergence": row["divergence"],
+        "independent_groups": int(row["independent_groups"]),
+        "independent_mass": row["independent_mass"],
+        "algorithm_version": row["algorithm_version"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def _resolve_merge(facet_id: str, merge_map: Mapping[str, str]) -> str:

@@ -1497,12 +1497,32 @@ class EvidenceConfig(BaseModel):
 
 
 class CapabilitiesConfig(BaseModel):
-    """Capability damping/shrinkage (knowledge-model spec §4.2).
+    """Capability damping/shrinkage + lazy residual activation (spec §4.2).
 
-    Reserved in Phase 0; residual activation ships behind config, default off.
+    Residual activation ships behind config, DEFAULT OFF. The thresholds below are
+    open calibration knobs (KM5): the shared parent stays the launch prediction
+    state, and a learner-specific ``(facet, capability)`` residual is only
+    activated when a closed diagnostic episode demonstrates divergence OR the
+    capability-sliced residual persistently disagrees with the pooled parent.
     """
 
     model_config = ConfigDict(extra="allow")
+
+    # Master switch (§4.2 / §14 "capability-residual-by-default" is Deferred).
+    residual_activation_enabled: bool = False
+    # |capability_mean - parent_mean| that counts as a persistent residual
+    # disagreement (open calibration knob).
+    residual_divergence_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
+    # Independent evidence required before the persistent-disagreement trigger
+    # fires (guards against activating on a single noisy surface).
+    residual_min_independent_mass: float = Field(default=2.0, ge=0.0)
+    residual_min_independent_groups: int = Field(default=2, ge=1)
+    # A closed diagnostic episode demonstrating divergence activates at this
+    # lower divergence threshold (the episode already paid for the evidence).
+    residual_episode_divergence_threshold: float = Field(default=0.12, ge=0.0, le=1.0)
+    # Shared parent as a shrinkage prior: pseudo-count strength pulling the
+    # residual belief toward the pooled parent mean while capability data is thin.
+    residual_shrinkage_pseudo_count: float = Field(default=4.0, ge=0.0)
 
 
 class LearnLoopConfig(BaseModel):
