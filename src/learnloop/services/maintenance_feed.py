@@ -53,6 +53,9 @@ NOTICE_TYPES: dict[str, NoticeType] = {
     # ING M8 (§11): provenance-outcome associations, additive suggestions only.
     "repeated_failure_despite_coverage": NoticeType("repeated_failure_despite_coverage", "auto_expiry", "info"),
     "needs_more_example_sources": NoticeType("needs_more_example_sources", "auto_expiry", "info"),
+    # Graph editor (§8/§12): direction-resolution + locked-facet restructure intent.
+    "ambiguous_edge_direction": NoticeType("ambiguous_edge_direction", "auto_resolution", "warning"),
+    "restructure_request": NoticeType("restructure_request", "auto_resolution", "action_needed"),
 }
 
 
@@ -255,6 +258,36 @@ def _source_outcome_notices(vault, repository) -> list[_Notice]:
     return out
 
 
+def _graph_edit_notices(vault, repository) -> list[_Notice]:
+    """Graph-editor notices (§8/§12): ambiguous edge direction + queued
+    restructure-intent for locked facets. Both derive deterministically from
+    existing state (edges, pending proposals, generation-needs)."""
+
+    from learnloop.services.graph_edit_proposals import (
+        ambiguous_edge_direction_notices,
+        restructure_request_notices,
+    )
+
+    out: list[_Notice] = []
+    for notice in (
+        *ambiguous_edge_direction_notices(vault, repository),
+        *restructure_request_notices(vault, repository),
+    ):
+        out.append(
+            _Notice(
+                notice_type=notice["notice_type"],
+                dedup_key=notice["dedup_key"],
+                title=notice["title"],
+                action=notice["action"],
+                subject_id=notice.get("subject_id"),
+                entity_type=notice.get("entity_type"),
+                entity_id=notice.get("entity_id"),
+                detail=notice.get("detail"),
+            )
+        )
+    return out
+
+
 _COLLECTORS: tuple[Callable[[LoadedVault, Repository], list[_Notice]], ...] = (
     _stale_link_notices,
     _open_conflict_notices,
@@ -262,6 +295,7 @@ _COLLECTORS: tuple[Callable[[LoadedVault, Repository], list[_Notice]], ...] = (
     _lo_without_practice_notices,
     _taught_blueprint_without_assessment_notices,
     _source_outcome_notices,
+    _graph_edit_notices,
 )
 
 

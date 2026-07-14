@@ -26,6 +26,7 @@ import type {
 } from "../api/dto";
 import { BlockBar, COLOR, Dim, Divider, Faint, FONT_MONO, Meta, modePillColor, Pill, SectionHeader, type PillColor } from "./term";
 import { CapabilityGridView } from "./KnowledgeModel";
+import { RecipeTreeEditor } from "./recipeedit/RecipeTreeEditor";
 import { MarkdownMath } from "../render/MarkdownMath";
 
 // ── kind → header pill ──────────────────────────────────────────────────
@@ -538,6 +539,8 @@ function LearningObjectBody({
       <PillList label="Tags" items={detail.tags} color="slate" />
 
       <LoCapabilitySection loId={detail.id} />
+
+      <RecipeTreeEditor loId={detail.id} blueprints={detail.blueprints} onGo={onGo} />
     </div>
   );
 }

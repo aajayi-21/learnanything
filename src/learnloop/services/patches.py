@@ -737,9 +737,11 @@ def _compile_error_type(vault: LoadedVault, item: dict[str, Any], payload: dict[
 
 
 def _compile_deactivate(vault: LoadedVault, item: dict[str, Any], payload: dict[str, Any]) -> CompiledPatch:
+    if item["item_type"] == "concept_edge":
+        return _compile_concept_edge_deactivate(vault, item, payload)
     entity_id = _entity_id(item, payload)
     if item["item_type"] != "learning_object":
-        raise PatchApplicationError(f"Deactivate is only supported for Learning Objects in this slice, not {item['item_type']}")
+        raise PatchApplicationError(f"Deactivate is only supported for Learning Objects and concept edges in this slice, not {item['item_type']}")
     existing = vault.learning_objects.get(entity_id)
     if existing is None:
         raise PatchApplicationError(f"Cannot deactivate missing Learning Object {entity_id}")
@@ -757,6 +759,30 @@ def _compile_deactivate(vault: LoadedVault, item: dict[str, Any], payload: dict[
     )
 
 
+def _compile_concept_edge_deactivate(
+    vault: LoadedVault, item: dict[str, Any], payload: dict[str, Any]
+) -> CompiledPatch:
+    """Retire a concept edge: accepting removes it from relations.yaml.
+
+    Reverting a rejected-after-apply deactivate restores the edge from the
+    pre-apply snapshot the filing flow stamped into the payload (see
+    ``_apply_reject_side_effect``)."""
+
+    edge_id = _entity_id(item, payload, default=_default_edge_id(payload))
+    existing = _edge_by_id(vault, edge_id)
+    if existing is None:
+        raise PatchApplicationError(f"Cannot deactivate missing concept edge {edge_id}")
+    return CompiledPatch(
+        proposal_item_id=item["id"],
+        entity_type="concept_edge",
+        entity_id=edge_id,
+        subject=None,
+        event_type="deactivated",
+        summary=f"deactivate concept edge {edge_id}",
+        apply=lambda root, clock: delete_concept_edge(root, edge_id),
+    )
+
+
 def _apply_reject_side_effect(
     vault: LoadedVault,
     repository: Repository,
@@ -765,11 +791,15 @@ def _apply_reject_side_effect(
     origin: str,
     clock: Clock | None,
 ) -> dict[str, Any] | None:
-    if item["operation"] != "create":
-        return None
     payload = item["edited_payload"] if item.get("edited_payload") is not None else item["payload"]
     entity_id = _entity_id(item, payload, default=_default_edge_id(payload) if item["item_type"] == "concept_edge" else None)
     now = utc_now_iso(clock)
+    if item["operation"] == "deactivate":
+        return _revert_deactivate_side_effect(
+            vault, repository, item, payload, entity_id, origin=origin, now=now, clock=clock
+        )
+    if item["operation"] != "create":
+        return None
     if item["item_type"] == "learning_object":
         existing = vault.learning_objects.get(entity_id)
         if existing is None:
@@ -836,6 +866,53 @@ def _apply_reject_side_effect(
         "origin": origin,
         "review_status": "rejected",
         "summary": summary,
+        "created_at": now,
+    }
+
+
+def _revert_deactivate_side_effect(
+    vault: LoadedVault,
+    repository: Repository,
+    item: dict[str, Any],
+    payload: dict[str, Any],
+    entity_id: str,
+    *,
+    origin: str,
+    now: str,
+    clock: Clock | None,
+) -> dict[str, Any] | None:
+    """Revert an applied ``deactivate``. Only concept_edge is revertible in this
+    slice: the edge was removed from relations.yaml at apply time, so restore it
+    from the pre-apply snapshot stamped into the payload at filing time."""
+
+    if item["item_type"] != "concept_edge":
+        return None
+    source = payload.get("source") or payload.get("source_concept_id")
+    target = payload.get("target") or payload.get("target_concept_id")
+    relation_type = payload.get("relation_type")
+    if not source or not target or not relation_type:
+        return None
+    data: dict[str, Any] = {
+        "id": entity_id,
+        "source": source,
+        "target": target,
+        "relation_type": relation_type,
+    }
+    if payload.get("strength") is not None:
+        data["strength"] = payload["strength"]
+    if payload.get("rationale") is not None:
+        data["rationale"] = payload["rationale"]
+    upsert_concept_edge(vault.root, data, clock=clock)
+    sync_vault_state(load_vault(vault.root), repository, clock=clock)
+    return {
+        "id": new_ulid(),
+        "event_type": "created",
+        "subject": None,
+        "entity_type": "concept_edge",
+        "entity_id": entity_id,
+        "origin": origin,
+        "review_status": "rejected",
+        "summary": f"reject deactivated concept edge {entity_id} (restored)",
         "created_at": now,
     }
 

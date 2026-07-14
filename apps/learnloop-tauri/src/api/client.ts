@@ -117,6 +117,18 @@ import type {
   StartOverconfidenceProbeResult,
   ReentrySummarySnapshot,
   DecayPressureSnapshot,
+  ProposeGraphEditsInput,
+  ProposeGraphEditsResult,
+  QueueRestructureRequestInput,
+  QueueRestructureRequestResult,
+  ResolveEdgeDirectionInput,
+  ResolveEdgeDirectionResult,
+  FacetDetailDto,
+  FacetListDto,
+  PreviewKnowledgeMapInput,
+  KnowledgeMapPreviewDto,
+  PreviewBlueprintReadinessInput,
+  BlueprintReadinessPreviewDto,
 } from "./dto";
 
 async function call<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -329,6 +341,20 @@ export const api = {
   getFacetEvidenceTimeline: (facetId: string) =>
     call<FacetEvidenceTimelineDto>("get_facet_evidence_timeline", { facetId }),
   getKnowledgeMap: () => call<KnowledgeMapSnapshot>("get_knowledge_map"),
+  // Graph / knowledge-map editor (spec §8/§12). One write path: edits compile to
+  // items in the existing proposals machinery.
+  proposeGraphEdits: (input: ProposeGraphEditsInput) =>
+    call<ProposeGraphEditsResult>("propose_graph_edits", { input }),
+  queueRestructureRequest: (input: QueueRestructureRequestInput) =>
+    call<QueueRestructureRequestResult>("queue_restructure_request", { input }),
+  resolveEdgeDirection: (input: ResolveEdgeDirectionInput) =>
+    call<ResolveEdgeDirectionResult>("resolve_edge_direction", { input }),
+  getFacetDetail: (facetId: string) => call<FacetDetailDto>("get_facet_detail", { facetId }),
+  listFacets: () => call<FacetListDto>("list_facets"),
+  previewKnowledgeMap: (input: PreviewKnowledgeMapInput) =>
+    call<KnowledgeMapPreviewDto>("preview_knowledge_map", { input }),
+  previewBlueprintReadiness: (input: PreviewBlueprintReadinessInput) =>
+    call<BlueprintReadinessPreviewDto>("preview_blueprint_readiness", { input }),
   getKnowledgeMapHistory: () => call<KnowledgeMapHistory>("get_knowledge_map_history"),
   setGradingProvider: (provider: string) =>
     call<GradingProviderResult>("set_grading_provider", { provider }),

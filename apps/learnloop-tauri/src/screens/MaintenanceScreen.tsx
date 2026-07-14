@@ -17,10 +17,13 @@ import type {
   MaintenanceSeverity,
   SourceConflictDto,
   SourceSetSummaryDto,
-  ConflictResolutionKind
+  ConflictResolutionKind,
+  AmbiguousEdgeDirectionDetail,
+  RestructureRequestDetail,
+  EdgeDirectionResolution
 } from "../api/dto";
 import { OpenInSource } from "../components/OpenInSource";
-import { COLOR, Divider, Faint, FONT_MONO, Pill, SectionHeader, type PillColor } from "../components/term";
+import { COLOR, Dim, Divider, Faint, FONT_MONO, Pill, SectionHeader, type PillColor } from "../components/term";
 
 // Canonical locators are `span:<extraction>/<span>`; the optional extraction
 // group preserves the malformed pre-v2 `span:<span>` compatibility shape.
@@ -109,6 +112,19 @@ export function MaintenanceScreen({
     }
   };
 
+  const resolveDirection = async (
+    edgeId: string,
+    resolution: EdgeDirectionResolution,
+    rationale: string
+  ) => {
+    try {
+      await api.resolveEdgeDirection({ edgeId, resolution, rationale });
+      load();
+    } catch (err) {
+      reportError(err);
+    }
+  };
+
   const runAppend = async (sourceSetId: string) => {
     setBusy(true);
     setAppend(null);
@@ -172,9 +188,20 @@ export function MaintenanceScreen({
                 <span style={{ color: COLOR.textDim, fontSize: 11 }}>{notice.noticeType}</span>
                 <span style={{ color: COLOR.textFaint, fontSize: 11 }}>· {notice.agingPolicy}</span>
               </div>
-              <div style={{ marginTop: 3 }}>{notice.title}</div>
+              {notice.noticeType === "ambiguous_edge_direction" ? (
+                <AmbiguousEdgeCard notice={notice} onResolve={resolveDirection} onInspect={onInspect} />
+              ) : notice.noticeType === "restructure_request" ? (
+                <RestructureRequestCard notice={notice} onInspect={onInspect} />
+              ) : (
+                <div style={{ marginTop: 3 }}>{notice.title}</div>
+              )}
               <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                <button style={btn} title={notice.action.action}>{notice.action.label ?? notice.action.action ?? "action"}</button>
+                {notice.noticeType === "ambiguous_edge_direction" ||
+                notice.noticeType === "restructure_request" ? null : (
+                  <button style={btn} title={notice.action.action}>
+                    {notice.action.label ?? notice.action.action ?? "action"}
+                  </button>
+                )}
                 <button style={btn} onClick={() => noticeAction(notice, "snooze")}>
                   snooze{notice.snoozeCount > 0 ? ` (${notice.snoozeCount})` : ""}
                 </button>
@@ -403,3 +430,196 @@ function StudyMapDiffView({ append, onInspect }: { append: AppendResultDto; onIn
 
 const th: CSSProperties = { padding: "4px 8px", fontWeight: 400 };
 const td: CSSProperties = { padding: "4px 8px", verticalAlign: "top" };
+
+// -- Direction-resolution card (ambiguous_edge_direction notices) -------------
+
+const DIRECTION_ACTIONS: { resolution: EdgeDirectionResolution; label: string }[] = [
+  { resolution: "keep", label: "keep" },
+  { resolution: "flip", label: "flip" },
+  { resolution: "retype_related", label: "merely related" },
+  { resolution: "retire", label: "retire" }
+];
+
+const REASON_COPY: Record<AmbiguousEdgeDirectionDetail["reason"], string> = {
+  cycle: "part of a prerequisite cycle",
+  bidirectional: "A→B and B→A both asserted",
+  proposed: "pending proposed prerequisite edge"
+};
+
+function AmbiguousEdgeCard({
+  notice,
+  onResolve,
+  onInspect
+}: {
+  notice: MaintenanceNoticeDto;
+  onResolve: (edgeId: string, resolution: EdgeDirectionResolution, rationale: string) => void;
+  onInspect?: (id: string) => void;
+}) {
+  const detail = notice.detail as unknown as AmbiguousEdgeDirectionDetail | null;
+  const [selected, setSelected] = useState<EdgeDirectionResolution | null>(null);
+  const [rationale, setRationale] = useState("");
+  const edgeId = detail?.edgeId ?? (notice.action.edgeId as string | null | undefined) ?? null;
+  const evidence = detail?.evidence ?? null;
+
+  if (!detail) return <div style={{ marginTop: 3 }}>{notice.title}</div>;
+
+  const src = detail.sourceConcept;
+  const tgt = detail.targetConcept;
+
+  return (
+    <div style={{ marginTop: 4, border: `1px solid ${COLOR.border}`, borderRadius: 2, padding: "8px 10px", background: COLOR.bgInput }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <ConceptRef id={src.id} title={src.title} onInspect={onInspect} />
+        <span style={{ color: COLOR.amber }}>→</span>
+        <ConceptRef id={tgt.id} title={tgt.title} onInspect={onInspect} />
+        <Pill color="slate">{detail.relationType}</Pill>
+        <Pill color="amber">{detail.reason}</Pill>
+      </div>
+      <Faint style={{ fontSize: 11 }}>{REASON_COPY[detail.reason]}</Faint>
+
+      {evidence ? (
+        <div style={{ marginTop: 6, fontSize: 12 }}>
+          <div style={{ fontSize: 11, color: COLOR.textFaint }}>
+            attempt-ordering evidence · success on {tgt.title} items, split at first correct {src.title} attempt
+          </div>
+          <div style={{ display: "flex", gap: 16, marginTop: 2 }}>
+            <span>
+              before{" "}
+              <span style={{ fontFamily: FONT_MONO, color: COLOR.amber }}>
+                {(evidence.targetSuccessBefore * 100).toFixed(0)}%
+              </span>{" "}
+              <Faint>(n={evidence.targetAttemptsBefore})</Faint>
+            </span>
+            <span>
+              after{" "}
+              <span style={{ fontFamily: FONT_MONO, color: COLOR.green }}>
+                {(evidence.targetSuccessAfter * 100).toFixed(0)}%
+              </span>{" "}
+              <Faint>(n={evidence.targetAttemptsAfter})</Faint>
+            </span>
+          </div>
+        </div>
+      ) : (
+        <Faint style={{ fontSize: 11, display: "block", marginTop: 4 }}>
+          no attempt-ordering evidence yet (too sparse to inform direction)
+        </Faint>
+      )}
+
+      {detail.rationale ? (
+        <div style={{ marginTop: 6, fontSize: 12 }}>
+          <Faint>edge rationale:</Faint> <Dim>{detail.rationale}</Dim>
+        </div>
+      ) : null}
+
+      {edgeId ? (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {DIRECTION_ACTIONS.map((a) => (
+              <button
+                key={a.resolution}
+                style={{ ...btn, borderColor: selected === a.resolution ? COLOR.amber : COLOR.border }}
+                onClick={() => setSelected(a.resolution)}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+          {selected ? (
+            <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center" }}>
+              <input
+                value={rationale}
+                onChange={(e) => setRationale(e.target.value)}
+                placeholder={`why ${selected}? (required)`}
+                style={{
+                  flex: 1,
+                  fontFamily: FONT_MONO,
+                  fontSize: 12,
+                  background: COLOR.bgInput,
+                  color: COLOR.text,
+                  border: `1px solid ${COLOR.borderFocus}`,
+                  borderRadius: 2,
+                  padding: "3px 8px",
+                  outline: "none"
+                }}
+              />
+              <button
+                style={{ ...btn, color: rationale.trim() ? COLOR.green : COLOR.textFaint }}
+                disabled={!rationale.trim()}
+                onClick={() => {
+                  onResolve(edgeId, selected, rationale.trim());
+                  setSelected(null);
+                  setRationale("");
+                }}
+              >
+                confirm
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <Faint style={{ fontSize: 11, display: "block", marginTop: 6 }}>
+          This edge is a pending proposal — resolve it in the Proposals inbox.
+        </Faint>
+      )}
+    </div>
+  );
+}
+
+function ConceptRef({
+  id,
+  title,
+  onInspect
+}: {
+  id: string;
+  title: string;
+  onInspect?: (id: string) => void;
+}) {
+  if (onInspect) {
+    return (
+      <span className="entity-link" role="button" onClick={() => onInspect(id)} style={{ color: COLOR.text }}>
+        {title}
+      </span>
+    );
+  }
+  return <span style={{ color: COLOR.text }}>{title}</span>;
+}
+
+// -- Restructure-request card (queued locked-facet intent — read-only) --------
+
+function RestructureRequestCard({
+  notice,
+  onInspect
+}: {
+  notice: MaintenanceNoticeDto;
+  onInspect?: (id: string) => void;
+}) {
+  const detail = notice.detail as unknown as RestructureRequestDetail | null;
+  if (!detail) return <div style={{ marginTop: 3 }}>{notice.title}</div>;
+  return (
+    <div style={{ marginTop: 4, border: `1px solid ${COLOR.border}`, borderRadius: 2, padding: "8px 10px", background: COLOR.bgInput }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <Pill color="purple">{detail.operation}</Pill>
+        <Pill color="slate">queued</Pill>
+        <Faint style={{ fontSize: 11 }}>read-only intent · §17 restructure machinery not built yet</Faint>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+        {detail.facetIds.map((f) => (
+          <span key={f}>
+            {onInspect ? (
+              <span className="entity-link" role="button" onClick={() => onInspect(f)}>
+                <Pill color="cyan">{f.replace(/^facet_/, "")}</Pill>
+              </span>
+            ) : (
+              <Pill color="cyan">{f.replace(/^facet_/, "")}</Pill>
+            )}
+          </span>
+        ))}
+      </div>
+      {detail.rationale ? (
+        <div style={{ marginTop: 6, fontSize: 12 }}>
+          <Faint>rationale:</Faint> <Dim>{detail.rationale}</Dim>
+        </div>
+      ) : null}
+    </div>
+  );
+}

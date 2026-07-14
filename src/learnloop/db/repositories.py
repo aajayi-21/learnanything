@@ -6147,6 +6147,37 @@ class Repository:
             if day in counts:
                 counts[day] += 1
         return counts
+    def practice_attempt_outcomes_for_items(self, item_ids: list[str]) -> list[dict[str, Any]]:
+        """Time-ordered attempt outcomes for a set of practice items.
+
+        Backs the graph editor's ambiguous-direction attempt-ordering evidence
+        (success on the target's items before vs after first success on the
+        source's items). Ordered by ``created_at`` so before/after bucketing is
+        deterministic.
+        """
+
+        if not item_ids:
+            return []
+        placeholders = ",".join("?" for _ in item_ids)
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT practice_item_id, rubric_score, correctness, created_at
+                FROM practice_attempts
+                WHERE practice_item_id IN ({placeholders})
+                ORDER BY created_at, id
+                """,
+                list(item_ids),
+            ).fetchall()
+        return [
+            {
+                "practice_item_id": row["practice_item_id"],
+                "rubric_score": row["rubric_score"],
+                "correctness": row["correctness"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def end_open_sessions_except(self, session_id: str, *, clock: Clock | None = None) -> int:
         now = utc_now_iso(clock)
