@@ -85,6 +85,8 @@ import type {
   SourceSetsSnapshot,
   SourceCoverageDto,
   StartInventoryInput,
+  CreateStudyMapInput,
+  StudyMapDto,
 } from "./dto";
 
 async function call<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -199,6 +201,8 @@ export const api = {
     call<{ version: number; coverage: SourceCoverageDto }>("get_source_coverage", { sourceSetId }),
   startInventory: (input: StartInventoryInput) =>
     call<IngestBatchDto>("start_inventory", { input }),
+  createStudyMap: (input: CreateStudyMapInput) =>
+    call<{ version: number; studyMap: StudyMapDto }>("create_study_map", { input }),
   readVaultFile: (path: string) => call<VaultFileContent>("read_vault_file", { path }),
   writeVaultFile: (path: string, body: string) => call<VaultFileContent>("write_vault_file", { path, body }),
   createVaultFile: (path: string, body = "") =>
