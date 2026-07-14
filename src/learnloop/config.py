@@ -1259,6 +1259,21 @@ class FittingConfig(BaseModel):
     fsrs: FsrsFittingConfig = Field(default_factory=FsrsFittingConfig)
 
 
+class LocksConfig(BaseModel):
+    """Curriculum identity-lock policy (knowledge-model §3.4/§12).
+
+    Facet identity locking is independence-gated: a facet locks when its direct
+    evidence spans >= ``facet_surface_groups`` distinct surface/correlation
+    groups, or its independent evidence mass reaches ``facet_lock_mass``, or it
+    enters an active goal's certified scope. KM1 records the policy and the
+    ``can_apply`` closure; the independence-gate trigger itself lands with KM2's
+    capability ledgers (the seam in ``curriculum_locks.py``).
+    """
+
+    facet_lock_mass: float = 2.0
+    facet_surface_groups: int = 2
+
+
 class EvidenceMassEntry(BaseModel):
     """Evidence carried by one attempt type (Fable's-take item 3).
 
@@ -1309,6 +1324,21 @@ def default_practice_mode_item_coverage() -> dict[str, float]:
     }
 
 
+class CertificationConfig(BaseModel):
+    """Bounded certification credit (knowledge-model §5.4).
+
+    ``max_groups_per_attempt`` caps how many independently-observable
+    correlation groups one attempt may certify (the attempt-wide ceiling is
+    ``evidence_mass(attempt_type) * max_groups_per_attempt``). ``group_budgets``
+    overrides the per-``(attempt_type, group)`` budget, which otherwise defaults
+    to ``evidence_mass(attempt_type)``. KM1 ships this table as data; the write
+    path that consumes it lands with KM2.
+    """
+
+    max_groups_per_attempt: int = 3
+    group_budgets: dict[str, float] = Field(default_factory=dict)
+
+
 class EvidenceConfig(BaseModel):
     """Single source of truth for per-attempt-type evidence carried.
 
@@ -1322,6 +1352,7 @@ class EvidenceConfig(BaseModel):
         default_factory=default_practice_mode_item_coverage
     )
     item_coverage_default: float = 0.75
+    certification: CertificationConfig = Field(default_factory=CertificationConfig)
 
     @model_validator(mode="after")
     def _merge_defaults(self) -> "EvidenceConfig":
@@ -1359,6 +1390,7 @@ class LearnLoopConfig(BaseModel):
     error_impacts: dict[str, ErrorImpact] = Field(default_factory=dict)
     cross_lo_propagation: CrossLoPropagationConfig = Field(default_factory=CrossLoPropagationConfig)
     fitting: FittingConfig = Field(default_factory=FittingConfig)
+    locks: LocksConfig = Field(default_factory=LocksConfig)
 
     @model_validator(mode="before")
     @classmethod
