@@ -136,6 +136,176 @@ def criterion_pseudo_mass(criterion_points: float, rubric_total: float, evidence
     return evidence_mass * (criterion_points / rubric_total)
 
 
+# -- First-error localization (§5.3), generalized from longform_trace ----------
+
+# Assistance channels that earn zero certification credit (§5.4/§6): a facet is
+# not *demonstrated* when the answer was hinted, scaffolded, or exposed.
+UNASSISTED = "unassisted"
+ASSISTED_CHANNELS: frozenset[str] = frozenset({"hinted", "scaffolded", "answer_exposed"})
+
+
+@dataclass(frozen=True)
+class CriterionOutcome:
+    """One graded criterion within an attempt (projection input)."""
+
+    criterion_id: str
+    passed: bool
+    depends_on: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class LocalizedCriterion:
+    criterion_id: str
+    assessable: bool          # False => descendant of a failed criterion (share 0)
+    passed: bool
+    first_error: bool         # earliest failed criterion on its branch
+
+
+def localize_criterion_outcomes(outcomes: list[CriterionOutcome]) -> list[LocalizedCriterion]:
+    """First-error localization over a criterion dependency DAG (§5.3).
+
+    - A criterion is *unassessable* (evidence share 0) when any criterion it
+      transitively depends on failed — its valid evaluation depended on that
+      failed step. Independent branches stay assessable.
+    - An assessable failed criterion whose dependencies all passed is a
+      *first error* carrying localized failure attribution.
+    - Correct assessable criteria yield normal positive evidence, prefix or not.
+    - Whole-item failure therefore never penalizes every listed facet.
+    """
+
+    passed_by_id = {o.criterion_id: o.passed for o in outcomes}
+    depends = {o.criterion_id: tuple(o.depends_on) for o in outcomes}
+
+    # Memoized: does this criterion have a failed transitive ancestor?
+    cache: dict[str, bool] = {}
+
+    def has_failed_ancestor(cid: str, stack: frozenset[str]) -> bool:
+        if cid in cache:
+            return cache[cid]
+        if cid in stack:  # defensive against an authored cycle
+            return False
+        result = False
+        for dep in depends.get(cid, ()):  # a dep that failed, or whose ancestor failed
+            if passed_by_id.get(dep, True) is False or has_failed_ancestor(dep, stack | {cid}):
+                result = True
+                break
+        cache[cid] = result
+        return result
+
+    localized: list[LocalizedCriterion] = []
+    for outcome in outcomes:
+        blocked = has_failed_ancestor(outcome.criterion_id, frozenset())
+        assessable = not blocked
+        first_error = assessable and not outcome.passed
+        localized.append(
+            LocalizedCriterion(
+                criterion_id=outcome.criterion_id,
+                assessable=assessable,
+                passed=outcome.passed,
+                first_error=first_error,
+            )
+        )
+    return localized
+
+
+# -- Bounded certification credit (§5.4, the four quantities) -------------------
+
+
+def certification_credit(
+    pseudo_mass: float,
+    *,
+    relationship: str,
+    assistance: str,
+) -> float:
+    """Credit for one observation = its pseudo-mass iff direct/embedded and
+    unassisted; zero otherwise (§5.4 quantity 2).
+
+    Capability-matching is structural: credit accrues only to the ledger cell of
+    the *observed* capability, so retrieval evidence can never reach the
+    (facet, method_selection) cell. Assistance and projection/prior signals earn
+    zero.
+    """
+
+    if relationship not in ("direct", "embedded"):
+        return 0.0
+    if assistance in ASSISTED_CHANNELS:
+        return 0.0
+    return max(0.0, pseudo_mass)
+
+
+def group_budget(
+    attempt_type: str,
+    correlation_group: str | None,
+    *,
+    evidence_mass: float,
+    overrides: Mapping[str, float] | None = None,
+) -> float:
+    """Per-(attempt_type, correlation-group) certification budget (§5.4 q.3).
+
+    Defaults to ``evidence_mass(attempt_type)``; ``[evidence.certification].group_budgets``
+    overrides by ``"attempt_type:group"`` or bare ``"group"``.
+    """
+
+    overrides = overrides or {}
+    if correlation_group is not None:
+        keyed = f"{attempt_type}:{correlation_group}"
+        if keyed in overrides:
+            return float(overrides[keyed])
+        if correlation_group in overrides:
+            return float(overrides[correlation_group])
+    return evidence_mass
+
+
+def cap_certification_by_group(
+    credits_by_group: Mapping[str, float],
+    *,
+    attempt_type: str,
+    evidence_mass: float,
+    overrides: Mapping[str, float] | None = None,
+    max_groups_per_attempt: int,
+) -> dict[str, float]:
+    """Apply the per-group cap and the attempt-wide ceiling (§5.4 q.3/q.4).
+
+    Each correlation group's summed credit is capped at its ``group_budget``;
+    the total across groups is then capped at
+    ``evidence_mass * max_groups_per_attempt``. A rich constructed response can
+    out-earn a binary item (several independent groups) but never without bound.
+    """
+
+    capped: dict[str, float] = {}
+    for group, credit in credits_by_group.items():
+        budget = group_budget(
+            attempt_type, group, evidence_mass=evidence_mass, overrides=overrides
+        )
+        capped[group] = min(credit, budget)
+    ceiling = evidence_mass * max_groups_per_attempt
+    total = sum(capped.values())
+    if total > ceiling and total > 0:
+        scale = ceiling / total
+        capped = {group: credit * scale for group, credit in capped.items()}
+    return capped
+
+
+def group_proliferation_flag(
+    group_variation_counts: Mapping[str, int],
+    *,
+    min_independent_variations: int = 2,
+) -> list[str]:
+    """Correlation groups whose observations never vary independently (§5.4).
+
+    ``group_variation_counts`` maps a correlation group to how many distinct
+    outcome patterns its observations have shown across attempts. A group that
+    always co-varies (count < ``min_independent_variations``) is flagged for the
+    identifiability doctor / synthesis gate as suspicious group proliferation.
+    """
+
+    return sorted(
+        group
+        for group, count in group_variation_counts.items()
+        if count < min_independent_variations
+    )
+
+
 def unregistered_facet_errors(
     known_facets: Mapping[str, object] | set[str],
     facet_ids,
