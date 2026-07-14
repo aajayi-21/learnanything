@@ -614,6 +614,42 @@ pub async fn get_knowledge_map(sidecar: State<'_, SidecarManager>) -> Result<Val
     blocking_sidecar_call(sidecar, "get_knowledge_map", json!({})).await
 }
 
+// ── KM3b: provenance UI (§9.6) — attempt trace, capability grid, evidence timeline ──
+
+#[tauri::command]
+pub async fn get_attempt_trace(
+    attempt_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_attempt_trace", json!({ "attemptId": attempt_id })).await
+}
+
+#[tauri::command]
+pub async fn get_capability_grid(
+    learning_object_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(
+        sidecar,
+        "get_capability_grid",
+        json!({ "learningObjectId": learning_object_id }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_facet_evidence_timeline(
+    facet_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(
+        sidecar,
+        "get_facet_evidence_timeline",
+        json!({ "facetId": facet_id }),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn get_knowledge_map_history(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
     blocking_sidecar_call(sidecar, "get_knowledge_map_history", json!({})).await

@@ -5,6 +5,7 @@ import { EntityLink } from "../components/ui";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader, type PillColor } from "../components/term";
 import { masteryTone } from "../app/algoConfig";
 import { FacetWellView } from "./FacetWellView";
+import { FacetEvidenceDrawer } from "../components/KnowledgeModel";
 
 // Radar ("spider") view of evidence-facet mastery across the vault. Each axis
 // is one evidence facet; the polygon radius encodes aggregate mastery for that
@@ -156,7 +157,12 @@ export function FacetRadarView({ onInspect, onError }: { onInspect: (id: string)
             <div style={{ marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
                 <span style={{ color: COLOR.amber, fontSize: 13 }}>facet-mastery</span>{" "}
-                <Meta>{snapshot.counts.facets} evidence facets</Meta>
+                <Meta>{snapshot.counts.facets} evidence facets</Meta>{" "}
+                {snapshot.canonicalKeys ? (
+                  <Pill color="cyan">canonical · {snapshot.modelVersion}</Pill>
+                ) : snapshot.modelVersion ? (
+                  <Pill color="slate">{snapshot.modelVersion}</Pill>
+                ) : null}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 12 }}>
                 <span style={{ display: "flex", gap: 4 }}>
@@ -536,6 +542,7 @@ function FacetDetail({
   hoveredItem: string | null;
   onInspect: (id: string) => void;
 }) {
+  const [showEvidence, setShowEvidence] = useState(false);
   if (!facet) {
     return (
       <div style={{ width: 360, flexShrink: 0, borderLeft: `1px solid ${COLOR.border}`, background: COLOR.bg, padding: "16px 18px", color: COLOR.textFaint, fontSize: 13 }}>
@@ -559,6 +566,31 @@ function FacetDetail({
         {facet.stateCounts.uncertain > 0 ? <Pill color="amber">{facet.stateCounts.uncertain} uncertain</Pill> : null}
         {facet.stateCounts.knownGap > 0 ? <Pill color="red">{facet.stateCounts.knownGap} known gap</Pill> : null}
         {facet.stateCounts.unexamined > 0 ? <Pill color="slate">{facet.stateCounts.unexamined} unexamined</Pill> : null}
+      </div>
+
+      {/* KM3b §9.6: the facet evidence drawer + Demonstrated timeline. */}
+      <div style={{ marginTop: 10 }}>
+        <button
+          type="button"
+          onClick={() => setShowEvidence((v) => !v)}
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 12,
+            background: "transparent",
+            border: `1px solid ${COLOR.border}`,
+            borderRadius: 3,
+            color: COLOR.amberLink,
+            padding: "3px 10px",
+            cursor: "pointer",
+          }}
+        >
+          {showEvidence ? "▾" : "▸"} evidence timeline
+        </button>
+        {showEvidence && (
+          <div style={{ marginTop: 8 }}>
+            <FacetEvidenceDrawer facetId={facet.facetId} onClose={() => setShowEvidence(false)} />
+          </div>
+        )}
       </div>
 
       {(facet.questionCount ?? 0) > 0 ? (

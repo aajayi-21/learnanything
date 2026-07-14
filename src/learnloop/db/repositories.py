@@ -5693,6 +5693,43 @@ class Repository:
             ).fetchall()
         return {str(row["observation_id"]) for row in rows}
 
+    def unresolved_cause_factors_for_attempt(
+        self, attempt_id: str, *, status: str = "open"
+    ) -> list[dict[str, Any]]:
+        """Open unresolved-cause factors for an attempt (the §9.6 diagnostic card).
+
+        Each row's ``candidate_causes`` is decoded to the list
+        ``[{"facet", "capability"}, ...]`` — the ambiguous cause set a short
+        diagnostic would discriminate.
+        """
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, attempt_id, observation_id, candidate_causes_json,
+                       status, algorithm_version, created_at, updated_at
+                FROM unresolved_cause_factors
+                WHERE attempt_id = ? AND status = ?
+                ORDER BY created_at, id
+                """,
+                (attempt_id, status),
+            ).fetchall()
+        factors: list[dict[str, Any]] = []
+        for row in rows:
+            factors.append(
+                {
+                    "id": row["id"],
+                    "attempt_id": row["attempt_id"],
+                    "observation_id": row["observation_id"],
+                    "candidate_causes": json.loads(row["candidate_causes_json"] or "[]"),
+                    "status": row["status"],
+                    "algorithm_version": row["algorithm_version"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return factors
+
     def retire_unresolved_cause_factor(
         self, observation_id: str, *, clock: Clock | None = None
     ) -> None:

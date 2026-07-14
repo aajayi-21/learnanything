@@ -81,6 +81,11 @@ export interface FacetMasteryFacet {
 export interface FacetMasterySnapshot {
   facets: FacetMasteryFacet[];
   counts: { facets: number; learningObjects: number; practiceItems: number };
+  // KM3 §9.6 re-key: mvp-0.7 keys facets by canonical (post-alias) id so a
+  // shared parent folds across every LO that touches it; mvp-0.6 keeps the
+  // legacy raw key. The UI branches on these (optional for stale sidecars).
+  modelVersion?: string;
+  canonicalKeys?: boolean;
 }
 
 export interface KnowledgeMapPoint {
@@ -538,6 +543,15 @@ export interface FeedbackBundle {
   followupRating?: FollowupRatingDto | null;
   /** Tutor questions that counted as hints on this attempt. */
   questionHintEquivalents?: number;
+  /** KM3 §9.6 unresolved-cause factors: ambiguous localized failures whose
+   * candidate causes imply different repairs (drives the diagnostic card). */
+  unresolvedCauses?: UnresolvedCauseDto[];
+}
+
+export interface UnresolvedCauseDto {
+  id: string;
+  observationId: string | null;
+  candidateCauses: { facet: string; capability: string }[];
 }
 
 /** Result of start_primed_retry: a sibling item to retry with primed=true. */
@@ -1624,6 +1638,49 @@ export interface GoalAtRiskFacetDto {
   evidenceMass?: number;
   certified?: boolean;
   attemptsToCertify?: number | null;
+  // KM3 §9.5 dual-axis split. Ready = predicted ability (leads ambient
+  // surfaces); Demonstrated = capability-matched direct evidence (leads goal /
+  // certification surfaces). Never blended into one number.
+  ready?: number;
+  demonstrated?: boolean;
+  requiredCapabilities?: string[];
+  demonstratedCapabilities?: string[];
+  demonstratedFromLegacyDefault?: boolean;
+}
+
+// -- KM3 §9.2 blueprint recipe projections (shared by the goal banner's
+// "why not ready" and the LO-detail recipe tree / capability grid) ------------
+
+export interface ComponentReadinessDto {
+  facet: string;
+  capability: string;
+  modality: string;
+  predictedRecall: number;
+  gating: boolean;
+}
+
+export interface RecipeProjectionDto {
+  recipeId: string;
+  composition: string;
+  successProbability: number;
+  components: ComponentReadinessDto[];
+  bottleneck: ComponentReadinessDto | null;
+}
+
+export interface BlueprintProjectionDto {
+  blueprintId: string;
+  weight: number;
+  successProbability: number;
+  bestRecipeId: string | null;
+  recipes: RecipeProjectionDto[];
+}
+
+export interface LoReadinessDto {
+  learningObjectId: string;
+  hasBlueprints: boolean;
+  readiness: number | null;
+  blueprints: BlueprintProjectionDto[];
+  bottleneck: ComponentReadinessDto | null;
 }
 
 export interface GoalDto {
@@ -1648,7 +1705,95 @@ export interface GoalsListSnapshot {
 export interface GoalReportSnapshot {
   version: number;
   goal: GoalDto;
-  report: GoalReportSummaryDto & { atRisk: GoalAtRiskFacetDto[] };
+  report: GoalReportSummaryDto & {
+    atRisk: GoalAtRiskFacetDto[];
+    // KM3 §9.2: per-LO blueprint readiness (keyed by LO id). Populated only for
+    // blueprint-bearing LOs under mvp-0.7; the recipe tree / next-gap link here.
+    blueprintReadiness?: Record<string, LoReadinessDto>;
+  };
+}
+
+// -- KM3b §9.6 provenance UI DTOs ---------------------------------------------
+
+export interface TraceTargetDto {
+  facet: string;
+  capability: string;
+  role: string;
+}
+
+export interface TraceCriterionDto {
+  criterionId: string;
+  description: string;
+  dependsOn: string[];
+  pointsAwarded: number | null;
+  pointsPossible: number;
+  passed: boolean;
+  assessable: boolean;
+  firstError: boolean;
+  // "demonstrated" = passed assessable branch; "first_error" = first localized
+  // error; "not_judged" = unassessable descendant (never "wrong"); "partial".
+  status: "demonstrated" | "first_error" | "not_judged" | "partial";
+  targets: TraceTargetDto[];
+}
+
+export interface AttemptTraceDto {
+  version: number;
+  attemptId: string;
+  practiceItemId: string;
+  learningObjectId: string;
+  hasDag: boolean;
+  criteria: TraceCriterionDto[];
+  demonstratedCount: number;
+  firstErrorCount: number;
+  notJudgedCount: number;
+}
+
+export interface CapabilityGridCellDto {
+  facetId: string;
+  capability: string;
+  required: boolean;
+  demonstrated: boolean;
+  certificationCredit: number;
+  directPositiveMass: number;
+  directNegativeMass: number;
+  ready: number;
+  tested: boolean;
+}
+
+export interface CapabilityGridDto {
+  learningObjectId: string;
+  supported: boolean;
+  facets: string[];
+  capabilities: string[];
+  cells: CapabilityGridCellDto[];
+}
+
+export interface CapabilityGridResult {
+  version: number;
+  grid: CapabilityGridDto;
+  readiness: LoReadinessDto | null;
+}
+
+export interface DemonstratedTimelinePointDto {
+  t: string;
+  demonstrated: number;
+  delta: number;
+  kind: "observation" | "correction";
+  isCorrection: boolean;
+  attemptId: string;
+  surfaceGroup: string;
+  assisted: boolean;
+  demonstratedCapabilities: string[];
+}
+
+export interface FacetEvidenceTimelineDto {
+  version: number;
+  facetId: string;
+  modelVersion: string;
+  supported: boolean;
+  demonstrated: number;
+  points: DemonstratedTimelinePointDto[];
+  countedToward: { learningObjectId: string; learningObjectTitle: string }[];
 }
 
 export interface GoalSeriesPointDto {

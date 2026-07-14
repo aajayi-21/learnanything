@@ -402,11 +402,19 @@ export function GoalBanner({
                             {f.learningObjectTitle}
                           </span>
                           <Pill color="slate">{f.facetId}</Pill>
+                          {/* KM3 §9.6 display rule: a goal surface leads with
+                              Demonstrated (direct evidence), then the Ready
+                              prediction — never blended into one number. */}
+                          {f.demonstrated ? (
+                            <Pill color="green">demonstrated</Pill>
+                          ) : (
+                            <Pill color="slate">not demonstrated</Pill>
+                          )}
                           {f.evidenceMass != null ? (
                             <BlockBar value={Math.min(f.evidenceMass / 0.5, 1)} width={6} color={f.certified ? COLOR.green : COLOR.amber} />
                           ) : null}
                           <Faint style={{ fontFamily: FONT_MONO, fontSize: 11, whiteSpace: "nowrap" }}>
-                            {f.predictedAtHorizon != null ? `pred ${pct(f.predictedAtHorizon)}` : f.label}
+                            {(f.ready ?? f.predictedAtHorizon) != null ? `ready ${pct(f.ready ?? f.predictedAtHorizon)}` : f.label}
                           </Faint>
                           <Faint style={{ fontFamily: FONT_MONO, fontSize: 11, whiteSpace: "nowrap" }}>
                             {f.attemptsToCertify == null

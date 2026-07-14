@@ -112,6 +112,45 @@ export function TodayScreen({
   const probeCount = useMemo(() => items.filter((item) => item.isProbe).length, [items]);
   const laterCount = useMemo(() => items.filter((item) => /later/i.test(item.dueStatus ?? "")).length, [items]);
 
+  // KM3b §9.6 session narrative: the primary active goal's next-gap bottleneck
+  // (deterministic; from the KM3a blueprint readiness projection, no LLM).
+  const [nextGap, setNextGap] = useState<string | null>(null);
+  const primaryGoalId = activeGoals[0]?.id ?? null;
+  useEffect(() => {
+    if (!primaryGoalId) { setNextGap(null); return; }
+    let alive = true;
+    api
+      .getGoalReport(primaryGoalId)
+      .then((snap) => {
+        if (!alive) return;
+        const readiness = snap.report.blueprintReadiness ?? {};
+        let worst: { facet: string; predicted: number } | null = null;
+        for (const lo of Object.values(readiness)) {
+          const b = lo.bottleneck;
+          if (b && (!worst || b.predictedRecall < worst.predicted)) {
+            worst = { facet: b.facet, predicted: b.predictedRecall };
+          }
+        }
+        setNextGap(worst ? worst.facet.replace(/^facet_/, "") : null);
+      })
+      .catch(() => { if (alive) setNextGap(null); });
+    return () => { alive = false; };
+  }, [primaryGoalId]);
+
+  // One deterministic line from the built queue composition (§9.6, §11.2).
+  const sessionNarrative = useMemo(() => {
+    const followups = items.filter((item) => item.isFollowup).length;
+    const reps = Math.max(0, items.length - probeCount - followups);
+    if (items.length === 0) return null;
+    const parts: string[] = [];
+    if (probeCount > 0) parts.push(`${probeCount} diagnostic`);
+    if (reps > 0) parts.push(`${reps} retrieval rep${reps === 1 ? "" : "s"}`);
+    if (followups > 0) parts.push(`${followups} follow-up${followups === 1 ? "" : "s"}`);
+    if (parts.length === 0) return null;
+    const gap = nextGap ? ` — next gap: ${nextGap}` : "";
+    return `Today: ${parts.join(", ")}${gap}`;
+  }, [items, probeCount, nextGap]);
+
   useEffect(() => {
     void refreshQueue();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -258,6 +297,7 @@ export function TodayScreen({
         dueCount={dueCount}
         probeCount={probeCount}
         laterCount={laterCount}
+        narrative={sessionNarrative}
         queueReady={Boolean(queue?.totalItems)}
         gradingReady={gradingReady}
         gradingProvider={gradingProvider}
@@ -372,6 +412,7 @@ function TodayHero({
   dueCount,
   probeCount,
   laterCount,
+  narrative,
   queueReady,
   gradingReady,
   gradingProvider,
@@ -383,6 +424,7 @@ function TodayHero({
   dueCount: number;
   probeCount: number;
   laterCount: number;
+  narrative: string | null;
   queueReady: boolean;
   gradingReady: boolean;
   gradingProvider: string;
@@ -437,6 +479,10 @@ function TodayHero({
           {sep}
           <Stat value={session?.availableMinutes ? `${session.availableMinutes} min` : "—"} label="budget" color={COLOR.green} />
         </div>
+
+        {narrative && (
+          <div style={{ marginTop: 10, fontSize: 13, color: COLOR.amber }}>{narrative}</div>
+        )}
 
         <div style={{ marginTop: 12, fontSize: 13, color: COLOR.textDim, lineHeight: 1.65 }}>
           vault <span style={{ color: COLOR.green }}>● healthy</span>

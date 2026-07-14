@@ -7,6 +7,9 @@ import type {
   ConceptGraphSnapshot,
   EntityProvenance,
   FacetMasterySnapshot,
+  AttemptTraceDto,
+  CapabilityGridResult,
+  FacetEvidenceTimelineDto,
   FeedbackBundle,
   PrimedRetryResultDto,
   GradingProviderResult,
@@ -251,6 +254,12 @@ export const api = {
       }
     }),
   getFacetMastery: () => call<FacetMasterySnapshot>("get_facet_mastery"),
+  // KM3b §9.6 provenance UI.
+  getAttemptTrace: (attemptId: string) => call<AttemptTraceDto>("get_attempt_trace", { attemptId }),
+  getCapabilityGrid: (learningObjectId: string) =>
+    call<CapabilityGridResult>("get_capability_grid", { learningObjectId }),
+  getFacetEvidenceTimeline: (facetId: string) =>
+    call<FacetEvidenceTimelineDto>("get_facet_evidence_timeline", { facetId }),
   getKnowledgeMap: () => call<KnowledgeMapSnapshot>("get_knowledge_map"),
   getKnowledgeMapHistory: () => call<KnowledgeMapHistory>("get_knowledge_map_history"),
   setGradingProvider: (provider: string) =>

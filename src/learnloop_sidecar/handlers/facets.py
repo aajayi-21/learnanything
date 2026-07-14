@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from learnloop.services.facet_diagnostics import mastery_diagnostic_view
+from learnloop.services.facet_state_reader import is_canonical_state_vault
 from learnloop.services.scheduler import build_due_queue
 from learnloop_sidecar.context import SidecarContext
 from learnloop_sidecar.dto import versioned
@@ -66,13 +67,23 @@ def get_facet_mastery(ctx: SidecarContext, _params) -> dict[str, Any]:
         if scheduled.components.get("probe_eig", 0.0) > 0.0
     }
 
+    # KM3 §9.6 re-key: mvp-0.7 folds per-LO facet rows onto their canonical
+    # (post-alias) facet id so a shared parent surfaces under every LO that
+    # touches it ("also counted toward X and Y"); mvp-0.6 keeps the legacy raw
+    # key byte-identical. The DTO carries ``modelVersion`` so the UI can branch.
+    canonical_keys = is_canonical_state_vault(vault)
+
+    def _key(raw: str) -> str:
+        return vault.canonical_facet_id(raw) if canonical_keys else raw
+
     facets: dict[str, dict[str, Any]] = {}
     los_seen: set[str] = set()
 
     for lo_id, learning_object in sorted(vault.learning_objects.items()):
         diagnostic = mastery_diagnostic_view(vault, repository, lo_id)
         for row in diagnostic["facets"]:
-            facet_id = str(row["facet_id"])
+            raw_facet_id = str(row["facet_id"])
+            facet_id = _key(raw_facet_id)
             entry = facets.setdefault(
                 facet_id,
                 {
@@ -85,7 +96,7 @@ def get_facet_mastery(ctx: SidecarContext, _params) -> dict[str, Any]:
                 },
             )
             state = row["state"] if row["state"] in _STATES else "unexamined"
-            mastery = _facet_mastery(facet_id, row)
+            mastery = _facet_mastery(raw_facet_id, row)
             entry["_masteries"].append(mastery)
             entry["_uncertainties"].append(max(0.0, float(row.get("uncertainty") or 0.0)))
             entry["state_counts"][state] += 1
@@ -102,7 +113,8 @@ def get_facet_mastery(ctx: SidecarContext, _params) -> dict[str, Any]:
     items_seen: set[str] = set()
     for item_id, item in sorted(vault.practice_items.items()):
         for facet in item.evidence_facets:
-            facet_id = str(facet)
+            raw_facet_id = str(facet)
+            facet_id = _key(raw_facet_id)
             entry = facets.get(facet_id)
             if entry is None:
                 continue
@@ -111,7 +123,7 @@ def get_facet_mastery(ctx: SidecarContext, _params) -> dict[str, Any]:
                     "id": item_id,
                     "title": _item_title(item.prompt),
                     "learning_object_id": item.learning_object_id,
-                    "weight": item.evidence_weights.get(facet_id),
+                    "weight": item.evidence_weights.get(raw_facet_id),
                     "difficulty": item.difficulty,
                     "is_probe": item_id in probe_ids,
                     "queued": item_id in queued_ids,
@@ -132,6 +144,8 @@ def get_facet_mastery(ctx: SidecarContext, _params) -> dict[str, Any]:
 
     return versioned(
         {
+            "model_version": vault.config.algorithms.algorithm_version,
+            "canonical_keys": canonical_keys,
             "facets": payload,
             "counts": {
                 "facets": len(payload),

@@ -263,6 +263,17 @@ def feedback_bundle(vault: LoadedVault, repository: Repository, attempt_id: str)
             # Tutor questions that counted as hints on this attempt ("N
             # questions counted as hints" in the feedback UI).
             "question_hint_equivalents": hint_equivalents_for_attempt(repository, attempt),
+            # KM3 §9.6 unresolved-cause diagnostic card: ambiguous localized
+            # failures whose candidate causes imply different repairs. The UI
+            # offers a one-tap "run a short diagnostic" targeting the cause set.
+            "unresolved_causes": [
+                {
+                    "id": factor["id"],
+                    "observation_id": factor["observation_id"],
+                    "candidate_causes": factor["candidate_causes"],
+                }
+                for factor in repository.unresolved_cause_factors_for_attempt(attempt_id)
+            ],
         }
     )
 
