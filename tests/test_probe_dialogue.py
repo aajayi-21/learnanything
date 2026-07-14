@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from learnloop.clock import FrozenClock
 from learnloop.db.repositories import Repository
 from learnloop.ids import new_ulid
@@ -105,6 +107,22 @@ def test_dialogue_turns_persist_presentation_attempt_observation(tmp_path):
     assert refreshed.status == "in_progress"
     posterior = episode_posterior(loaded, repository, refreshed)
     assert posterior.qualifying_observations == len(served)
+
+
+def test_dialogue_observation_replays_to_its_persisted_weighted_posterior(tmp_path):
+    """The replay path must honor the block's bounded task-evidence share."""
+
+    vault_root, loaded, repository, episode = _setup(tmp_path)
+    state = begin_dialogue_block(loaded, repository, LO_ID, clock=CLOCK)
+    state, turn = next_dialogue_turn(loaded, repository, state, clock=CLOCK)
+    assert turn is not None
+    _submit_turn(vault_root, repository, turn)
+
+    observation = repository.probe_observations_for_episode(episode.id)[0]["observation"]
+    assert observation.independent_evidence_discount < 1.0
+    replayed = episode_posterior(loaded, repository, repository.probe_episode(episode.id))
+    assert replayed is not None
+    assert replayed.posterior == pytest.approx(observation.posterior_after)
 
 
 def test_end_dialogue_block_invalidates_unsubmitted_turn_and_segments(tmp_path):

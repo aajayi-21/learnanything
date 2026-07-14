@@ -6,6 +6,7 @@ import type {
   CandidateErrorTypeDto,
   CommandError,
   PracticeItemDetail,
+  ProbeBlockEndDto,
   ProbeContractDto,
   RubricCriterionDto,
   SelfGradeErrorAttributionDto,
@@ -29,6 +30,8 @@ export function PracticeScreen({
   restoredHints,
   restoredTeachBack,
   onFeedback,
+  onBlockEnd,
+  onContinueDiagnostic,
   onBack,
   onCheckpointCleared,
   onDraftSaved,
@@ -48,6 +51,12 @@ export function PracticeScreen({
   restoredHints?: number;
   restoredTeachBack?: TeachBackStateDto | null;
   onFeedback: (attemptId: string) => void;
+  /** §5.7: a diagnostic block just closed — releasedFeedback covers every
+   *  attempt in it, not just the one that closed it. */
+  onBlockEnd: (blockEnd: ProbeBlockEndDto, learningObjectId: string, learningObjectTitle: string) => void;
+  /** §5.7 continuity: jump straight to the next observation in an open
+   *  episode with no visible queue round-trip. */
+  onContinueDiagnostic: (practiceItemId: string) => void;
   onBack: () => void;
   onCheckpointCleared: () => void;
   /** Mirror of the last flushed draft, so App can restore it if this item is
@@ -60,6 +69,7 @@ export function PracticeScreen({
     practiceItemId: string;
     sessionId: string;
     openedAtMs: number;
+    proactiveOpen?: boolean;
   }) => void;
   onError: (message: string) => void;
 }) {
@@ -116,12 +126,13 @@ export function PracticeScreen({
     openedAtMs.current = Date.now();
     setAnswerConfidence(null);
   }, [practiceItemId]);
-  const openAsk = () =>
+  const openAsk = (options?: { proactiveOpen?: boolean }) =>
     onAsk({
       context: "practice",
       practiceItemId,
       sessionId: session.sessionId,
-      openedAtMs: openedAtMs.current
+      openedAtMs: openedAtMs.current,
+      ...options
     });
   // The editor grows with its content but is capped so the answer card never
   // pushes the Submit button (or anything below the editor) off-screen — once it
@@ -316,31 +327,43 @@ export function PracticeScreen({
     try {
       await api.stopProbeDiagnosing(item.id);
       setProbe(null);
-      // §3: measurement ends and tutoring begins.
-      openAsk();
+      // §3: measurement ends and tutoring begins. The typed transition
+      // decision is already persisted, so the tutor opens proactively.
+      openAsk({ proactiveOpen: true });
     } catch (error) {
       onError((error as Error).message);
     }
   }
 
-  function routeAfterAttempt(result: {
+  async function routeAfterAttempt(result: {
     attemptId: string;
     probeEpisode?: { feedbackDeferred: boolean } | null;
-    probeBlockEnd?: { route: string | null } | null;
+    probeBlockEnd?: ProbeBlockEndDto | null;
   }) {
-    // §5.6/§5.7: feedback stays deferred while the diagnostic block is
-    // measuring; the block-end hook releases the block's withheld feedback,
-    // so a submission that closed the block routes straight to it.
-    if (probeActive && result.probeEpisode?.feedbackDeferred && !result.probeBlockEnd) {
+    if (!item) return;
+    // §5.7: the block just closed — the unified review covers every attempt
+    // in it (releasedFeedback), not just the one that closed it.
+    if (result.probeBlockEnd) {
+      onBlockEnd(result.probeBlockEnd, item.learningObjectId, item.learningObjectTitle);
+      return;
+    }
+    // §5.6: feedback stays deferred while the diagnostic block is still
+    // measuring — stay inside the block by jumping straight to whatever the
+    // episode serves next, instead of round-tripping through the queue.
+    if (probeActive && result.probeEpisode?.feedbackDeferred) {
+      try {
+        const next = await api.getNextProbeItem(item.learningObjectId);
+        if (next.active && next.practiceItemId) {
+          onContinueDiagnostic(next.practiceItemId);
+          return;
+        }
+      } catch (error) {
+        onError((error as Error).message);
+      }
       onBack();
       return;
     }
     onFeedback(result.attemptId);
-    if (result.probeBlockEnd?.route === "tutoring") {
-      // §12.1: the typed transition decision is persisted server-side; open
-      // the tutor so the diagnosed gap flows into instruction.
-      openAsk();
-    }
   }
 
   async function submit() {
@@ -372,7 +395,7 @@ export function PracticeScreen({
       });
       suppressDraftFlush.current = true;
       await clearCheckpoint();
-      routeAfterAttempt(result);
+      await routeAfterAttempt(result);
     } catch (error) {
       const command = error as CommandError;
       if (command.code === "grading_fallback_required") {
@@ -400,7 +423,7 @@ export function PracticeScreen({
       });
       suppressDraftFlush.current = true;
       await clearCheckpoint();
-      routeAfterAttempt(result);
+      await routeAfterAttempt(result);
     } catch (error) {
       onError((error as Error).message);
     } finally {
@@ -446,42 +469,54 @@ export function PracticeScreen({
             {fallbackRequired ? <Pill tone="amber">self-grade required</Pill> : <Pill tone="green">{gradingProvider} grading</Pill>}
           </div>
           {probeActive ? (
-            <div className="hint-banner" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <Pill tone="cyan">
-                Diagnostic · observation {probe?.observationNumber ?? 1} of up to {probe?.maximumObservations ?? 4}
-              </Pill>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>
-                {probe?.capabilitySummary ?? "Checking what you already know."}{" "}
-                Feedback is delayed for measurement integrity; hints and ask-tutor are unavailable.
-              </span>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, opacity: 0.85 }}>
-                <Faint>confidence</Faint>
-                {[1, 2, 3, 4, 5].map((level) => (
-                  <button
-                    key={level}
-                    type="button"
-                    className="queue-row"
-                    style={{
-                      padding: "0 6px",
-                      fontFamily: FONT_MONO,
-                      opacity: answerConfidence === level ? 1 : 0.45
-                    }}
-                    onClick={() => setAnswerConfidence(answerConfidence === level ? null : level)}
-                    title="how confident are you in your answer? (optional, 1 = guessing, 5 = certain)"
-                  >
-                    {level}
-                  </button>
-                ))}
-              </span>
-              <button
-                type="button"
-                className="queue-row"
-                style={{ marginLeft: "auto" }}
-                onClick={() => void stopDiagnosing()}
-                title="end the diagnostic block and start tutoring"
-              >
-                stop diagnosing &amp; teach me
-              </button>
+            <div className="hint-banner" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <Pill tone="cyan">Diagnostic check</Pill>
+                <BlockBar
+                  value={(probe?.observationNumber ?? 1) - 1}
+                  max={probe?.maximumObservations ?? 4}
+                  width={probe?.maximumObservations ?? 4}
+                  color={COLOR.cyan}
+                />
+                <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: COLOR.amber }}>
+                  question {probe?.observationNumber ?? 1} of up to {probe?.maximumObservations ?? 4}
+                </span>
+                <span style={{ fontSize: 12, opacity: 0.75 }}>
+                  Answer with what you know — this helps find exactly where to focus next. Full
+                  feedback arrives once this short check wraps up; hints and ask-tutor are paused
+                  for now.
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, opacity: 0.85 }}>
+                  <Faint>confidence</Faint>
+                  {[1, 2, 3, 4, 5].map((level) => (
+                    <button
+                      key={level}
+                      type="button"
+                      className="queue-row"
+                      style={{
+                        padding: "0 6px",
+                        fontFamily: FONT_MONO,
+                        opacity: answerConfidence === level ? 1 : 0.45
+                      }}
+                      onClick={() => setAnswerConfidence(answerConfidence === level ? null : level)}
+                      title="how confident are you in your answer? (optional, 1 = guessing, 5 = certain)"
+                    >
+                      {level}
+                    </button>
+                  ))}
+                </span>
+                <button
+                  type="button"
+                  className="queue-row"
+                  style={{ marginLeft: "auto" }}
+                  onClick={() => void stopDiagnosing()}
+                  title="end the diagnostic block and start tutoring"
+                >
+                  stop diagnosing &amp; teach me
+                </button>
+              </div>
             </div>
           ) : null}
           {item.mastery != null ? (

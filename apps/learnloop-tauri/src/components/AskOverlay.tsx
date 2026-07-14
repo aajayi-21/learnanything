@@ -19,6 +19,9 @@ export interface AskTarget {
   sessionId?: string;
   /** Date.now() when the practice item was opened (practice context only). */
   openedAtMs?: number;
+  /** §12.1: open with the tutor's persisted typed move before the learner
+   *  types anything (diagnostic block just routed to tutoring). */
+  proactiveOpen?: boolean;
 }
 
 const CONTEXT_PILL: Record<TutorQuestionContext, PillColor> = {
@@ -38,6 +41,9 @@ interface ThreadEntry {
   savedNoteId: string | null;
   /** Persisted promotion ledger row (question_promotions); survives remount (spec §2 idempotency). */
   promotion: QuestionPromotionDto | null;
+  /** §12.1 proactive handoff: a tutor-initiated turn with no learner question.
+   *  Ephemeral — never persisted, so it carries no eventId/rate/save/promote. */
+  opening?: boolean;
 }
 
 interface SaveNotice {
@@ -159,20 +165,49 @@ export function AskOverlay({
       })
       .then((snapshot) => {
         if (cancelled) return;
-        setThread(
-          snapshot.events.map((event: TutorQuestionEventDto) => ({
-            eventId: event.id,
-            questionMd: event.questionMd,
-            answerMd: event.answerMd,
-            questionType: event.questionType,
-            hintEquivalent: event.hintEquivalent,
-            rating: event.rating,
-            savedNoteId: event.savedNoteId,
-            promotion: event.promotion
-          }))
-        );
+        const entries: ThreadEntry[] = snapshot.events.map((event: TutorQuestionEventDto) => ({
+          eventId: event.id,
+          questionMd: event.questionMd,
+          answerMd: event.answerMd,
+          questionType: event.questionType,
+          hintEquivalent: event.hintEquivalent,
+          rating: event.rating,
+          savedNoteId: event.savedNoteId,
+          promotion: event.promotion
+        }));
+        setThread(entries);
         setRemaining(snapshot.remaining);
         setLimitReached(snapshot.remaining <= 0);
+        // §12.1 proactive handoff: greet with the persisted typed transition
+        // move before the learner has to type anything. Ephemeral — never
+        // merged into the persisted thread's budget/hint accounting.
+        if (target.proactiveOpen && target.practiceItemId && entries.length === 0) {
+          api
+            .previewTutorOpening({ practiceItemId: target.practiceItemId, sessionId: target.sessionId })
+            .then((opening) => {
+              if (cancelled || opening.openingMd == null) return;
+              setThread((prev) =>
+                prev.length === 0
+                  ? [
+                      {
+                        eventId: null,
+                        questionMd: "",
+                        answerMd: opening.openingMd,
+                        questionType: null,
+                        hintEquivalent: false,
+                        rating: null,
+                        savedNoteId: null,
+                        promotion: null,
+                        opening: true
+                      }
+                    ]
+                  : prev
+              );
+            })
+            .catch(() => {
+              // best-effort — falls back to the ordinary empty-overlay state.
+            });
+        }
       })
       .catch((error: CommandError) => {
         if (!cancelled) setInlineError(error.message);
@@ -186,7 +221,8 @@ export function AskOverlay({
     target?.practiceItemId,
     target?.attemptId,
     target?.noteId,
-    target?.sessionId
+    target?.sessionId,
+    target?.proactiveOpen
   ]);
 
   useEffect(() => clearSaveNoticeTimer, []);
@@ -363,17 +399,20 @@ export function AskOverlay({
           ) : null}
           {thread.map((entry, index) => (
             <div key={entry.eventId ?? `pending-${index}`} style={{ marginBottom: 16 }}>
-              <div style={{ color: COLOR.text, fontSize: 13 }}>
-                <span style={{ color: COLOR.amber, fontWeight: 700 }}>❯ </span>
-                {entry.questionMd}
-              </div>
+              {!entry.opening ? (
+                <div style={{ color: COLOR.text, fontSize: 13 }}>
+                  <span style={{ color: COLOR.amber, fontWeight: 700 }}>❯ </span>
+                  {entry.questionMd}
+                </div>
+              ) : null}
               {entry.answerMd === null ? (
                 <div style={{ marginTop: 6 }}>
                   <Faint>thinking …</Faint>
                 </div>
               ) : (
-                <div style={{ marginTop: 6 }}>
+                <div style={{ marginTop: entry.opening ? 0 : 6 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                    {entry.opening ? <Pill color="amber">tutor</Pill> : null}
                     {entry.questionType ? <Pill color="slate">{entry.questionType}</Pill> : null}
                     {entry.hintEquivalent ? <Pill color="amber">counted as hint</Pill> : null}
                   </div>

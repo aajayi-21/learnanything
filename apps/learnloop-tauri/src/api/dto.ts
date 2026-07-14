@@ -446,6 +446,14 @@ export interface StopProbeResultDto {
   decision: Record<string, unknown> | null;
 }
 
+/** §5.7 block continuity: the item that would continue this LO's open episode,
+ *  if any — a read-only peek, never commits a presentation. */
+export interface GetNextProbeItemDto {
+  version: number;
+  active: boolean;
+  practiceItemId?: string;
+}
+
 /** A source ref resolved to displayable content for the source-review panel. */
 export interface ResolvedSourceRefDto {
   refType: string;
@@ -564,6 +572,14 @@ export interface TutorAnswerDto {
   hintEquivalent: boolean;
   leakSuspected: boolean;
   remaining: number;
+}
+
+/** §12.1 proactive handoff: a tutor opening generated with no learner
+ *  question yet, grounded in a just-closed diagnostic block's persisted
+ *  decision. Ephemeral — never persisted as a question event. */
+export interface TutorOpeningDto {
+  version: number;
+  openingMd: string | null;
 }
 
 export interface TutorQuestionEventDto {
@@ -961,6 +977,80 @@ export interface RecentIngestEntry {
 export interface RecentIngestsSnapshot {
   version: number;
   ingests: RecentIngestEntry[];
+}
+
+export type IngestMode = "canonical" | "exam";
+export type IngestJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type IngestJobPhase =
+  | "queued"
+  | "preparing"
+  | "fetching"
+  | "extracting"
+  | "staging"
+  | "authoring"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface IngestSourceClassification {
+  version: number;
+  kind: "web" | "arxiv" | "pdf" | "youtube" | "textfile";
+  normalizedSource: string;
+}
+
+export interface IngestJobResult {
+  proposalId: string | null;
+  agentRunId: string | null;
+  sourceNoteId: string;
+  sourceKind: string;
+  subjectId: string;
+  contentHash: string;
+  reusedExisting: boolean;
+  codexCalls: number;
+  autoAppliedCount: number;
+  reviewRequiredCount: number;
+  invalidCount: number;
+  sourceEventCount: number;
+  goalId: string | null;
+  goalCreated: boolean;
+  goalUpdated: boolean;
+}
+
+export interface IngestJobError {
+  code: string;
+  message: string;
+  details: { partial?: boolean; exitCode?: number; [key: string]: unknown };
+}
+
+export interface IngestJobDto {
+  version?: number;
+  id: string;
+  source: string;
+  subjectId: string;
+  mode: IngestMode;
+  status: IngestJobStatus;
+  phase: IngestJobPhase;
+  message: string;
+  currentWindow: number | null;
+  totalWindows: number | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  result: IngestJobResult | null;
+  error: IngestJobError | null;
+}
+
+export interface IngestJobsSnapshot {
+  version: number;
+  jobs: IngestJobDto[];
+}
+
+export interface StartIngestInput {
+  source: string;
+  subjectId: string;
+  mode: IngestMode;
 }
 
 export interface ConceptGraphLearningObject {

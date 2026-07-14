@@ -13,12 +13,17 @@ import type {
   KnowledgeMapHistory,
   KnowledgeMapSnapshot,
   PracticeItemDetail,
+  GetNextProbeItemDto,
   ProbeContractDto,
   ProposalsSnapshot,
   StopProbeResultDto,
   QueueInput,
   QueueSnapshot,
   RecentIngestsSnapshot,
+  IngestJobDto,
+  IngestJobsSnapshot,
+  IngestSourceClassification,
+  StartIngestInput,
   RuntimeHealth,
   SchedulerExplanationDto,
   SessionEndSummary,
@@ -33,6 +38,7 @@ import type {
   SubmitAttemptInput,
   AskTutorQuestionInput,
   TutorAnswerDto,
+  TutorOpeningDto,
   TutorTranscriptInput,
   TutorTranscriptSnapshot,
   TutorSaveNoteResult,
@@ -109,6 +115,8 @@ export const api = {
     call<ProbeContractDto>("get_probe_contract", { practiceItemId, sessionId: sessionId ?? null }),
   stopProbeDiagnosing: (practiceItemId: string) =>
     call<StopProbeResultDto>("stop_probe_diagnosing", { practiceItemId }),
+  getNextProbeItem: (learningObjectId: string) =>
+    call<GetNextProbeItemDto>("get_next_probe_item", { learningObjectId }),
   savePracticeDraft: (input: {
     sessionId: string;
     practiceItemId: string;
@@ -141,6 +149,12 @@ export const api = {
   getConceptGraph: () => call<ConceptGraphSnapshot>("get_concept_graph"),
   getVaultTree: () => call<VaultTreeSnapshot>("get_vault_tree"),
   getRecentIngests: () => call<RecentIngestsSnapshot>("get_recent_ingests"),
+  classifyIngestSource: (source: string) =>
+    call<IngestSourceClassification>("classify_ingest_source", { input: { source } }),
+  startIngest: (input: StartIngestInput) => call<IngestJobDto>("start_ingest", { input }),
+  getIngestJob: (jobId: string) => call<IngestJobDto>("get_ingest_job", { jobId }),
+  getIngestJobs: () => call<IngestJobsSnapshot>("get_ingest_jobs"),
+  cancelIngest: (jobId: string) => call<IngestJobDto>("cancel_ingest", { jobId }),
   readVaultFile: (path: string) => call<VaultFileContent>("read_vault_file", { path }),
   writeVaultFile: (path: string, body: string) => call<VaultFileContent>("write_vault_file", { path, body }),
   createVaultFile: (path: string, body = "") =>
@@ -200,6 +214,8 @@ export const api = {
     call<GradingProviderResult>("set_grading_provider", { provider }),
   askTutorQuestion: (input: AskTutorQuestionInput) =>
     call<TutorAnswerDto>("ask_tutor_question", { input }),
+  previewTutorOpening: (input: { practiceItemId: string; sessionId?: string }) =>
+    call<TutorOpeningDto>("preview_tutor_opening", { input }),
   rateTutorAnswer: (eventId: string, useful: boolean) =>
     call<{ ok: boolean }>("rate_tutor_answer", { input: { eventId, useful } }),
   saveTutorAnswerNote: (eventId: string, subjectId?: string) =>

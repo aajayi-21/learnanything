@@ -27,6 +27,59 @@ def _loads(value: str | None, default: Any) -> Any:
     return json.loads(value)
 
 
+def _insert_probe_presentation_row(
+    connection: sqlite3.Connection,
+    *,
+    presentation_id: str,
+    now: str,
+    values: Mapping[str, Any],
+) -> None:
+    """Insert one frozen diagnostic assignment using the caller's transaction."""
+
+    connection.execute(
+        """
+        INSERT INTO probe_presentations(
+          id, probe_episode_id, practice_item_id, scheduler_candidate_id,
+          state_segment_id, probe_family_template_id, probe_family_template_version,
+          instrument_card_id, instrument_card_version, instrument_card_snapshot_json,
+          target_hypothesis_pairs_json, target_facets_json, posterior_at_selection_json,
+          entropy_at_selection, expected_information_gain, selection_policy_version,
+          selection_components_json,
+          status, end_reason, served_at, submitted_at, expires_at, ended_at,
+          created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'selected',
+                NULL, NULL, NULL, ?, NULL, ?, ?)
+        """,
+        (
+            presentation_id,
+            values["probe_episode_id"],
+            values["practice_item_id"],
+            values.get("scheduler_candidate_id"),
+            values["state_segment_id"],
+            values.get("probe_family_template_id"),
+            values.get("probe_family_template_version"),
+            values.get("instrument_card_id"),
+            values.get("instrument_card_version"),
+            _json(dict(values["instrument_card_snapshot"]))
+            if values.get("instrument_card_snapshot") is not None
+            else None,
+            _json(list(values.get("target_hypothesis_pairs") or [])),
+            _json(list(values.get("target_facets") or [])),
+            _json(dict(values.get("posterior_at_selection") or {})),
+            values.get("entropy_at_selection"),
+            values.get("expected_information_gain"),
+            values.get("selection_policy_version"),
+            _json(dict(values["selection_components"]))
+            if values.get("selection_components") is not None
+            else None,
+            values.get("expires_at"),
+            now,
+            now,
+        ),
+    )
+
+
 def _queued_followup_action(action: Any) -> tuple[str, str] | None:
     if not isinstance(action, str):
         return None
@@ -3266,43 +3319,29 @@ class Repository:
         presentation_id = new_ulid()
         now = utc_now_iso(clock)
         with self.connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO probe_presentations(
-                  id, probe_episode_id, practice_item_id, scheduler_candidate_id,
-                  state_segment_id, probe_family_template_id, probe_family_template_version,
-                  instrument_card_id, instrument_card_version, instrument_card_snapshot_json,
-                  target_hypothesis_pairs_json, target_facets_json, posterior_at_selection_json,
-                  entropy_at_selection, expected_information_gain, selection_policy_version,
-                  selection_components_json,
-                  status, end_reason, served_at, submitted_at, expires_at, ended_at,
-                  created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'selected',
-                        NULL, NULL, NULL, ?, NULL, ?, ?)
-                """,
-                (
-                    presentation_id,
-                    probe_episode_id,
-                    practice_item_id,
-                    scheduler_candidate_id,
-                    state_segment_id,
-                    probe_family_template_id,
-                    probe_family_template_version,
-                    instrument_card_id,
-                    instrument_card_version,
-                    _json(dict(instrument_card_snapshot)) if instrument_card_snapshot is not None else None,
-                    _json(list(target_hypothesis_pairs or [])),
-                    _json(list(target_facets or [])),
-                    _json(dict(posterior_at_selection or {})),
-                    entropy_at_selection,
-                    expected_information_gain,
-                    selection_policy_version,
-                    _json(dict(selection_components)) if selection_components is not None else None,
-                    expires_at,
-                    now,
-                    now,
-                ),
+            _insert_probe_presentation_row(
+                connection,
+                presentation_id=presentation_id,
+                now=now,
+                values={
+                    "probe_episode_id": probe_episode_id,
+                    "practice_item_id": practice_item_id,
+                    "scheduler_candidate_id": scheduler_candidate_id,
+                    "state_segment_id": state_segment_id,
+                    "probe_family_template_id": probe_family_template_id,
+                    "probe_family_template_version": probe_family_template_version,
+                    "instrument_card_id": instrument_card_id,
+                    "instrument_card_version": instrument_card_version,
+                    "instrument_card_snapshot": instrument_card_snapshot,
+                    "target_hypothesis_pairs": target_hypothesis_pairs,
+                    "target_facets": target_facets,
+                    "posterior_at_selection": posterior_at_selection,
+                    "entropy_at_selection": entropy_at_selection,
+                    "expected_information_gain": expected_information_gain,
+                    "selection_policy_version": selection_policy_version,
+                    "selection_components": selection_components,
+                    "expires_at": expires_at,
+                },
             )
             connection.commit()
         return presentation_id
@@ -3340,6 +3379,26 @@ class Repository:
                 ORDER BY created_at DESC, id DESC LIMIT 1
                 """,
                 parameters,
+            ).fetchone()
+        return _probe_presentation_record(row) if row is not None else None
+
+    def active_probe_presentation_for_session(
+        self, session_id: str
+    ) -> ProbePresentationRecord | None:
+        """The scheduler-backed assignment currently owned by one session."""
+
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT p.*
+                FROM probe_presentations p
+                JOIN scheduler_slate_candidates c ON c.id = p.scheduler_candidate_id
+                JOIN scheduler_slates s ON s.id = c.slate_id
+                WHERE s.session_id = ? AND p.status IN ('selected', 'served')
+                ORDER BY p.created_at DESC, p.id DESC
+                LIMIT 1
+                """,
+                (session_id,),
             ).fetchone()
         return _probe_presentation_record(row) if row is not None else None
 
@@ -4515,6 +4574,7 @@ class Repository:
         session_context: Mapping[str, Any] | None = None,
         config_snapshot: Mapping[str, Any] | None = None,
         selection_policy: str = "selection_reward_v1",
+        probe_presentation: Mapping[str, Any] | None = None,
         clock: Clock | None = None,
     ) -> str:
         rows = list(explanations)
@@ -4528,6 +4588,7 @@ class Repository:
             row["practice_item_id"]: rank
             for rank, row in enumerate(returned, start=1)
         }
+        candidate_ids: dict[str, str] = {}
         with self.connection() as connection:
             connection.execute(
                 """
@@ -4559,6 +4620,8 @@ class Repository:
                 target_scope = explanation.get("target_scope") or {}
                 reward_debug = target_scope.get("selection_reward") if isinstance(target_scope, Mapping) else None
                 practice_item_id = explanation["practice_item_id"]
+                candidate_id = new_ulid()
+                candidate_ids[practice_item_id] = candidate_id
                 returned_rank = returned_rank_by_id.get(practice_item_id)
                 connection.execute(
                     """
@@ -4574,7 +4637,7 @@ class Repository:
                     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
                     """,
                     (
-                        new_ulid(),
+                        candidate_id,
                         slate_id,
                         practice_item_id,
                         _learning_object_id_from_target_scope(target_scope),
@@ -4598,6 +4661,49 @@ class Repository:
                         now,
                     ),
                 )
+            if probe_presentation is not None:
+                presentation_values = dict(probe_presentation)
+                practice_item_id = str(presentation_values["practice_item_id"])
+                candidate_id = candidate_ids.get(practice_item_id)
+                if candidate_id is None or returned_rank_by_id.get(practice_item_id) != 1:
+                    raise ValueError(
+                        "probe presentation must bind the top returned scheduler candidate"
+                    )
+                episode = connection.execute(
+                    """
+                    SELECT status, active_state_segment_id
+                    FROM probe_episodes WHERE id = ?
+                    """,
+                    (presentation_values["probe_episode_id"],),
+                ).fetchone()
+                if (
+                    episode is None
+                    or episode["status"] != "in_progress"
+                    or episode["active_state_segment_id"]
+                    != presentation_values["state_segment_id"]
+                ):
+                    raise ValueError(
+                        "probe presentation episode changed before scheduler commitment"
+                    )
+                # Do not replace an assignment that may already be displayed.
+                # A later explicit abandonment/consumption boundary owns that
+                # transition; queue refreshes are observational only.
+                active = connection.execute(
+                    """
+                    SELECT id FROM probe_presentations
+                    WHERE probe_episode_id = ? AND status IN ('selected', 'served')
+                    LIMIT 1
+                    """,
+                    (presentation_values["probe_episode_id"],),
+                ).fetchone()
+                if active is None:
+                    presentation_values["scheduler_candidate_id"] = candidate_id
+                    _insert_probe_presentation_row(
+                        connection,
+                        presentation_id=new_ulid(),
+                        now=now,
+                        values=presentation_values,
+                    )
             connection.commit()
         return slate_id
 

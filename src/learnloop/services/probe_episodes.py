@@ -174,6 +174,8 @@ def enter_episode(
         id=hypothesis_set_id,
     )
     now = utc_now_iso(clock)
+    from learnloop.services.facet_diagnostics import required_facets
+
     repository.insert_probe_episode(
         episode_id=episode_id,
         learning_object_id=learning_object_id,
@@ -182,6 +184,7 @@ def enter_episode(
         hypothesis_set_id=hypothesis_set_id,
         active_state_segment_id=None,
         algorithm_version=algorithm_version,
+        required_facets=sorted(required_facets(vault, learning_object_id, repository)),
         minimum_independent_observations=episode_config.minimum_independent_observations,
         maximum_observations=episode_config.maximum_observations,
         entered_at=now,
@@ -532,6 +535,35 @@ def resolve_instrument(
     return None
 
 
+def _resolved_slot_map_from_snapshot(
+    snapshot: Mapping[str, Any],
+    instrument: CompiledInstrument,
+    labels: list[str],
+) -> dict[str, str] | None:
+    """Return the frozen selection-time label mapping for this presentation.
+
+    Presentations created before the resolved map was persisted retain the
+    legacy reconstruction fallback. New presentations never reinterpret card
+    bindings during submission or replay.
+    """
+
+    if "resolved_slot_map" in snapshot:
+        frozen = snapshot.get("resolved_slot_map")
+        if not isinstance(frozen, Mapping):
+            return None
+        slot_map = {
+            str(label): str(slot)
+            for label, slot in frozen.items()
+            if str(label) in labels and str(slot) in instrument.rows
+        }
+        if all(label in slot_map for label in labels):
+            return slot_map
+        return None
+    return map_episode_labels_to_slots(instrument, labels) or {
+        label: label for label in labels if label in instrument.rows
+    }
+
+
 def compile_fallback_instrument(
     vault: LoadedVault,
     repository: Repository,
@@ -649,6 +681,46 @@ def commit_presentation(
     (§13.3, Checkpoint 5.1).
     """
 
+    payload = presentation_commit_payload(
+        vault,
+        repository,
+        episode,
+        eligible,
+        scheduler_candidate_id=scheduler_candidate_id,
+        extra_selection_components=extra_selection_components,
+        candidates=candidates,
+        clock=clock,
+    )
+
+    if supersede_active:
+        previous = repository.active_probe_presentation(episode.id)
+        if previous is not None:
+            repository.end_probe_presentation(previous.id, end_reason="abandoned", clock=clock)
+
+    presentation_id = repository.insert_probe_presentation(**payload, clock=clock)
+    record = repository.probe_presentation(presentation_id)
+    assert record is not None
+    return record
+
+
+def presentation_commit_payload(
+    vault: LoadedVault,
+    repository: Repository,
+    episode: ProbeEpisodeRecord,
+    eligible: EligibleInstrument,
+    *,
+    scheduler_candidate_id: str | None = None,
+    extra_selection_components: Mapping[str, Any] | None = None,
+    candidates: list[EligibleInstrument] | None = None,
+    clock: Clock | None = None,
+) -> dict[str, Any]:
+    """Build the frozen presentation row before its owning transaction.
+
+    The routine scheduler passes this payload into ``record_scheduler_slate``
+    so the candidate and presentation are committed atomically. Dialogue and
+    direct/TUI selections use ``commit_presentation`` with the same builder.
+    """
+
     if episode.status != "in_progress":
         raise ValueError(f"episode {episode.id} is {episode.status}; cannot commit a presentation")
     if episode.active_state_segment_id is None:
@@ -657,12 +729,6 @@ def commit_presentation(
     posterior = episode_posterior(vault, repository, episode)
     belief = posterior.posterior if posterior is not None else {}
     eig = instrument_expected_information_gain(belief, eligible.instrument, eligible.slot_map)
-
-    if supersede_active:
-        previous = repository.active_probe_presentation(episode.id)
-        if previous is not None:
-            repository.end_probe_presentation(previous.id, end_reason="abandoned", clock=clock)
-
     expires_at = None
     ttl_minutes = vault.config.probe.episode.presentation_ttl_minutes
     if ttl_minutes > 0:
@@ -675,6 +741,11 @@ def commit_presentation(
             )
 
     snapshot = eligible.instrument.snapshot()
+    # The card binding is presentation-specific: two cards compiled from the
+    # same family can map a concrete episode label to different abstract slots.
+    # Freeze the exact map used by EIG so grading and replay cannot reinterpret
+    # it later (§7.2 selection/replay identity).
+    snapshot["resolved_slot_map"] = dict(eligible.slot_map)
     labels = sorted(belief, key=lambda label: -belief.get(label, 0.0))
     target_pairs = [[labels[i], labels[j]] for i in range(min(2, len(labels))) for j in range(i + 1, min(3, len(labels)))]
     selection_components = dict(eligible.selection_components(), **(extra_selection_components or {}))
@@ -683,29 +754,25 @@ def commit_presentation(
         selection_components["shadow_rankings"] = shadow_selection_rankings(
             candidates, top_k=shadow_config.top_k
         )
-    presentation_id = repository.insert_probe_presentation(
-        probe_episode_id=episode.id,
-        practice_item_id=eligible.item.id,
-        state_segment_id=episode.active_state_segment_id,
-        scheduler_candidate_id=scheduler_candidate_id,
-        probe_family_template_id=eligible.instrument.family_template_id,
-        probe_family_template_version=eligible.instrument.family_template_version,
-        instrument_card_id=eligible.instrument.card_id,
-        instrument_card_version=eligible.instrument.card_version,
-        instrument_card_snapshot=snapshot,
-        target_hypothesis_pairs=target_pairs,
-        target_facets=list(eligible.instrument.target_facets),
-        posterior_at_selection=belief,
-        entropy_at_selection=_entropy(belief),
-        expected_information_gain=eig,
-        selection_policy_version=SELECTION_POLICY_VERSION,
-        selection_components=selection_components,
-        expires_at=expires_at,
-        clock=clock,
-    )
-    record = repository.probe_presentation(presentation_id)
-    assert record is not None
-    return record
+    return {
+        "probe_episode_id": episode.id,
+        "practice_item_id": eligible.item.id,
+        "state_segment_id": episode.active_state_segment_id,
+        "scheduler_candidate_id": scheduler_candidate_id,
+        "probe_family_template_id": eligible.instrument.family_template_id,
+        "probe_family_template_version": eligible.instrument.family_template_version,
+        "instrument_card_id": eligible.instrument.card_id,
+        "instrument_card_version": eligible.instrument.card_version,
+        "instrument_card_snapshot": snapshot,
+        "target_hypothesis_pairs": target_pairs,
+        "target_facets": list(eligible.instrument.target_facets),
+        "posterior_at_selection": belief,
+        "entropy_at_selection": _entropy(belief),
+        "expected_information_gain": eig,
+        "selection_policy_version": SELECTION_POLICY_VERSION,
+        "selection_components": selection_components,
+        "expires_at": expires_at,
+    }
 
 
 def serve_presentation(repository: Repository, presentation_id: str, *, clock: Clock | None = None) -> None:
@@ -756,24 +823,15 @@ def commit_item_presentation(
 ):
     """Commit and serve a presentation for one specific item.
 
-    Prefers the full eligible slate so the committed presentation carries real
-    §7.3 selection components and §13.3 shadow-policy rankings; an item outside
-    the slate (e.g. a scheduler pick that became a repeat surface) falls back
-    to bare instrument resolution without shadow telemetry. Returns the
-    presentation record, or None when the item resolves no instrument.
+    Uses the live eligible slate so the committed presentation carries real
+    §7.3 selection components and §13.3 shadow-policy rankings. An item outside
+    that slate is not a diagnostic assignment; it remains ordinary practice.
     """
 
     candidates = eligible_instruments(vault, repository, episode, hypothesis_set=hypothesis_set)
     eligible = next((entry for entry in candidates if entry.item.id == item.id), None)
     if eligible is None:
-        resolved = resolve_instrument(vault, repository, item, hypothesis_set)
-        if resolved is None:
-            return None
-        instrument, slot_map = resolved
-        eligible = EligibleInstrument(
-            item=item, instrument=instrument, slot_map=slot_map, expected_information_gain=0.0
-        )
-        candidates = []
+        return None
     presentation = commit_presentation(
         vault,
         repository,
@@ -1028,12 +1086,36 @@ def episode_posterior(
                 continue
             likelihoods = _observation_likelihoods_from_row(vault, repository, episode, attempt, observation_row)
             if likelihoods is not None:
-                posterior = _bayes_update(posterior, likelihoods)
+                weight = (
+                    float(observation.independent_evidence_discount)
+                    if observation.independent_evidence_discount is not None
+                    else 1.0
+                )
+                posterior = _bayes_update(
+                    posterior,
+                    likelihoods,
+                    weight=weight,
+                    prior_for_marginal=posterior,
+                )
             continue
         if attempt.get("probe_presentation_id"):
-            # Diagnostic attempt whose observation was refused (invalid
-            # presentation, unapproved grader): belief-only, damped below.
-            pass
+            presentation = repository.probe_presentation(
+                str(attempt["probe_presentation_id"])
+            )
+            if presentation is not None and presentation.status in (
+                "selected",
+                "served",
+                "submitted",
+            ):
+                # While recording an accepted observation the attempt already
+                # exists and its presentation may already be consumed, but the
+                # observation row does not yet. Exclude that in-flight response
+                # from posterior_before instead of counting it once as generic
+                # incidental evidence and again through the instrument.
+                continue
+            # A diagnostic attempt whose presentation was explicitly ended
+            # without an observation (for example an unapproved grader) falls
+            # through as damped belief-only incidental evidence.
         if intervention_at is not None and created is not None and created >= intervention_at:
             continue
         likelihoods = _incidental_likelihoods(vault, repository, attempt, hypothesis_set)
@@ -1083,15 +1165,20 @@ def _observation_likelihoods_from_row(
     if hypothesis_set is None:
         return None
     labels = [hypothesis.label for hypothesis in hypothesis_set.hypotheses]
-    slot_map = map_episode_labels_to_slots(instrument, labels) or {
-        label: label for label in labels if label in instrument.rows
-    }
-    outcome = classify_outcome(
-        instrument,
-        rubric_score=attempt.get("rubric_score"),
-        attempt_type=str(attempt.get("attempt_type") or ""),
-        fired_error_types=_fired_error_types(repository, str(attempt.get("id"))),
-    )
+    slot_map = _resolved_slot_map_from_snapshot(snapshot, instrument, labels)
+    if slot_map is None:
+        return None
+    observation = observation_row["observation"]
+    outcome = str((observation.grader_channel or {}).get("observed_outcome") or "")
+    if not outcome:
+        # Backward-compatible replay for observations written before the
+        # classified outcome became part of the authoritative observation.
+        outcome = classify_outcome(
+            instrument,
+            rubric_score=attempt.get("rubric_score"),
+            attempt_type=str(attempt.get("attempt_type") or ""),
+            fired_error_types=_fired_error_types(repository, str(attempt.get("id"))),
+        )
     return instrument_observation_likelihoods(instrument, slot_map, outcome)
 
 
@@ -1264,9 +1351,9 @@ def _record_presentation_observation(
         return
     instrument = CompiledInstrument.from_snapshot(snapshot)
     labels = [hypothesis.label for hypothesis in hypothesis_set.hypotheses]
-    slot_map = map_episode_labels_to_slots(instrument, labels) or {
-        label: label for label in labels if label in instrument.rows
-    }
+    slot_map = _resolved_slot_map_from_snapshot(snapshot, instrument, labels)
+    if slot_map is None:
+        return
 
     # Posterior before: full replay excluding this attempt (its observation row
     # does not exist yet and presentation-linked attempts are not incidental).
@@ -1707,3 +1794,33 @@ def episode_contract(
         "feedback_note": "Feedback is delayed until this short diagnostic block completes.",
         "actions": {"stop_and_teach": True, "leave_and_resume": True},
     }
+
+
+def next_probe_item(
+    vault: LoadedVault,
+    repository: Repository,
+    learning_object_id: str,
+) -> EligibleInstrument | None:
+    """The item that would be served next for this LO's open episode, or None.
+
+    Read-only peek (§5.7 continuity) — unlike `commit_item_presentation`, this
+    never writes a presentation. The Tauri UI uses it to jump straight to the
+    next observation within an in-progress block instead of round-tripping
+    through the general queue between every attempt.
+    """
+
+    episode = repository.open_probe_episode(learning_object_id)
+    if episode is None or episode.status != "in_progress":
+        return None
+    hypothesis_set = episode_hypothesis_set(repository, episode)
+    if hypothesis_set is None:
+        return None
+    posterior = episode_posterior(vault, repository, episode, hypothesis_set=hypothesis_set)
+    candidates = eligible_instruments(
+        vault,
+        repository,
+        episode,
+        hypothesis_set=hypothesis_set,
+        posterior=posterior.posterior if posterior is not None else None,
+    )
+    return candidates[0] if candidates else None

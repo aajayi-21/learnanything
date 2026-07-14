@@ -61,6 +61,54 @@ def test_ingest_local_html_registers_source_and_auto_applies(tmp_path):
     assert repository.find_record(result.agent_run_id)[1]["status"] == "completed"
 
 
+def test_ingest_reports_user_visible_pipeline_phases(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    html = _source_file(tmp_path)
+    events: list[tuple[str, dict]] = []
+
+    ingest_canonical_source(
+        vault_root,
+        str(html),
+        _FakeCanonicalClient(),
+        subject_id="linear-algebra",
+        clock=FrozenClock(NOW),
+        progress=lambda phase, details: events.append((phase, details)),
+    )
+
+    assert [phase for phase, _details in events] == ["fetching", "extracting", "staging", "authoring"]
+    assert events[-1][1] == {"current_window": 1, "total_windows": 1}
+
+
+def test_ingest_local_markdown_runs_the_canonical_proposal_pipeline(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    markdown = tmp_path / "svd-notes.md"
+    markdown.write_text(
+        "# Singular Value Decomposition\n\n"
+        + " ".join(
+            [
+                "Singular value decomposition factors a matrix into orthogonal matrices and singular values.",
+                "It supports low rank approximation, least squares reasoning, and geometric interpretation.",
+            ]
+            * 8
+        ),
+        encoding="utf-8",
+    )
+
+    result = ingest_canonical_source(
+        vault_root,
+        str(markdown),
+        _FakeCanonicalClient(),
+        subject_id="linear-algebra",
+        clock=FrozenClock(NOW),
+    )
+
+    assert result.patch_id
+    assert result.source_kind == "website_page"
+    assert load_vault(vault_root).notes[result.source_note_id].source_type == "canonical_source"
+
+
 def test_ingest_same_canonical_source_is_noop_after_completed_run(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)

@@ -17,6 +17,8 @@ from learnloop.services.probe_episodes import (
     eligible_instruments,
     episode_hypothesis_set,
     episode_posterior,
+    presentation_commit_payload,
+    probe_serving_block_reason,
 )
 from learnloop.services.probes import HypothesisSet
 from learnloop.numeric import clamp
@@ -62,6 +64,17 @@ def build_due_queue(
     now = (clock or SystemClock()).now().astimezone(UTC)
     session = session or SchedulerSession()
     config = vault.config
+    cap_lifted = False
+    if session.session_id is not None:
+        from learnloop.services.calibration_sessions import calibration_cap_lifted
+
+        cap_lifted = calibration_cap_lifted(repository, session.session_id)
+    probe_block_reason = probe_serving_block_reason(
+        vault,
+        repository,
+        session_id=session.session_id,
+        cap_lifted=cap_lifted,
+    )
     item_states = repository.practice_item_states()
     # Items reserved for a goal's held-out exam are quarantined from practice so
     # the exam stays an honest, uncontaminated test (fetched once per build).
@@ -112,7 +125,11 @@ def build_due_queue(
             continue
         mastery = mastery_states.get(learning_object.id)
         episode = open_episodes.get(learning_object.id)
-        in_probe = episode is not None and episode.status == "in_progress"
+        in_probe = (
+            episode is not None
+            and episode.status == "in_progress"
+            and probe_block_reason is None
+        )
         frontier_entry = frontier.by_lo.get(learning_object.id)
         # Cold-start gate: never-attempted LOs stay out of the routine queue —
         # EXCEPT when the LO is on an active goal's at-risk frontier or has an
@@ -293,6 +310,39 @@ def build_due_queue(
     )
     queue = _rotate_same_day_frontier_repeats(queue, item_states, now)
     queue = _insert_pending_followups(vault, queue, pending_followups, readiness_factor)
+    active_session_presentation = (
+        repository.active_probe_presentation_for_session(session.session_id)
+        if session.session_id is not None
+        else None
+    )
+    if active_session_presentation is not None and probe_block_reason is not None:
+        repository.end_probe_presentation(
+            active_session_presentation.id,
+            end_reason="invalidated",
+            clock=clock,
+        )
+        active_session_presentation = None
+    if active_session_presentation is not None:
+        # A selected presentation is a durable assignment, not a suggestion to
+        # recompute on every queue refresh. Keep it at the front until it is
+        # served/consumed or explicitly ended.
+        assigned = next(
+            (
+                item
+                for item in queue
+                if item.practice_item_id == active_session_presentation.practice_item_id
+            ),
+            None,
+        )
+        if assigned is not None:
+            queue = [assigned] + [item for item in queue if item is not assigned]
+        else:
+            repository.end_probe_presentation(
+                active_session_presentation.id,
+                end_reason="invalidated",
+                clock=clock,
+            )
+            active_session_presentation = None
     considered_queue = list(queue)
     if limit is not None:
         queue = queue[:limit]
@@ -306,6 +356,49 @@ def build_due_queue(
             )
             for item in considered_queue
         ]
+        probe_presentation = None
+        if queue:
+            selected = queue[0]
+            episode = open_episodes.get(selected.learning_object_id)
+            if (
+                episode is not None
+                and episode.status == "in_progress"
+                and selected.components.get("probe_eig", 0.0) > 0.0
+                and active_session_presentation is None
+                and repository.active_probe_presentation(episode.id) is None
+                and probe_block_reason is None
+            ):
+                context = _load_episode_context(
+                    vault, repository, episode, episode_posterior_cache
+                )
+                if context is not None:
+                    eligible_by_id = _load_episode_eligible(
+                        vault,
+                        repository,
+                        episode,
+                        context,
+                        episode_eligible_cache,
+                    )
+                    eligible = eligible_by_id.get(selected.practice_item_id)
+                    if eligible is not None:
+                        extra_components = None
+                        if vault.config.probe.shadow.enabled:
+                            from learnloop.services.calibration_sessions import (
+                                routine_planner_shadow,
+                            )
+
+                            planner = routine_planner_shadow(vault, repository, episode.id)
+                            if planner is not None:
+                                extra_components = {"shadow_planner": planner}
+                        probe_presentation = presentation_commit_payload(
+                            vault,
+                            repository,
+                            episode,
+                            eligible,
+                            candidates=list(eligible_by_id.values()),
+                            extra_selection_components=extra_components,
+                            clock=clock,
+                        )
         repository.record_scheduler_slate(
             explanations,
             session_id=session.session_id,
@@ -314,8 +407,15 @@ def build_due_queue(
             session_context=_session_context(session, short_session=short_session, readiness_factor=readiness_factor),
             config_snapshot=_scheduler_config_snapshot(config),
             selection_policy="selection_reward_v1",
+            probe_presentation=probe_presentation,
             clock=clock,
         )
+        committed = repository.active_probe_presentation_for_session(session.session_id)
+        if committed is not None:
+            for scheduled in queue:
+                scheduled.components["probe_committed"] = (
+                    1.0 if scheduled.practice_item_id == committed.practice_item_id else 0.0
+                )
         repository.insert_scheduler_explanations(
             explanations,
             session_id=session.session_id,

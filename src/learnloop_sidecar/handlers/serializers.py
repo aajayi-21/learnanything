@@ -38,7 +38,9 @@ def scheduled_item_dto(vault: LoadedVault, repository: Repository, scheduled: Sc
             "mastery_variance": mastery_display.mastery_variance if mastery_display is not None else None,
             "due_at": state.due_at if state is not None else None,
             "due_status": _due_status(scheduled, state.due_at if state is not None else None),
-            "is_probe": scheduled.components.get("probe_eig", 0.0) > 0.0,
+            # A positive EIG marks a ranking-time candidate. Only the item with
+            # a durable scheduler-backed presentation is a diagnostic probe.
+            "is_probe": scheduled.components.get("probe_committed", 0.0) > 0.0,
             "is_followup": (
                 scheduled.components.get("negative_surprise_followup", 0.0) > 0.0
                 or scheduled.components.get("intervention_followup", 0.0) > 0.0

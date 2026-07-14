@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../api/client";
-import type { CommandError, RecentIngestEntry } from "../api/dto";
+import type { CommandError, IngestJobDto, IngestJobPhase, IngestMode, RecentIngestEntry } from "../api/dto";
 import { COLOR, Dim, Faint, FONT_MONO, KeyBar, Pill, SectionHeader, type PillColor } from "../components/term";
 
 // Ingest screen — `learnloop ingest <source> --subject <id>` mirror.
@@ -8,8 +9,8 @@ import { COLOR, Dim, Faint, FONT_MONO, KeyBar, Pill, SectionHeader, type PillCol
 // YouTube / local .md|.txt) into a `source_type: canonical_source` note under
 // `subjects/<id>/notes/`, then run the canonical-ingestor proposal against it.
 //
-// Runs the real pipeline through the sidecar's `run_cli_command` (`ingest` /
-// `ingest-exam --json`); recent ingests come from `get_recent_ingests`.
+// Runs the real pipeline as a cancellable sidecar job; the screen polls typed
+// phase/progress snapshots while recent ingests come from `get_recent_ingests`.
 
 type Kind = "web" | "arxiv" | "pdf" | "youtube" | "local";
 
@@ -44,41 +45,15 @@ const BACKEND_KIND: Record<string, { color: PillColor; label: string }> = {
   youtube_video: { color: "red", label: "youtube" }
 };
 
-function backendKindPill(kind: string | null): { color: PillColor; label: string } {
+function backendKindPill(kind: string | null, canonicalUri?: string | null): { color: PillColor; label: string } {
+  if (kind === "website_page" && canonicalUri && /\.pdf(?:$|[?#])/i.test(canonicalUri)) {
+    return { color: "amber", label: "pdf" };
+  }
   if (kind && BACKEND_KIND[kind]) return BACKEND_KIND[kind];
   return { color: "slate", label: kind ?? "source" };
 }
 
-type Mode = "canonical" | "exam";
-
-// ── `--json` payload of `learnloop ingest` / `ingest-exam` ───────────────
-type IngestSummary = {
-  proposal_id: string;
-  source_note_id: string;
-  source_kind: string;
-  subject_id: string;
-  reused_existing: boolean;
-  auto_applied_count: number;
-  review_required_count: number;
-  invalid_count: number;
-};
-
-function parseIngestStdout(stdout: string): { ingest?: IngestSummary; error?: string } {
-  const line = stdout
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.startsWith("{"))
-    .pop();
-  if (!line) return {};
-  try {
-    const payload = JSON.parse(line);
-    if (payload.ingest) return { ingest: payload.ingest as IngestSummary };
-    if (payload.error) return { error: String(payload.message ?? payload.error) };
-    return {};
-  } catch {
-    return {};
-  }
-}
+type Mode = IngestMode;
 
 function relativeWhen(iso: string | null): string {
   if (!iso) return "";
@@ -191,7 +166,9 @@ function RecentIngestRow({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const pill = row.purpose === "exam_ingest" ? { color: "pink" as PillColor, label: "exam" } : backendKindPill(row.kind);
+  const pill = row.purpose === "exam_ingest"
+    ? { color: "pink" as PillColor, label: "exam" }
+    : backendKindPill(row.kind, row.canonicalUri);
   return (
     <div
       onClick={onSelect}
@@ -271,7 +248,7 @@ function SubjectPicker({
   subjects: string[];
   value: string | null;
   onChange: (subject: string) => void;
-  onCreate: (title: string) => Promise<void>;
+  onCreate: (title: string) => Promise<boolean>;
   creating: boolean;
 }) {
   const [adding, setAdding] = useState(false);
@@ -285,7 +262,8 @@ function SubjectPicker({
   async function submit() {
     const trimmed = title.trim();
     if (!trimmed || creating) return;
-    await onCreate(trimmed);
+    const created = await onCreate(trimmed);
+    if (!created) return;
     setTitle("");
     setAdding(false);
   }
@@ -385,20 +363,52 @@ function SubjectPicker({
 // ── Indeterminate progress bar + spinner while the pipeline runs ────────
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"];
 
-function RunningCard({ mode, source, elapsed }: { mode: Mode; source: string; elapsed: number }) {
+const INGEST_PHASES: Array<{ phase: IngestJobPhase; label: string }> = [
+  { phase: "preparing", label: "prepare" },
+  { phase: "fetching", label: "fetch" },
+  { phase: "extracting", label: "extract" },
+  { phase: "staging", label: "stage" },
+  { phase: "authoring", label: "author" }
+];
+
+function RunningCard({ job, elapsed, onCancel }: { job: IngestJobDto; elapsed: number; onCancel: () => void }) {
   const frame = SPINNER_FRAMES[Math.floor(elapsed * 2) % SPINNER_FRAMES.length];
   const minutes = Math.floor(elapsed / 60);
   const seconds = Math.floor(elapsed % 60);
   const clock = minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+  const activeIndex = INGEST_PHASES.findIndex((item) => item.phase === job.phase);
+  const cancelling = job.phase === "cancelling";
   return (
     <Card style={{ marginTop: 4, borderLeft: `3px solid ${COLOR.cyan}` }}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
         <span style={{ color: COLOR.cyan, fontSize: 13, fontWeight: 600 }}>
-          {frame} {mode === "exam" ? "ingesting past exam…" : "ingesting canonical source…"}
+          {frame} {cancelling ? "cancelling ingest…" : job.message}
         </span>
-        <span style={{ color: COLOR.textDim, fontSize: 12, fontFamily: FONT_MONO }}>{clock}</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 12 }}>
+          <span style={{ color: COLOR.textDim, fontSize: 12, fontFamily: FONT_MONO }}>{clock}</span>
+          <span
+            onClick={onCancel}
+            style={{ color: COLOR.red, cursor: cancelling ? "default" : "pointer", fontSize: 11, opacity: cancelling ? 0.5 : 1 }}
+          >
+            {cancelling ? "stopping…" : "cancel"}
+          </span>
+        </span>
       </div>
       <div className="ll-ingest-bar" />
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 11, fontFamily: FONT_MONO, fontSize: 10 }}>
+        {INGEST_PHASES.map((item, index) => {
+          const complete = activeIndex > index;
+          const active = activeIndex === index;
+          return (
+            <span key={item.phase} style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              {index > 0 && <span style={{ color: complete || active ? COLOR.green : COLOR.border }}>→</span>}
+              <span style={{ color: active ? COLOR.cyan : complete ? COLOR.green : COLOR.textFaint }}>
+                {complete ? "✓ " : active ? `${frame} ` : "· "}{item.label}
+              </span>
+            </span>
+          );
+        })}
+      </div>
       <div style={{ marginTop: 10, fontSize: 11, color: COLOR.textDim, lineHeight: 1.6 }}>
         <div>
           <Faint>source</Faint>{" "}
@@ -413,13 +423,19 @@ function RunningCard({ mode, source, elapsed }: { mode: Mode; source: string; el
               verticalAlign: "bottom"
             }}
           >
-            {source}
+            {job.source}
           </span>
         </div>
+        {job.phase === "authoring" && job.totalWindows != null && (
+          <div style={{ marginTop: 4 }}>
+            <Faint>model window</Faint>{" "}
+            <span style={{ color: COLOR.cyan }}>{job.currentWindow ?? 1}</span>
+            <Faint> / {job.totalWindows}</Faint>
+          </div>
+        )}
         <div style={{ marginTop: 4 }}>
           <Faint>
-            fetch → extract markdown → stage canonical_source note → AI authoring proposal. Larger sources run several model
-            windows — this can take a few minutes.
+            job {job.id} · {job.mode === "exam" ? "practice exam" : "canonical source"} · subject {job.subjectId}
           </Faint>
         </div>
       </div>
@@ -450,7 +466,15 @@ function splitFrontmatter(raw: string): { frontmatter: string | null; body: stri
 }
 
 // ── Main screen ────────────────────────────────────────────────────────
-export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () => void }) {
+export function IngestScreen({
+  jobId,
+  onJobIdChange,
+  onProceedToPropose
+}: {
+  jobId: string | null;
+  onJobIdChange: (jobId: string | null) => void;
+  onProceedToPropose: (patchId: string) => void;
+}) {
   const [source, setSource] = useState("");
   const [mode, setMode] = useState<Mode>("canonical");
   const [subjects, setSubjects] = useState<string[]>([]);
@@ -459,14 +483,19 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
   const [recent, setRecent] = useState<RecentIngestEntry[]>([]);
   const [recentLoading, setRecentLoading] = useState(true);
   const [preview, setPreview] = useState<NotePreview | null>(null);
-  const [running, setRunning] = useState(false);
+  const [job, setJob] = useState<IngestJobDto | null>(null);
   const [elapsed, setElapsed] = useState(0);
-  const [result, setResult] = useState<IngestSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [authoritativeKind, setAuthoritativeKind] = useState<Kind | null>(null);
+  const [classifying, setClassifying] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const runningRef = useRef(false);
+  const completedJobRef = useRef<string | null>(null);
 
-  const kind = detectKind(source);
+  const kind = authoritativeKind ?? detectKind(source);
+  const running = job?.status === "queued" || job?.status === "running";
+  const result = job?.status === "completed" ? job.result : null;
+  const error = localError ?? (job?.status === "failed" || job?.status === "cancelled" ? job.error?.message ?? job.message : null);
   const canRun = source.trim().length > 0 && subject !== null && !running;
 
   const refreshSubjects = useCallback(async () => {
@@ -496,64 +525,196 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
     void refreshRecent();
   }, [refreshSubjects, refreshRecent]);
 
-  // Elapsed-time ticker while the pipeline runs.
   useEffect(() => {
-    if (!running) return;
-    setElapsed(0);
-    const started = Date.now();
-    const id = window.setInterval(() => setElapsed((Date.now() - started) / 1000), 500);
-    return () => window.clearInterval(id);
+    runningRef.current = running;
   }, [running]);
 
-  async function createSubject(title: string) {
+  // Recover an ingest that is still running if this screen was unmounted while
+  // the learner visited another tab.
+  useEffect(() => {
+    if (jobId) return;
+    let cancelled = false;
+    api.getIngestJobs().then((snapshot) => {
+      if (cancelled) return;
+      const active = snapshot.jobs.find((candidate) => candidate.status === "queued" || candidate.status === "running");
+      if (active) {
+        setJob(active);
+        onJobIdChange(active.id);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [jobId, onJobIdChange]);
+
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await api.getIngestJob(jobId);
+        if (cancelled) return;
+        setJob(next);
+        setSource(next.source);
+        setMode(next.mode);
+        setSubject(next.subjectId);
+        setLocalError(null);
+        if (next.status === "completed" && completedJobRef.current !== next.id) {
+          completedJobRef.current = next.id;
+          await refreshRecent();
+        }
+        if (next.status === "queued" || next.status === "running") {
+          timer = window.setTimeout(() => void poll(), 750);
+        }
+      } catch (e) {
+        if (cancelled) return;
+        const commandError = e as CommandError;
+        if (commandError.code === "ingest_job_not_found") {
+          onJobIdChange(null);
+          setJob(null);
+          setLocalError(commandError.message);
+          return;
+        }
+        setLocalError(commandError.message);
+        timer = window.setTimeout(() => void poll(), 1500);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [jobId, onJobIdChange, refreshRecent]);
+
+  useEffect(() => {
+    const candidate = source.trim();
+    if (!candidate) {
+      setAuthoritativeKind(null);
+      setClassifying(false);
+      return;
+    }
+    let cancelled = false;
+    setClassifying(true);
+    const timer = window.setTimeout(() => {
+      api.classifyIngestSource(candidate)
+        .then((classification) => {
+          if (cancelled) return;
+          const mapped: Record<string, Kind> = {
+            web: "web",
+            arxiv: "arxiv",
+            pdf: "pdf",
+            youtube: "youtube",
+            textfile: "local"
+          };
+          setAuthoritativeKind(mapped[classification.kind] ?? null);
+        })
+        .catch(() => {
+          if (!cancelled) setAuthoritativeKind(null);
+        })
+        .finally(() => {
+          if (!cancelled) setClassifying(false);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [source]);
+
+  // Elapsed-time ticker while the background job runs.
+  useEffect(() => {
+    if (!running || !job) return;
+    const parsed = Date.parse(job.startedAt ?? job.createdAt);
+    const started = Number.isNaN(parsed) ? Date.now() : parsed;
+    setElapsed(Math.max(0, (Date.now() - started) / 1000));
+    const id = window.setInterval(() => setElapsed((Date.now() - started) / 1000), 500);
+    return () => window.clearInterval(id);
+  }, [running, job?.id, job?.startedAt, job?.createdAt]);
+
+  async function createSubject(title: string): Promise<boolean> {
     const id = kebabCase(title);
-    if (!id) return;
+    if (!id) return false;
+    clearFinishedJob();
     setCreatingSubject(true);
     try {
       const res = await api.runCliCommand(["add-subject", id, title]);
       if (res.exitCode !== 0) {
-        setError(res.stderr.trim() || `add-subject failed (exit ${res.exitCode})`);
-        return;
+        setLocalError(res.stderr.trim() || `add-subject failed (exit ${res.exitCode})`);
+        return false;
       }
       await refreshSubjects();
       setSubject(id);
-      setError(null);
+      setLocalError(null);
+      return true;
     } catch (e) {
-      setError((e as CommandError).message);
+      setLocalError((e as CommandError).message);
+      return false;
     } finally {
       setCreatingSubject(false);
     }
+  }
+
+  function clearFinishedJob() {
+    if (running) return;
+    setJob(null);
+    onJobIdChange(null);
+    completedJobRef.current = null;
   }
 
   async function startIngest() {
     const src = source.trim();
     if (!src || !subject || runningRef.current) return;
     runningRef.current = true;
-    setRunning(true);
-    setResult(null);
-    setError(null);
+    setJob(null);
+    onJobIdChange(null);
+    setLocalError(null);
     setPreview(null);
     try {
-      const command = mode === "exam" ? "ingest-exam" : "ingest";
-      const res = await api.runCliCommand([command, src, "--subject", subject, "--json"]);
-      const parsed = parseIngestStdout(res.stdout);
-      if (res.exitCode === 0 && parsed.ingest) {
-        setResult(parsed.ingest);
-        void refreshRecent();
-      } else {
-        setError(parsed.error || res.stderr.trim() || res.stdout.trim() || `ingest failed (exit ${res.exitCode})`);
-      }
+      const started = await api.startIngest({ source: src, subjectId: subject, mode });
+      setJob(started);
+      onJobIdChange(started.id);
     } catch (e) {
-      setError((e as CommandError).message);
-    } finally {
+      const commandError = e as CommandError;
+      const activeJobId = (commandError.details as { jobId?: string; job_id?: string } | undefined)?.jobId
+        ?? (commandError.details as { job_id?: string } | undefined)?.job_id;
+      if (commandError.code === "ingest_in_progress" && activeJobId) {
+        onJobIdChange(activeJobId);
+      } else {
+        setLocalError(commandError.message);
+      }
       runningRef.current = false;
-      setRunning(false);
+    }
+  }
+
+  async function cancelIngest() {
+    if (!job || !running || job.phase === "cancelling") return;
+    try {
+      setJob(await api.cancelIngest(job.id));
+    } catch (e) {
+      setLocalError((e as CommandError).message);
+    }
+  }
+
+  async function chooseLocalSource() {
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Ingest sources", extensions: ["pdf", "md", "markdown", "txt", "html", "htm"] }]
+      });
+      if (typeof selected !== "string") return;
+      clearFinishedJob();
+      setSource(selected);
+      setLocalError(null);
+      setPreview(null);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (e) {
+      setLocalError((e as Error).message || "Could not open the source picker.");
     }
   }
 
   async function openRecent(entry: RecentIngestEntry) {
-    setResult(null);
-    setError(null);
+    clearFinishedJob();
+    setLocalError(null);
     setPreview({ entry, loading: true, frontmatter: null, body: null, error: null });
     if (!entry.path) {
       setPreview({ entry, loading: false, frontmatter: null, body: null, error: "note path unknown" });
@@ -580,22 +741,26 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
         void startIngest();
       } else if (event.key === "Escape" && !running) {
         setSource("");
-        setResult(null);
-        setError(null);
+        clearFinishedJob();
+        setLocalError(null);
         setPreview(null);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, subject, mode, running, canRun]);
+  }, [source, subject, mode, running, canRun, jobId]);
 
   const modeChip = (m: Mode, icon: string, label: string) => {
     const sel = mode === m;
     return (
       <span
         key={m}
-        onClick={() => !running && setMode(m)}
+        onClick={() => {
+          if (running) return;
+          clearFinishedJob();
+          setMode(m);
+        }}
         style={{
           padding: "4px 14px",
           fontSize: 12,
@@ -695,7 +860,7 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
             style={{
               border: `1px solid ${source.trim() ? COLOR.amber : COLOR.border}`,
               background: COLOR.bgInput,
-              padding: "10px 14px 10px 36px",
+              padding: "10px 92px 10px 36px",
               position: "relative"
             }}
           >
@@ -705,9 +870,9 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
               value={source}
               disabled={running}
               onChange={(e) => {
+                clearFinishedJob();
                 setSource(e.target.value);
-                setResult(null);
-                setError(null);
+                setLocalError(null);
               }}
               placeholder={
                 mode === "exam"
@@ -725,6 +890,22 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
                 opacity: running ? 0.6 : 1
               }}
             />
+            <span
+              onClick={() => {
+                if (!running) void chooseLocalSource();
+              }}
+              style={{
+                position: "absolute",
+                right: 12,
+                top: 10,
+                color: running ? COLOR.textFaint : COLOR.amberLink,
+                cursor: running ? "default" : "pointer",
+                fontSize: 11,
+                fontFamily: FONT_MONO
+              }}
+            >
+              browse…
+            </span>
           </div>
 
           {/* detected kind */}
@@ -732,7 +913,8 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
             <Faint>detected:</Faint>
             <KindChips active={kind} />
             <span style={{ flex: 1 }} />
-            {!kind && source.trim() && <Faint>kind resolved by the pipeline (--kind auto)</Faint>}
+            {classifying && source.trim() && <Faint>checking with pipeline…</Faint>}
+            {!classifying && !kind && source.trim() && <Faint>unsupported or unresolved source</Faint>}
             {!source.trim() && <Faint>paste a source above</Faint>}
           </div>
 
@@ -742,7 +924,10 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
             <SubjectPicker
               subjects={subjects}
               value={subject}
-              onChange={(s) => setSubject(s)}
+              onChange={(s) => {
+                clearFinishedJob();
+                setSubject(s);
+              }}
               onCreate={createSubject}
               creating={creatingSubject}
             />
@@ -766,7 +951,13 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
                 whiteSpace: "nowrap"
               }}
             >
-              {running ? "◐ ingesting…" : mode === "exam" ? "▶ ingest exam" : "▶ run ingest"}
+              {running
+                ? "◐ ingesting…"
+                : job?.status === "failed" || job?.status === "cancelled"
+                  ? "↻ retry ingest"
+                  : mode === "exam"
+                    ? "▶ ingest exam"
+                    : "▶ run ingest"}
               {!running && canRun && <Faint style={{ color: COLOR.amber }}>↵</Faint>}
             </span>
           </div>
@@ -792,12 +983,15 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
           )}
 
           {/* running state */}
-          {running && <RunningCard mode={mode} source={source.trim()} elapsed={elapsed} />}
+          {running && job && <RunningCard job={job} elapsed={elapsed} onCancel={() => void cancelIngest()} />}
 
           {/* error card */}
           {error && !running && (
             <Card style={{ borderLeft: `3px solid ${COLOR.red}`, marginTop: 4 }}>
-              <div style={{ color: COLOR.red, fontWeight: 600, fontSize: 13 }}>ingest failed</div>
+              <div style={{ color: COLOR.red, fontWeight: 600, fontSize: 13 }}>
+                {job?.status === "cancelled" ? "ingest cancelled" : "ingest failed"}
+                {job?.error?.code ? <Faint style={{ marginLeft: 8 }}>{job.error.code}</Faint> : null}
+              </div>
               <div
                 style={{
                   marginTop: 6,
@@ -813,6 +1007,11 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
               >
                 {error}
               </div>
+              {job?.error?.details.partial && (
+                <div style={{ marginTop: 8, color: COLOR.amber, fontSize: 11 }}>
+                  The source note may already be staged. Check recent ingests before retrying; content-addressed reuse prevents duplicate proposals.
+                </div>
+              )}
             </Card>
           )}
 
@@ -822,22 +1021,26 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14 }}>
                 <div>
                   <div style={{ color: COLOR.green, fontWeight: 600, fontSize: 13 }}>
-                    {result.reused_existing ? "ingest complete · reused existing proposal" : "ingest complete · proposal ready"}
+                    {result.reusedExisting ? "ingest complete · reused existing proposal" : "ingest complete · proposal ready"}
                   </div>
                   <div style={{ marginTop: 6, color: COLOR.text, fontSize: 12, lineHeight: 1.6 }}>
-                    <Faint>staged note</Faint> <span style={{ color: COLOR.amberLink }}>{result.source_note_id}</span>
+                    <Faint>staged note</Faint> <span style={{ color: COLOR.amberLink }}>{result.sourceNoteId}</span>
                     {"  ·  "}
-                    <Faint>kind</Faint> <Dim>{result.source_kind}</Dim>
+                    <Faint>kind</Faint> <Dim>{kind ? KIND_META[kind].label : result.sourceKind}</Dim>
                   </div>
                   <div style={{ marginTop: 6, color: COLOR.textDim, fontSize: 12 }}>
                     next: <Dim>review the authoring proposal.</Dim>{" "}
-                    <span
-                      style={{ color: COLOR.amberLink, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 2 }}
-                      onClick={onProceedToPropose}
-                    >
-                      open propose →
-                    </span>
-                    {mode === "exam" && (
+                    {result.proposalId ? (
+                      <span
+                        style={{ color: COLOR.amberLink, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 2 }}
+                        onClick={() => onProceedToPropose(result.proposalId as string)}
+                      >
+                        open proposal →
+                      </span>
+                    ) : (
+                      <Faint>proposal record unavailable</Faint>
+                    )}
+                    {job?.mode === "exam" && (
                       <span style={{ marginLeft: 8 }}>
                         <Faint>then</Faint> <Dim>learnloop seed-exam-attempts --outcomes &lt;file&gt;</Dim>
                       </span>
@@ -857,16 +1060,16 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
                   }}
                 >
                   <div>
-                    <Faint>proposal</Faint> <span style={{ color: COLOR.green }}>{result.proposal_id}</span>
+                    <Faint>proposal</Faint> <span style={{ color: COLOR.green }}>{result.proposalId ?? "—"}</span>
                   </div>
                   <div style={{ marginTop: 4 }}>
-                    <span style={{ color: COLOR.green }}>{result.auto_applied_count}</span> auto-applied
+                    <span style={{ color: COLOR.green }}>{result.autoAppliedCount}</span> auto-applied
                     {"  "}
-                    <span style={{ color: COLOR.amber }}>{result.review_required_count}</span> to review
-                    {result.invalid_count > 0 && (
+                    <span style={{ color: COLOR.amber }}>{result.reviewRequiredCount}</span> to review
+                    {result.invalidCount > 0 && (
                       <>
                         {"  "}
-                        <span style={{ color: COLOR.red }}>{result.invalid_count}</span> invalid
+                        <span style={{ color: COLOR.red }}>{result.invalidCount}</span> invalid
                       </>
                     )}
                   </div>
@@ -918,10 +1121,14 @@ export function IngestScreen({ onProceedToPropose }: { onProceedToPropose: () =>
                   <span style={{ display: "inline-flex", gap: 6, flexShrink: 0, alignItems: "center" }}>
                     {preview.entry.purpose === "exam_ingest" && <Pill color="pink">exam</Pill>}
                     <Pill color="green">canonical_source</Pill>
-                    <Pill color={backendKindPill(preview.entry.kind).color}>{backendKindPill(preview.entry.kind).label}</Pill>
+                    <Pill color={backendKindPill(preview.entry.kind, preview.entry.canonicalUri).color}>
+                      {backendKindPill(preview.entry.kind, preview.entry.canonicalUri).label}
+                    </Pill>
                     {preview.entry.patchId && (
                       <span
-                        onClick={onProceedToPropose}
+                        onClick={() => {
+                          if (preview.entry.patchId) onProceedToPropose(preview.entry.patchId);
+                        }}
                         style={{
                           color: COLOR.amberLink,
                           cursor: "pointer",

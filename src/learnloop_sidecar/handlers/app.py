@@ -23,7 +23,7 @@ def initialize(ctx: SidecarContext, params: InitializeParams) -> dict[str, Any]:
             "protocol": {"jsonrpc": "2.0", "framing": "ndjson"},
             "capabilities": {
                 "methods": sorted(METHOD_REGISTRY),
-                "jobs": False,
+                "jobs": ["ingest"],
                 "streaming": "coarse",
             },
             "vault": vault_summary(vault),
@@ -34,6 +34,7 @@ def initialize(ctx: SidecarContext, params: InitializeParams) -> dict[str, Any]:
 
 @method("shutdown")
 def shutdown(ctx: SidecarContext, _params) -> dict[str, Any]:
+    ctx.ingest_jobs.shutdown()
     ctx.shutdown_requested = True
     return {"ok": True}
 
@@ -65,4 +66,3 @@ def get_runtime_health(ctx: SidecarContext, _params) -> dict[str, Any]:
 def get_config(ctx: SidecarContext, _params) -> dict[str, Any]:
     vault, _repository = ctx.require_vault()
     return config_dto(vault)
-

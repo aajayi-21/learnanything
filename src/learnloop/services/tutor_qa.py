@@ -310,6 +310,45 @@ def ask_question(
     }
 
 
+def build_tutor_opening(
+    vault: LoadedVault,
+    repository: Repository,
+    client: Any,
+    *,
+    practice_item_id: str,
+) -> str | None:
+    """A proactive tutor opening for a just-closed diagnostic block (§12.1).
+
+    Ephemeral: unlike ``ask_question`` this never inserts a question_event —
+    an unprompted opening isn't elicitation evidence and must not consume the
+    Q&A budget or count as a hint. Returns None when there is no persisted
+    decision to open with (block still measuring, never routed to tutoring,
+    or unknown item) so the caller falls back to the ordinary learner-speaks-
+    first overlay.
+    """
+
+    item = vault.practice_items.get(practice_item_id)
+    if item is None:
+        return None
+    if _diagnostic_decision_for(repository, item, "practice") is None:
+        return None
+    candidates = _candidate_facets(vault, repository, "practice", item=item, note=None)
+    ai_context = _build_context(
+        vault,
+        repository,
+        context="practice",
+        question_md="",
+        candidates=candidates,
+        thread=[],
+        item=item,
+        attempt=None,
+        note=None,
+        note_id=None,
+    )
+    answer = client.run_tutor_qa(ai_context)
+    return answer.answer_md
+
+
 def hint_equivalents_for_submission(
     repository: Repository,
     practice_item_id: str,

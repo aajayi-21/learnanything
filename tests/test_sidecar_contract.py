@@ -1175,6 +1175,38 @@ def test_sidecar_get_recent_ingests_lists_canonical_sources(tmp_path):
     assert any(entry["patchId"] for entry in ingests)
 
 
+def test_sidecar_ingest_source_classification_and_empty_job_list(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+
+    responses = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "classify_ingest_source",
+                "params": {"source": "arxiv:2401.12345v2"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "classify_ingest_source",
+                "params": {"source": "lecture-notes.md"},
+            },
+            {"jsonrpc": "2.0", "id": 4, "method": "get_ingest_jobs"},
+        ]
+    )
+
+    assert responses[1]["result"] == {
+        "version": 1,
+        "kind": "arxiv",
+        "normalizedSource": "https://arxiv.org/abs/2401.12345v2",
+    }
+    assert responses[2]["result"]["kind"] == "textfile"
+    assert responses[3]["result"] == {"version": 1, "jobs": []}
+
+
 def test_sidecar_write_vault_file_round_trips_and_guards(tmp_path):
     vault_root = tmp_path / "vault"
     create_basic_vault(vault_root)

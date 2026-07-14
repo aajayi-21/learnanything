@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from learnloop.clock import FrozenClock
 from learnloop.db.repositories import Repository
 from learnloop.ids import new_ulid
@@ -17,6 +19,7 @@ from learnloop.services.probe_episodes import (
     eligible_instruments,
     enter_episode,
     episode_hypothesis_set,
+    episode_posterior,
     serve_presentation,
 )
 from learnloop.services.probe_families import (
@@ -340,3 +343,6 @@ def test_longform_observation_records_trace_and_bounded_mass(tmp_path):
     # The trace-driven classifier chose the execution-slip outcome.
     assert observation.grader_channel["observed_outcome"] == "correct_strategy_execution_slip"
     assert observation.grader_channel["grader_policy"] == "diagnostic_longform_v1"
+    replayed = episode_posterior(loaded, repository, repository.probe_episode(episode.id))
+    assert replayed is not None
+    assert replayed.posterior == pytest.approx(observation.posterior_after)

@@ -934,15 +934,34 @@ _TUTOR_QA_DIAGNOSTIC_DECISION_TASK = (
 )
 
 
+# Proactive handoff (§12.1 "stop diagnosing & teach me" / block-end tutoring
+# route): the learner hasn't spoken yet, so the ordinary "answering one
+# question" framing doesn't apply. Reuses run_tutor_qa/TutorAnswer wholesale —
+# an empty question_md paired with a diagnostic_decision selects this framing
+# instead of a new provider method.
+_TUTOR_QA_OPENING_SHARED = (
+    "You are a LearnLoop tutor OPENING a tutoring conversation. There is no "
+    "learner question yet — do not ask what they would like to know or wait "
+    "for one; proactively execute the move below. Return a TutorAnswer as "
+    "schema-valid JSON only. Set question_type to `strategy` and "
+    "question_channel to `epistemic`. Fill `facets` with the subset of "
+    "context.candidate_facets your opening targets (empty when none apply); "
+    "never invent facet ids outside that list. Write answer_md as concise "
+    "Markdown (LaTeX math allowed)."
+)
+
+
 def _tutor_qa_prompt(context: TutorQAContext) -> str:
+    opening = not context.question_md.strip() and context.diagnostic_decision is not None
     task = _TUTOR_QA_CONTEXT_TASKS.get(context.context, _TUTOR_QA_CONTEXT_TASKS["library"])
     if context.diagnostic_decision is not None:
         task = task + " " + _TUTOR_QA_DIAGNOSTIC_DECISION_TASK
+    shared = _TUTOR_QA_OPENING_SHARED if opening else _TUTOR_QA_SHARED
     return _json_prompt(
         "learnloop tutor qa",
         TUTOR_QA_PROMPT_VERSION,
         {
-            "task": _TUTOR_QA_SHARED + " " + task,
+            "task": shared + " " + task,
             "context": asdict(context),
         },
     )

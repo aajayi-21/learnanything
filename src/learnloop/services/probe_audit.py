@@ -18,7 +18,12 @@ from typing import Any, Mapping
 
 from learnloop.clock import Clock, parse_utc
 from learnloop.db.repositories import ProbeEpisodeRecord, Repository
-from learnloop.services.probe_episodes import episode_hypothesis_set, episode_posterior
+from learnloop.services.probe_episodes import (
+    _bayes_update,
+    _observation_likelihoods_from_row,
+    episode_hypothesis_set,
+    episode_posterior,
+)
 from learnloop.services.probe_families import CompiledInstrument, classify_outcome
 from learnloop.vault.models import LoadedVault
 
@@ -287,6 +292,38 @@ def replay_determinism_report(vault: LoadedVault, repository: Repository) -> dic
             ) if (first.posterior or second.posterior) else 0.0
             if drift > 1e-9:
                 failures.append({"episode_id": episode.id, "kind": "replay_nondeterministic", "drift": drift})
+        for presentation in repository.probe_presentations_for_episode(episode.id):
+            snapshot = presentation.instrument_card_snapshot
+            if snapshot is None:
+                failures.append(
+                    {
+                        "episode_id": episode.id,
+                        "presentation_id": presentation.id,
+                        "kind": "missing_instrument_snapshot",
+                    }
+                )
+                continue
+            instrument = CompiledInstrument.from_snapshot(snapshot)
+            stored_hash = snapshot.get("compiled_likelihood_hash")
+            recomputed_hash = instrument.compiled_likelihood_hash()
+            if stored_hash != recomputed_hash:
+                failures.append(
+                    {
+                        "episode_id": episode.id,
+                        "presentation_id": presentation.id,
+                        "kind": "compiled_likelihood_hash_mismatch",
+                    }
+                )
+            if presentation.entropy_at_selection is not None:
+                selection_entropy = _entropy(presentation.posterior_at_selection)
+                if abs(float(presentation.entropy_at_selection) - selection_entropy) > 1e-6:
+                    failures.append(
+                        {
+                            "episode_id": episode.id,
+                            "presentation_id": presentation.id,
+                            "kind": "selection_entropy_mismatch",
+                        }
+                    )
         for row in repository.probe_observations_for_episode(episode.id):
             observation = row["observation"]
             for kind, stored, recomputed in (
@@ -308,6 +345,48 @@ def replay_determinism_report(vault: LoadedVault, repository: Repository) -> dic
                             "recomputed": _round(float(recomputed), 6),
                         }
                     )
+            attempt = repository.fetch_practice_attempt(observation.attempt_id)
+            if attempt is None or not observation.updates_belief:
+                continue
+            likelihoods = _observation_likelihoods_from_row(
+                vault, repository, episode, attempt, row
+            )
+            if likelihoods is None:
+                failures.append(
+                    {
+                        "episode_id": episode.id,
+                        "attempt_id": observation.attempt_id,
+                        "kind": "posterior_transition_unreplayable",
+                    }
+                )
+                continue
+            weight = (
+                float(observation.independent_evidence_discount)
+                if observation.independent_evidence_discount is not None
+                else 1.0
+            )
+            recomputed_after = _bayes_update(
+                dict(observation.posterior_before),
+                likelihoods,
+                weight=weight,
+                prior_for_marginal=observation.posterior_before,
+            )
+            transition_drift = max(
+                abs(
+                    observation.posterior_after.get(label, 0.0)
+                    - recomputed_after.get(label, 0.0)
+                )
+                for label in set(observation.posterior_after) | set(recomputed_after)
+            ) if (observation.posterior_after or recomputed_after) else 0.0
+            if transition_drift > 1e-9:
+                failures.append(
+                    {
+                        "episode_id": episode.id,
+                        "attempt_id": observation.attempt_id,
+                        "kind": "posterior_transition_mismatch",
+                        "drift": _round(transition_drift, 9),
+                    }
+                )
     return {"episodes_checked": checked, "deterministic": not failures, "failures": failures}
 
 

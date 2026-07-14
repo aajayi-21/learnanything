@@ -96,3 +96,48 @@ def test_stop_probe_diagnosing_converts_episode(tmp_path):
     assert refreshed.status == "converted_to_tutoring"
     segments = repository.state_segments_for_learning_object("lo_svd_definition")
     assert segments[-1].reason == "tutoring_transition"
+
+
+def test_get_next_probe_item_reflects_the_open_episode(tmp_path):
+    # §5.7 continuity: the peek the Tauri UI uses to jump between observations
+    # without a visible queue round-trip.
+    vault_root = tmp_path / "vault"
+    paths = create_basic_vault(vault_root)
+    repository = Repository(paths.sqlite_path)
+    admit_probe_instrument_card(repository)
+    loaded = load_vault(vault_root)
+    enter_episode(loaded, repository, "lo_svd_definition", clock=FrozenClock(NOW))
+
+    result = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "get_next_probe_item",
+                "params": {"learningObjectId": "lo_svd_definition"},
+            },
+        ]
+    )[1]["result"]
+
+    assert result["active"] is True
+    assert result["practiceItemId"] == "pi_svd_define_001"
+
+
+def test_get_next_probe_item_inactive_without_episode(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+
+    result = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "get_next_probe_item",
+                "params": {"learningObjectId": "lo_svd_definition"},
+            },
+        ]
+    )[1]["result"]
+
+    assert result["active"] is False

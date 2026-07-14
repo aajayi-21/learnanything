@@ -1,13 +1,97 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
+from learnloop.ingest.models import UnsupportedSourceError
+from learnloop.ingest.resolution import resolve_source
 from learnloop_sidecar.context import SidecarContext
-from learnloop_sidecar.dto import versioned
+from learnloop_sidecar.dto import ParamsModel, versioned
+from learnloop_sidecar.errors import SidecarError
+from learnloop_sidecar.ingest_jobs import ActiveIngestJobError
 from learnloop_sidecar.registry import method
 
 # How many recent ingests the screen shows; the vault keeps everything.
 _RECENT_LIMIT = 30
+
+
+class ClassifyIngestSourceInput(ParamsModel):
+    source: str
+
+
+class StartIngestInput(ParamsModel):
+    source: str
+    subject_id: str
+    mode: Literal["canonical", "exam"] = "canonical"
+
+
+class IngestJobInput(ParamsModel):
+    job_id: str
+
+
+@method("classify_ingest_source", ClassifyIngestSourceInput)
+def classify_ingest_source(_ctx: SidecarContext, params: ClassifyIngestSourceInput) -> dict[str, Any]:
+    try:
+        resolved = resolve_source(params.source)
+    except UnsupportedSourceError as exc:
+        raise SidecarError("unsupported_source", str(exc)) from exc
+    return versioned({"kind": resolved.category, "normalized_source": resolved.source})
+
+
+@method("start_ingest", StartIngestInput)
+def start_ingest(ctx: SidecarContext, params: StartIngestInput) -> dict[str, Any]:
+    vault, _repository = ctx.require_vault()
+    source = params.source.strip()
+    if not source:
+        raise SidecarError("unsupported_source", "A source is required.")
+    if params.subject_id not in vault.subjects:
+        raise SidecarError("unknown_subject", f"Subject '{params.subject_id}' does not exist.")
+    try:
+        resolve_source(source)
+    except UnsupportedSourceError as exc:
+        raise SidecarError("unsupported_source", str(exc)) from exc
+    try:
+        job = ctx.ingest_jobs.start(vault.root, source, params.subject_id, params.mode)
+    except ActiveIngestJobError as exc:
+        raise SidecarError(
+            "ingest_in_progress",
+            str(exc),
+            retryable=True,
+            details={"jobId": exc.job_id},
+        ) from exc
+    return versioned(job)
+
+
+@method("get_ingest_job", IngestJobInput)
+def get_ingest_job(ctx: SidecarContext, params: IngestJobInput) -> dict[str, Any]:
+    job = ctx.ingest_jobs.get(params.job_id)
+    if job is None:
+        raise SidecarError("ingest_job_not_found", f"Ingest job '{params.job_id}' was not found.")
+    _reload_completed_jobs(ctx, [job])
+    return versioned(ctx.ingest_jobs.get(params.job_id) or job)
+
+
+@method("get_ingest_jobs")
+def get_ingest_jobs(ctx: SidecarContext, _params) -> dict[str, Any]:
+    jobs = ctx.ingest_jobs.list()
+    _reload_completed_jobs(ctx, jobs)
+    return versioned({"jobs": ctx.ingest_jobs.list()})
+
+
+@method("cancel_ingest", IngestJobInput)
+def cancel_ingest(ctx: SidecarContext, params: IngestJobInput) -> dict[str, Any]:
+    job = ctx.ingest_jobs.cancel(params.job_id)
+    if job is None:
+        raise SidecarError("ingest_job_not_found", f"Ingest job '{params.job_id}' was not found.")
+    return versioned(job)
+
+
+def _reload_completed_jobs(ctx: SidecarContext, jobs: list[dict[str, Any]]) -> None:
+    completed = [job["id"] for job in jobs if ctx.ingest_jobs.needs_reload(job["id"])]
+    if not completed:
+        return
+    ctx.reload(maintenance=False)
+    for job_id in completed:
+        ctx.ingest_jobs.mark_reloaded(job_id)
 
 
 def _note_path_from_ref(ref: Any) -> str | None:

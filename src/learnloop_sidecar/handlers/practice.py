@@ -20,8 +20,11 @@ from learnloop.services.probe_episodes import (
     commit_item_presentation,
     episode_contract,
     episode_hypothesis_set,
+    next_probe_item,
     probe_serving_block_reason,
+    serve_presentation,
     stop_diagnosing_and_teach,
+    validate_presentation_for_submission,
 )
 from learnloop.services.probes import probe_posterior
 from learnloop.services.scheduler import SchedulerSession, build_due_queue
@@ -139,12 +142,46 @@ def get_probe_contract(ctx: SidecarContext, params: ProbeContractInput) -> dict[
     # the episode parks and the LO degrades to belief-only ordinary practice.
     _provider, runtime, client = ready_grading_provider(vault, override=ctx.grading_provider_override)
     if not runtime.ready or client is None:
+        active = (
+            repository.active_probe_presentation_for_session(params.session_id)
+            if params.session_id is not None
+            else repository.active_probe_presentation(episode.id)
+        )
+        if active is not None:
+            repository.end_probe_presentation(active.id, end_reason="invalidated")
         repository.update_probe_episode_status(episode.id, status="pending_items")
         return versioned({"active": False, "reason": "grading_provider_unavailable"})
 
     hypothesis_set = episode_hypothesis_set(repository, episode)
     if hypothesis_set is None:
         return versioned({"active": False, "reason": "no_instrument"})
+    # Routine scheduling precommits the assignment in the same transaction as
+    # its slate candidate. Opening the selected item merely marks that durable
+    # presentation served; opening another returned item does not reinterpret
+    # it as a probe.
+    active = (
+        repository.active_probe_presentation_for_session(params.session_id)
+        if params.session_id is not None
+        else repository.active_probe_presentation(episode.id)
+    )
+    if active is None and params.session_id is not None:
+        other_assignment = repository.active_probe_presentation(episode.id)
+        if other_assignment is not None and other_assignment.scheduler_candidate_id is not None:
+            return versioned({"active": False, "reason": "probe_assigned_to_other_session"})
+    if active is not None:
+        validation = validate_presentation_for_submission(
+            repository,
+            active.id,
+            practice_item_id=item.id,
+        )
+        if validation.valid:
+            serve_presentation(repository, active.id)
+            contract = episode_contract(vault, repository, item.learning_object_id) or {}
+            return versioned({"active": True, "presentation_id": active.id, **contract})
+        if validation.reason == "item_mismatch":
+            return versioned({"active": False, "reason": "different_probe_assignment"})
+        return versioned({"active": False, "reason": validation.reason or "stale_presentation"})
+
     # §5.9 routine planner, shadow mode (§13.3): log where this episode ranks
     # among all open episodes under plain vs disagreement-boosted information
     # rate. Log-only until held-out predictive gains justify promotion.
@@ -176,6 +213,27 @@ def stop_probe_diagnosing(ctx: SidecarContext, params: PracticeItemInput) -> dic
         raise SidecarError("not_found", f"Unknown Practice Item {params.practice_item_id}.")
     decision = stop_diagnosing_and_teach(vault, repository, item.learning_object_id)
     return versioned({"stopped": decision is not None, "decision": decision})
+
+
+class NextProbeItemInput(ParamsModel):
+    learning_object_id: str
+
+
+@method("get_next_probe_item", NextProbeItemInput)
+def get_next_probe_item(ctx: SidecarContext, params: NextProbeItemInput) -> dict[str, Any]:
+    """The item that would continue this LO's open diagnostic block, if any.
+
+    Read-only peek (§5.7 continuity) — never commits a presentation. The Tauri
+    UI uses this to jump straight to the next observation within an
+    in-progress block instead of round-tripping through the general queue
+    between every attempt.
+    """
+
+    vault, repository = ctx.require_vault()
+    candidate = next_probe_item(vault, repository, params.learning_object_id)
+    if candidate is None:
+        return versioned({"active": False})
+    return versioned({"active": True, "practice_item_id": candidate.item.id})
 
 
 @method("save_practice_draft", PracticeDraftCheckpoint)

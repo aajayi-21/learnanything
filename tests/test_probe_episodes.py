@@ -14,12 +14,15 @@ from learnloop.services.attempts import (
 )
 from learnloop.ids import new_ulid
 from learnloop.services.probe_episodes import (
+    _resolved_slot_map_from_snapshot,
+    commit_item_presentation,
     commit_presentation,
     eligible_instruments,
     enter_episode,
     episode_hypothesis_set,
     episode_posterior,
     maybe_reprobe_for_misconception,
+    next_probe_item,
     record_episode_evidence,
     serve_presentation,
     stop_diagnosing_and_teach,
@@ -38,6 +41,7 @@ from learnloop.services.probe_families import (
 )
 from learnloop.services.probe_hypotheses import H_OTHER
 from learnloop.services.state_sync import sync_vault_state
+from learnloop.services.scheduler import SchedulerSession, build_due_queue
 from learnloop.vault.loader import load_vault
 from learnloop.vault.writer import upsert_practice_item
 
@@ -175,6 +179,7 @@ def test_episode_entry_locks_actionable_set_with_open_set_mass(tmp_path):
     assert H_OTHER in labels
     assert abs(sum(hypothesis_set.prior.values()) - 1.0) < 1e-9
     assert hypothesis_set.prior[H_OTHER] > 0
+    assert episode.required_facets == ["recall"]
 
     # Re-entry is idempotent while open; a re-probe after completion mints a
     # fresh episode and hypothesis-set snapshot (§5.2, §6.5).
@@ -454,6 +459,37 @@ def test_two_independent_surfaces_complete_a_stable_episode(tmp_path):
     assert episode.completion_reason == "decision_stable"
 
 
+def test_next_probe_item_peeks_the_unused_surface_without_committing(tmp_path):
+    # §5.7 continuity: the Tauri UI asks this before every jump within a
+    # block. It must never commit a presentation itself (that stays
+    # get_probe_contract's job) and must respect the same §5.4 exposure rule
+    # eligible_instruments already enforces.
+    _, loaded, repository = _setup(tmp_path, extra_item=True)
+    episode = enter_episode(loaded, repository, LO_ID, clock=CLOCK)
+
+    candidate = next_probe_item(loaded, repository, LO_ID)
+    assert candidate is not None
+    assert candidate.item.id == ITEM_ID
+
+    first = _commit(loaded, repository, episode, item_id=ITEM_ID)
+    _submit(loaded, repository, item_id=ITEM_ID, presentation_id=first.id, score=4)
+
+    # ITEM_ID was just observed, so the peek must move on to the other
+    # surface instead of re-offering it — and it must not have consumed a
+    # presentation of its own (no active presentation was committed by it).
+    episode = repository.probe_episode(episode.id)
+    assert repository.active_probe_presentation(episode.id) is None
+    candidate = next_probe_item(loaded, repository, LO_ID)
+    assert candidate is not None
+    assert candidate.item.id == "pi_svd_define_002"
+
+    second = _commit(loaded, repository, episode, item_id="pi_svd_define_002")
+    _submit(loaded, repository, item_id="pi_svd_define_002", presentation_id=second.id, score=4)
+    episode = repository.probe_episode(episode.id)
+    assert episode.status == "complete"
+    assert next_probe_item(loaded, repository, LO_ID) is None
+
+
 def test_budget_exhaustion_completes_episode(tmp_path):
     # Four signature-distinct surfaces: §5.4 forbids re-serving an observed
     # item or surface family, so budget exhaustion needs four fresh instruments.
@@ -671,8 +707,100 @@ def test_presentation_snapshot_matches_compiled_instrument(tmp_path):
     assert snapshot is not None
     assert snapshot["compiled_likelihood_hash"] == eligible.instrument.compiled_likelihood_hash()
     assert snapshot["rows"] == {slot: dict(row) for slot, row in eligible.instrument.rows.items()}
+    assert snapshot["resolved_slot_map"] == eligible.slot_map
     assert presentation.entropy_at_selection is not None
     assert presentation.expected_information_gain is not None
+
+
+def test_scheduler_slate_atomically_commits_its_selected_probe_presentation(tmp_path):
+    _, loaded, repository = _setup(tmp_path)
+    sync_vault_state(loaded, repository, clock=CLOCK)
+    episode = enter_episode(loaded, repository, LO_ID, clock=CLOCK)
+
+    queue = build_due_queue(
+        loaded,
+        repository,
+        clock=CLOCK,
+        session=SchedulerSession(session_id="probe_session"),
+        limit=1,
+    )
+    assert queue and queue[0].practice_item_id == ITEM_ID
+    assert queue[0].components["probe_committed"] == 1.0
+    slate = repository.latest_scheduler_slate_by_session("probe_session")
+    candidate = next(
+        row for row in repository.scheduler_slate_candidates(slate["id"])
+        if row["returned_rank"] == 1
+    )
+    presentation = repository.active_probe_presentation(episode.id)
+    assert presentation is not None
+    assert presentation.practice_item_id == candidate["practice_item_id"]
+    assert presentation.scheduler_candidate_id == candidate["id"]
+    assert presentation.status == "selected"
+
+    refreshed_queue = build_due_queue(
+        loaded,
+        repository,
+        clock=CLOCK,
+        session=SchedulerSession(session_id="probe_session"),
+        limit=1,
+    )
+    assert refreshed_queue[0].practice_item_id == presentation.practice_item_id
+    assert repository.active_probe_presentation_for_session("probe_session").id == presentation.id
+    assert len(
+        [
+            row
+            for row in repository.probe_presentations_for_episode(episode.id)
+            if row.status in ("selected", "served")
+        ]
+    ) == 1
+
+
+def test_scheduler_slate_rolls_back_when_probe_assignment_cannot_bind(tmp_path):
+    _, _loaded, repository = _setup(tmp_path)
+    with pytest.raises(ValueError, match="top returned scheduler candidate"):
+        repository.record_scheduler_slate(
+            [
+                {
+                    "practice_item_id": ITEM_ID,
+                    "selected_mode": "short_answer",
+                    "priority": 1.0,
+                    "components": {"selected": 1.0},
+                    "target_scope": {"learning_object_id": LO_ID},
+                }
+            ],
+            session_id="rollback_session",
+            algorithm_version="test",
+            probe_presentation={"practice_item_id": "not_the_selected_item"},
+            clock=CLOCK,
+        )
+    assert repository.latest_scheduler_slate_by_session("rollback_session") is None
+
+
+def test_item_excluded_from_live_slate_cannot_be_committed_as_a_probe(tmp_path):
+    _, loaded, repository = _setup(tmp_path, extra_item=True)
+    episode = enter_episode(loaded, repository, LO_ID, clock=CLOCK)
+    first = _commit(loaded, repository, episode, item_id=ITEM_ID)
+    _submit(loaded, repository, item_id=ITEM_ID, presentation_id=first.id, score=4)
+
+    episode = repository.probe_episode(episode.id)
+    hypothesis_set = episode_hypothesis_set(repository, episode)
+    assert ITEM_ID not in {
+        entry.item.id
+        for entry in eligible_instruments(
+            loaded, repository, episode, hypothesis_set=hypothesis_set
+        )
+    }
+    assert (
+        commit_item_presentation(
+            loaded,
+            repository,
+            episode,
+            loaded.practice_items[ITEM_ID],
+            hypothesis_set,
+            clock=CLOCK,
+        )
+        is None
+    )
 
 
 def test_multi_confusable_set_keeps_instrument_eligible(tmp_path):
@@ -697,6 +825,12 @@ def test_multi_confusable_set_keeps_instrument_eligible(tmp_path):
     assert slot_map is not None
     assert slot_map["confuses_with:eigendecomposition"] == "confuses_with_neighbor"
     assert slot_map["confuses_with:qr_decomposition"] == "other_or_unknown"
+    snapshot = instrument.snapshot()
+    snapshot["resolved_slot_map"] = slot_map
+    assert (
+        _resolved_slot_map_from_snapshot(snapshot, instrument, labels_with_second)
+        == slot_map
+    )
 
     # A card bound to a confusable matching NONE of the live contrasts is the
     # wrong instrument and abstains entirely.

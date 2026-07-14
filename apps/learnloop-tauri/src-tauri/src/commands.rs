@@ -172,6 +172,19 @@ pub async fn stop_probe_diagnosing(
 }
 
 #[tauri::command]
+pub async fn get_next_probe_item(
+    learning_object_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(
+        sidecar,
+        "get_next_probe_item",
+        json!({"learningObjectId": learning_object_id}),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn save_practice_draft(
     input: Value,
     sidecar: State<'_, SidecarManager>,
@@ -240,6 +253,43 @@ pub async fn get_vault_tree(sidecar: State<'_, SidecarManager>) -> Result<Value,
 #[tauri::command]
 pub async fn get_recent_ingests(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
     blocking_sidecar_call(sidecar, "get_recent_ingests", json!({})).await
+}
+
+#[tauri::command]
+pub async fn classify_ingest_source(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "classify_ingest_source", input).await
+}
+
+#[tauri::command]
+pub async fn start_ingest(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "start_ingest", input).await
+}
+
+#[tauri::command]
+pub async fn get_ingest_job(
+    job_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_ingest_job", json!({"jobId": job_id})).await
+}
+
+#[tauri::command]
+pub async fn get_ingest_jobs(sidecar: State<'_, SidecarManager>) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "get_ingest_jobs", json!({})).await
+}
+
+#[tauri::command]
+pub async fn cancel_ingest(
+    job_id: String,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "cancel_ingest", json!({"jobId": job_id})).await
 }
 
 #[tauri::command]
@@ -445,6 +495,14 @@ pub async fn ask_tutor_question(
     sidecar: State<'_, SidecarManager>,
 ) -> Result<Value, CommandError> {
     blocking_sidecar_call(sidecar, "ask_tutor_question", input).await
+}
+
+#[tauri::command]
+pub async fn preview_tutor_opening(
+    input: Value,
+    sidecar: State<'_, SidecarManager>,
+) -> Result<Value, CommandError> {
+    blocking_sidecar_call(sidecar, "preview_tutor_opening", input).await
 }
 
 #[tauri::command]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from learnloop.clock import FrozenClock
@@ -197,6 +199,35 @@ def test_replay_determinism_holds_on_pilot_vault(tmp_path):
     report = replay_determinism_report(loaded, repository)
     assert report["episodes_checked"] >= 1
     assert report["deterministic"], report["failures"]
+
+
+def test_replay_audit_detects_a_self_consistent_but_wrong_posterior_transition(tmp_path):
+    loaded, repository = _setup(tmp_path)
+    episode = enter_episode(loaded, repository, LO_ID, clock=CLOCK)
+    presentation = _commit(loaded, repository, episode, item_id=ITEM_ID)
+    _submit(loaded, repository, item_id=ITEM_ID, presentation_id=presentation.id, score=4)
+
+    observation = repository.probe_observations_for_episode(episode.id)[0]["observation"]
+    # Keep the stored entropy/gain internally consistent so the legacy audit
+    # checks pass, but replace the Bayesian transition with a no-op.
+    with repository.connection() as connection:
+        connection.execute(
+            """
+            UPDATE probe_observations
+            SET posterior_after_json = ?, entropy_after = entropy_before,
+                realized_information_gain = 0.0
+            WHERE attempt_id = ?
+            """,
+            (json.dumps(observation.posterior_before, sort_keys=True), observation.attempt_id),
+        )
+        connection.commit()
+
+    report = replay_determinism_report(loaded, repository)
+    assert not report["deterministic"]
+    assert any(
+        failure["kind"] == "posterior_transition_mismatch"
+        for failure in report["failures"]
+    )
 
 
 def test_evidence_sources_stay_separate(tmp_path):

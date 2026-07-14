@@ -9,7 +9,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from learnloop.ai.client import AIProviderClient
 from learnloop.clock import Clock, utc_now_iso
@@ -19,6 +19,8 @@ from learnloop.codex.prompts import CANONICAL_INGEST_PROMPT_VERSION
 from learnloop.codex.schemas import AuthoringProposal
 from learnloop.db.repositories import Repository
 from learnloop.ids import kebab_case, new_ulid, snake_case
+from learnloop.ingest.models import UnsupportedSourceError
+from learnloop.ingest.resolution import ResolvedSource, resolve_source
 from learnloop.services.pdf_extraction import PdfExtractionError, extract_pdf_markdown
 from learnloop.services.proposals import _auto_apply_rows, _proposal_item_row
 from learnloop.vault.loader import add_subject, load_vault
@@ -26,6 +28,7 @@ from learnloop.vault.paths import VaultPaths
 from learnloop.vault.yaml_io import read_yaml, write_markdown_with_frontmatter, write_yaml
 
 KindOption = Literal["auto", "website_page", "youtube_video", "arxiv_html", "textbook_chapter"]
+IngestProgress = Callable[[str, dict[str, Any]], None]
 
 
 class SourceIngestionError(ValueError):
@@ -144,11 +147,16 @@ def ingest_canonical_source(
     pdf_engine: str | None = None,
     pdf_use_llm: bool | None = None,
     clock: Clock | None = None,
+    progress: IngestProgress | None = None,
 ) -> IngestResult:
     vault = load_vault(root)
     paths = VaultPaths(vault.root, vault.config)
     target_learning_object_ids = list(learning_object_ids or [])
-    resolved_kind = detect_source_kind(source, kind=kind, learning_object_ids=target_learning_object_ids)
+    resolved_source, resolved_kind = resolve_canonical_source(
+        source,
+        kind=kind,
+        learning_object_ids=target_learning_object_ids,
+    )
     if allow_auto_captions is None:
         allow_auto_captions = vault.config.ingest.allow_auto_captions
     pdf_config = _resolved_pdf_config(vault.config.ingest.pdf, engine=pdf_engine, use_llm=pdf_use_llm)
@@ -158,19 +166,23 @@ def ingest_canonical_source(
     if resolved_kind == "textbook_chapter":
         _validate_textbook_targets(vault, subject_id, target_learning_object_ids)
 
+    _report_progress(progress, "fetching", source_kind=resolved_kind)
     fetch_result = fetch_source(
         vault.root,
-        source,
+        resolved_source.source,
         kind=resolved_kind,
         allow_auto_captions=allow_auto_captions,
         pdf_config=pdf_config,
         clock=clock,
+        progress=progress,
     )
+    _report_progress(progress, "extracting", source_kind=resolved_kind)
     normalized = normalize_source(fetch_result, resolved_kind)
     content_hash = source_content_hash(normalized.markdown)
     chunks = chunk_normalized_source(normalized)
     _validate_usable_source(chunks, vault.config.ingest.min_content_chars)
 
+    _report_progress(progress, "staging", source_kind=resolved_kind)
     subject = _resolve_subject(vault.root, normalized, subject_id, resolved_kind, target_learning_object_ids, content_hash, clock=clock)
     change_analysis = analyze_source_change(
         load_vault(vault.root),
@@ -231,6 +243,7 @@ def ingest_canonical_source(
             windows,
             target_learning_object_ids=target_learning_object_ids,
             instructions=instructions,
+            progress=progress,
         )
         if change_analysis.summary:
             merged = _proposal_with_change_summary(merged, change_analysis.summary)
@@ -274,6 +287,7 @@ def ingest_canonical_source(
                 windows,
                 target_learning_object_ids=target_learning_object_ids,
                 instructions=instructions,
+                progress=progress,
             )
             if change_analysis.summary:
                 merged = _proposal_with_change_summary(merged, change_analysis.summary)
@@ -350,9 +364,16 @@ def _run_ingest_windows(
     *,
     target_learning_object_ids: list[str],
     instructions: str | None,
+    progress: IngestProgress | None = None,
 ) -> AuthoringProposal:
     proposals: list[AuthoringProposal] = []
-    for window in windows:
+    for index, window in enumerate(windows, 1):
+        _report_progress(
+            progress,
+            "authoring",
+            current_window=index,
+            total_windows=len(windows),
+        )
         context = _canonical_context(
             vault,
             registered,
@@ -364,6 +385,11 @@ def _run_ingest_windows(
         proposal = client.run_canonical_ingest(context)
         proposals.append(_proposal_with_locator_validation(proposal, registered, window))
     return merge_window_proposals(proposals)
+
+
+def _report_progress(progress: IngestProgress | None, phase: str, **details: Any) -> None:
+    if progress is not None:
+        progress(phase, details)
 
 
 def _proposal_with_change_summary(proposal: AuthoringProposal, summary: str) -> AuthoringProposal:
@@ -456,28 +482,32 @@ def detect_source_kind(
     kind: KindOption = "auto",
     learning_object_ids: list[str] | None = None,
 ) -> SourceKind:
+    return resolve_canonical_source(source, kind=kind, learning_object_ids=learning_object_ids)[1]
+
+
+def resolve_canonical_source(
+    source: str,
+    *,
+    kind: KindOption = "auto",
+    learning_object_ids: list[str] | None = None,
+) -> tuple[ResolvedSource, SourceKind]:
+    try:
+        resolved = resolve_source(source)
+    except UnsupportedSourceError as exc:
+        raise SourceIngestionError(str(exc)) from exc
     if kind != "auto":
         _validate_explicit_kind(kind)
-        return kind
-    parsed = urllib.parse.urlparse(source)
+        return resolved, kind
     if learning_object_ids:
-        return "textbook_chapter"
-    if parsed.scheme in {"http", "https"}:
-        host = parsed.netloc.lower()
-        if host.endswith("youtube.com") or host == "youtu.be":
-            return "youtube_video"
-        if host.endswith("arxiv.org") and (parsed.path.startswith("/abs/") or parsed.path.startswith("/html/")):
-            return "arxiv_html"
-        return "website_page"
-    suffix = Path(source).suffix.lower()
-    if suffix in {".html", ".htm"}:
-        return "website_page"
-    if suffix == ".pdf":
-        # A PDF is converted to Markdown (marker-pdf when installed, pypdf
-        # otherwise) and ingested like a web page. Pass --learning-object /
-        # --kind textbook_chapter to anchor a textbook chapter instead.
-        return "website_page"
-    raise SourceIngestionError("unsupported or inaccessible source")
+        return resolved, "textbook_chapter"
+    mapping: dict[str, SourceKind] = {
+        "youtube": "youtube_video",
+        "arxiv": "arxiv_html",
+        "web": "website_page",
+        "pdf": "website_page",
+        "textfile": "website_page",
+    }
+    return resolved, mapping[resolved.category]
 
 
 def fetch_source(
@@ -488,6 +518,7 @@ def fetch_source(
     allow_auto_captions: bool,
     pdf_config: PdfIngestConfig | None = None,
     clock: Clock | None = None,
+    progress: IngestProgress | None = None,
 ) -> FetchResult:
     parsed = urllib.parse.urlparse(source)
     if kind == "youtube_video":
@@ -496,12 +527,14 @@ def fetch_source(
         fetch_uri = _canonical_fetch_uri(source, kind)
         fetched = _fetch_url(root, fetch_uri, original_uri=source, clock=clock)
         if _is_pdf_fetch(fetched):
+            _report_progress(progress, "extracting", source_kind=kind)
             return _pdf_fetch_result(root, fetched.raw_bytes, fetched, pdf_config)
         return fetched
     path = Path(source).expanduser()
     if not path.exists() or not path.is_file():
         raise SourceIngestionError("unsupported or inaccessible source")
     if path.suffix.lower() == ".pdf":
+        _report_progress(progress, "extracting", source_kind=kind)
         uri = path.resolve().as_uri()
         placeholder = FetchResult(
             raw_bytes=b"",
@@ -511,9 +544,10 @@ def fetch_source(
             retrieved_at=utc_now_iso(clock),
         )
         return _pdf_fetch_result(root, path.read_bytes(), placeholder, pdf_config)
-    if path.suffix.lower() not in {".html", ".htm", ".md", ".txt"}:
-        raise SourceIngestionError("unsupported or inaccessible source")
     raw = path.read_bytes()
+    text_suffixes = {".html", ".htm", ".md", ".markdown", ".mdown", ".txt", ".text", ".rst"}
+    if path.suffix.lower() not in text_suffixes and b"\x00" in raw[:4096]:
+        raise SourceIngestionError("unsupported or inaccessible source")
     content_type = _content_type_for_path(path)
     return FetchResult(
         raw_bytes=raw,
@@ -888,8 +922,10 @@ def _canonical_fetch_uri(source: str, kind: SourceKind) -> str:
     if kind != "arxiv_html":
         return source
     parsed = urllib.parse.urlparse(source)
-    if parsed.netloc.lower().endswith("arxiv.org") and parsed.path.startswith("/abs/"):
-        arxiv_id = parsed.path.removeprefix("/abs/").strip("/")
+    if parsed.netloc.lower().endswith("arxiv.org") and parsed.path.startswith(("/abs/", "/pdf/")):
+        arxiv_id = parsed.path.split("/", 2)[-1].strip("/")
+        if arxiv_id.lower().endswith(".pdf"):
+            arxiv_id = arxiv_id[:-4]
         return urllib.parse.urlunparse(parsed._replace(path=f"/html/{arxiv_id}", query="", fragment=""))
     return source
 

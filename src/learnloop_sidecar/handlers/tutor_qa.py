@@ -14,6 +14,7 @@ from learnloop.services.tutor_qa import (
     QuestionLimitReached,
     TutorQAError,
     ask_question,
+    build_tutor_opening,
     build_tutor_qa_note,
     question_usage,
 )
@@ -138,6 +139,34 @@ def ask_tutor_question(ctx: SidecarContext, params: AskTutorQuestionInput) -> di
             "remaining": result["remaining"],
         }
     )
+
+
+class PreviewTutorOpeningInput(ParamsModel):
+    practice_item_id: str
+    session_id: str | None = None
+
+
+@method("preview_tutor_opening", PreviewTutorOpeningInput)
+def preview_tutor_opening(ctx: SidecarContext, params: PreviewTutorOpeningInput) -> dict[str, Any]:
+    """A proactive tutor opening for a just-closed diagnostic block (§12.1).
+
+    Best-effort and ephemeral: unlike ``ask_tutor_question`` this never raises
+    on an unready provider or a missing decision — it degrades to
+    ``opening_md: None`` so the overlay falls back to the ordinary
+    learner-speaks-first flow.
+    """
+
+    vault, repository = ctx.require_vault()
+    _provider_name, runtime, client = ready_tutor_qa_provider(vault)
+    if not runtime.ready or client is None:
+        return versioned({"opening_md": None})
+    try:
+        opening_md = build_tutor_opening(
+            vault, repository, client, practice_item_id=params.practice_item_id
+        )
+    except (CodexUnavailable, TimeoutError):
+        return versioned({"opening_md": None})
+    return versioned({"opening_md": opening_md})
 
 
 @method("rate_tutor_answer", RateTutorAnswerInput)

@@ -19,6 +19,7 @@ from learnloop.services.source_ingestion import (
     fetch_source,
     ingest_canonical_source,
     normalize_source,
+    resolve_canonical_source,
     _fetch_youtube_transcript,
 )
 from learnloop.vault.loader import load_vault
@@ -37,6 +38,17 @@ def test_source_kind_detection_handles_special_cases(tmp_path):
     assert detect_source_kind(str(html), learning_object_ids=["lo_svd_definition"]) == "textbook_chapter"
     # A text-based PDF is ingested like a web page (normalized to Markdown).
     assert detect_source_kind(str(tmp_path / "paper.pdf")) == "website_page"
+
+    markdown = tmp_path / "notes.md"
+    markdown.write_text("# Notes\n\nA sufficiently useful local source.", encoding="utf-8")
+    assert detect_source_kind(str(markdown)) == "website_page"
+    assert detect_source_kind(str(tmp_path / "notes.txt")) == "website_page"
+    assert detect_source_kind("2401.12345") == "arxiv_html"
+    assert detect_source_kind("arxiv:2401.12345v2") == "arxiv_html"
+
+    resolved, kind = resolve_canonical_source("arxiv:2401.12345v2")
+    assert kind == "arxiv_html"
+    assert resolved.source == "https://arxiv.org/abs/2401.12345v2"
 
 
 def _make_pdf_bytes(lines: list[str]) -> bytes:

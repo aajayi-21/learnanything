@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { AppSnapshot, SessionEndSummary, SessionSnapshot } from "../api/dto";
+import type { AppSnapshot, ProbeBlockEndDto, SessionEndSummary, SessionSnapshot } from "../api/dto";
 import { AskOverlay, type AskTarget } from "../components/AskOverlay";
 import { CommandPalette } from "../components/CommandPalette";
 import { InspectorOverlay } from "../components/InspectorOverlay";
 import { SessionFinishHud } from "../components/SessionFinishHud";
 import { EmptyPlaceholder, TerminalFrame, type TopTab, navTabs } from "../components/ui";
 import { CalibrationScreen } from "../screens/CalibrationScreen";
+import { DiagnosticReviewScreen } from "../screens/DiagnosticReviewScreen";
 import { ExamScreen } from "../screens/ExamScreen";
 import { FeedbackScreen } from "../screens/FeedbackScreen";
 import { GraphScreen } from "../screens/GraphScreen";
@@ -18,7 +19,7 @@ import { StartScreen } from "../screens/StartScreen";
 import { TodayScreen } from "../screens/TodayScreen";
 import { setAlgoConfig } from "./algoConfig";
 
-type TodayStage = "queue" | "practice" | "feedback";
+type TodayStage = "queue" | "practice" | "feedback" | "blockReview";
 
 export function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
@@ -30,6 +31,14 @@ export function App() {
   // screen's source panel); the submit carries primed=true to the backend.
   const [primedRetry, setPrimedRetry] = useState(false);
   const [attemptId, setAttemptId] = useState<string | null>(null);
+  // §5.7: the unified Diagnostic Check review, shown instead of single-attempt
+  // feedback when a probe block just closed (releasedFeedback covers every
+  // attempt in the block).
+  const [blockReview, setBlockReview] = useState<{
+    blockEnd: ProbeBlockEndDto;
+    learningObjectId: string;
+    learningObjectTitle: string;
+  } | null>(null);
   // The practice-exam overlay: when set, ExamScreen takes over the body (entered
   // only from the goal banner, exited back to the today tab). Not a nav tab.
   const [examGoalId, setExamGoalId] = useState<string | null>(null);
@@ -40,6 +49,8 @@ export function App() {
   const [calibrationSessionId, setCalibrationSessionId] = useState<string | null>(null);
   const [inspectorId, setInspectorId] = useState<string | null>(null);
   const [libraryFocus, setLibraryFocus] = useState<{ patchId: string; itemId: string } | null>(null);
+  const [proposalFocusPatchId, setProposalFocusPatchId] = useState<string | null>(null);
+  const [ingestJobId, setIngestJobId] = useState<string | null>(null);
   const [libraryFilePath, setLibraryFilePath] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteEntityIds, setPaletteEntityIds] = useState<string[]>([]);
@@ -214,6 +225,11 @@ export function App() {
     setTodayStage("feedback");
   }
 
+  function openBlockReview(blockEnd: ProbeBlockEndDto, learningObjectId: string, learningObjectTitle: string) {
+    setBlockReview({ blockEnd, learningObjectId, learningObjectTitle });
+    setTodayStage("blockReview");
+  }
+
   // "View in Library" from the feedback source panel: open that vault file.
   function openLibraryFile(path: string) {
     setLibraryFilePath(path);
@@ -230,6 +246,7 @@ export function App() {
     setLocalDraft(null);
     setPracticeItemId(null);
     setAttemptId(null);
+    setBlockReview(null);
     // Calibration attaches to the practice session — drop the overlay with it.
     setCalibrationSessionId(null);
     setTodayStage("queue");
@@ -304,6 +321,11 @@ export function App() {
     setTab("library");
   }
 
+  function gotoProposalBatch(patchId: string) {
+    setProposalFocusPatchId(patchId);
+    setTab("proposals");
+  }
+
   const changeVault = useCallback(
     async (path: string) => {
       try {
@@ -314,8 +336,11 @@ export function App() {
         setSession(next.activeSession ?? null);
         setPracticeItemId(null);
         setAttemptId(null);
+        setBlockReview(null);
         setInspectorId(null);
         setCalibrationSessionId(null);
+        setIngestJobId(null);
+        setProposalFocusPatchId(null);
         setTodayStage("queue");
         setTab("start");
       } catch (error) {
@@ -364,12 +389,31 @@ export function App() {
             restoredHints={restored.hints}
             restoredTeachBack={restored.teachBack}
             onFeedback={openFeedback}
+            onBlockEnd={openBlockReview}
+            onContinueDiagnostic={openPractice}
             onBack={() => setTodayStage("queue")}
             onCheckpointCleared={clearLocalCheckpoint}
             onDraftSaved={onPracticeDraft}
             onTeachBackActive={onTeachBackActive}
             onInspect={setInspectorId}
             onAsk={setAskTarget}
+            onError={onError}
+          />
+        );
+      }
+      if (todayStage === "blockReview" && session && blockReview) {
+        return (
+          <DiagnosticReviewScreen
+            blockEnd={blockReview.blockEnd}
+            learningObjectId={blockReview.learningObjectId}
+            learningObjectTitle={blockReview.learningObjectTitle}
+            sessionId={session.sessionId}
+            onContinueDiagnostic={openPractice}
+            onAsk={setAskTarget}
+            onBack={() => {
+              setBlockReview(null);
+              setTodayStage("queue");
+            }}
             onError={onError}
           />
         );
@@ -409,7 +453,13 @@ export function App() {
       return <GraphScreen onInspect={setInspectorId} onError={onError} />;
     }
     if (tab === "ingest") {
-      return <IngestScreen onProceedToPropose={() => gotoTab("proposals")} />;
+      return (
+        <IngestScreen
+          jobId={ingestJobId}
+          onJobIdChange={setIngestJobId}
+          onProceedToPropose={gotoProposalBatch}
+        />
+      );
     }
     if (tab === "library") {
       return (
@@ -433,6 +483,8 @@ export function App() {
           onPaletteEntities={onPaletteEntities}
           onError={onError}
           onHandoff={gotoLibraryProposal}
+          focusPatchId={proposalFocusPatchId}
+          onFocusConsumed={() => setProposalFocusPatchId(null)}
         />
       );
     }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ from learnloop.vault.models import LoadedVault
 from learnloop.vault.paths import VaultPaths
 from learnloop_sidecar.dto import to_camel, versioned
 from learnloop_sidecar.errors import SidecarError
+from learnloop_sidecar.ingest_jobs import IngestJobManager
 
 
 @dataclass
@@ -30,6 +31,7 @@ class SidecarContext:
     # configured provider key, the literal "manual", or None (config routing).
     # Never persisted to learnloop.toml; survives vault reloads within this process.
     grading_provider_override: str | None = None
+    ingest_jobs: IngestJobManager = field(default_factory=IngestJobManager, repr=False)
 
     def load(self, vault_path: str | Path, *, maintenance: bool = True) -> None:
         self.vault_root = Path(vault_path).resolve()

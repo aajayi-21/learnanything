@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Annotated, Any, Mapping, TextIO
+from typing import Annotated, Any, Callable, Mapping, TextIO
 
 import typer
 from pydantic import BaseModel
@@ -104,6 +104,7 @@ from learnloop.vault.yaml_io import read_yaml, yaml_to_string
 app = typer.Typer(no_args_is_help=True, help="LearnLoop local adaptive learning vault.")
 
 _INGEST_SPINNER_FRAMES = ("|", "/", "-", "\\")
+_INGEST_PROGRESS_EVENT = "learnloop_ingest_progress"
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -113,6 +114,11 @@ def _format_elapsed(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
+
+
+def _json_ingest_progress(phase: str, details: dict[str, Any]) -> None:
+    payload = {_INGEST_PROGRESS_EVENT: {"phase": phase, **details}}
+    print(jsonlib.dumps(payload, sort_keys=True, separators=(",", ":")), file=sys.stderr, flush=True)
 
 
 class _AsciiSpinner:
@@ -531,6 +537,7 @@ def ingest(
         typer.Option("--pdf-llm/--no-pdf-llm", help="Toggle marker's VLM boost for difficult scans/math (see [ingest.pdf])."),
     ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    progress_json: Annotated[bool, typer.Option("--progress-json", hidden=True)] = False,
     vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
 ) -> None:
     result = _run_canonical_ingest_command(
@@ -545,6 +552,7 @@ def ingest(
         pdf_engine=pdf_engine,
         pdf_use_llm=pdf_llm,
         json_output=json_output,
+        progress_json=progress_json,
         vault=vault,
     )
     if json_output:
@@ -576,6 +584,7 @@ def ingest_exam(
         typer.Option("--pdf-llm/--no-pdf-llm", help="Toggle marker's VLM boost for difficult scans/math (see [ingest.pdf])."),
     ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit stable JSON.")] = False,
+    progress_json: Annotated[bool, typer.Option("--progress-json", hidden=True)] = False,
     vault: Annotated[Path | None, typer.Option("--vault", help="Vault root.")] = None,
 ) -> None:
     """Ingest a past practice exam: one tagged practice item per exam question.
@@ -599,6 +608,7 @@ def ingest_exam(
         pdf_engine=pdf_engine,
         pdf_use_llm=pdf_llm,
         json_output=json_output,
+        progress_json=progress_json,
         vault=vault,
         purpose="exam_ingest",
         spinner_label="Ingesting past exam",
@@ -624,6 +634,7 @@ def _run_canonical_ingest_command(
     instructions: str | None,
     ai_provider: str | None,
     json_output: bool,
+    progress_json: bool,
     vault: Path | None,
     purpose: str = "canonical_ingest",
     spinner_label: str = "Ingesting canonical source",
@@ -632,6 +643,9 @@ def _run_canonical_ingest_command(
 ):
     vault_root = _root(vault)
     loaded = _load_vault_or_exit(vault_root, json_output=json_output)
+    progress: Callable[[str, dict[str, Any]], None] | None = _json_ingest_progress if progress_json else None
+    if progress is not None:
+        progress("preparing", {})
     provider_name, runtime, client = _ready_provider_for_task(vault_root, loaded.config, "canonical_ingest", ai_provider)
     if not runtime.ready:
         runtime_label = "Codex runtime" if provider_name == "codex" else "AI provider"
@@ -670,6 +684,7 @@ def _run_canonical_ingest_command(
                 purpose=purpose,
                 pdf_engine=pdf_engine,
                 pdf_use_llm=pdf_use_llm,
+                progress=progress,
             )
     except typer.Exit:
         raise

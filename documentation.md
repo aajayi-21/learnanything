@@ -1,3 +1,4 @@
+`![](https://youtu.be/j2yr-T3Xl6Y?si=MaNQvX0dYwoZNVcD)`
 # LearnLoop Algorithm Documentation
 
 Canonical reference for the Python backend implementation as of 2026-05-28.

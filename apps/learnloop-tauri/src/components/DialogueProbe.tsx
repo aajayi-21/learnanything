@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { CommandError, DialogueTurnDto, ProbeBlockEndDto } from "../api/dto";
 import { MarkdownMath } from "../render/MarkdownMath";
+import { ProbeBlockResult } from "./ProbeBlockResult";
 import { COLOR, FONT_MONO, Faint } from "./term";
 import { Card, Pill, SectionHeader } from "./ui";
 
@@ -17,12 +18,6 @@ const TURN_KIND_LABEL: Record<string, string> = {
   reason: "state the decisive reason",
   counterfactual: "minimally changed case",
   counterexample: "boundary / failure case"
-};
-
-const ROUTE_LABEL: Record<string, string> = {
-  tutoring: "next: tutoring on the diagnosed gap",
-  next_block: "next: another short diagnostic block",
-  ordinary_practice: "next: ordinary practice"
 };
 
 interface SubmittedTurn {
@@ -200,52 +195,16 @@ export function DialogueProbePanel({
           {blockEnd == null ? (
             <Faint>The dialogue ended without a block result.</Faint>
           ) : (
-            <>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <Pill tone={blockEnd.status === "complete" ? "cyan" : "slate"}>{blockEnd.status}</Pill>
-                {blockEnd.completionReason ? <Faint>{blockEnd.completionReason}</Faint> : null}
-                {blockEnd.route ? (
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: COLOR.amber }}>
-                    {ROUTE_LABEL[blockEnd.route] ?? blockEnd.route}
-                  </span>
-                ) : null}
-              </div>
-              {blockEnd.releasedFeedback.length > 0 ? (
-                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-                  <Faint>Feedback withheld during the block, released now:</Faint>
-                  {blockEnd.releasedFeedback.map((feedback, index) => (
-                    <div
-                      key={feedback.attemptId}
-                      style={{ borderTop: `1px solid ${COLOR.border}`, paddingTop: 8, fontSize: 13 }}
-                    >
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <Pill tone={(feedback.rubricScore ?? 0) >= 3 ? "green" : "amber"}>
-                          {feedback.rubricScore ?? "—"}/4
-                        </Pill>
-                        <Faint>
-                          turn {index + 1}
-                          {submitted[index] ? ` · ${TURN_KIND_LABEL[submitted[index].kind] ?? submitted[index].kind}` : ""}
-                        </Faint>
-                        {feedback.fatalErrors.length > 0 ? (
-                          <span style={{ color: COLOR.red, fontFamily: FONT_MONO, fontSize: 11 }}>
-                            {feedback.fatalErrors.join(", ")}
-                          </span>
-                        ) : null}
-                      </div>
-                      {feedback.feedbackMd ? (
-                        <div className="markdown" style={{ marginTop: 4, fontSize: 12, lineHeight: 1.5 }}>
-                          <MarkdownMath value={feedback.feedbackMd} />
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ marginTop: 10 }}>
-                  <Faint>No feedback to release for this block.</Faint>
-                </div>
-              )}
-            </>
+            <ProbeBlockResult
+              status={blockEnd.status}
+              completionReason={blockEnd.completionReason}
+              route={blockEnd.route}
+              releasedFeedback={blockEnd.releasedFeedback}
+              labelForIndex={(index) =>
+                `turn ${index + 1}` +
+                (submitted[index] ? ` · ${TURN_KIND_LABEL[submitted[index].kind] ?? submitted[index].kind}` : "")
+              }
+            />
           )}
           <div className="form-row" style={{ marginTop: 14 }}>
             <button className="queue-row focused" type="button" onClick={() => onDone(blockEnd)}>

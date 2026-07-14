@@ -8,11 +8,12 @@ from pathlib import Path
 
 from learnloop.clock import FrozenClock
 from learnloop.db.repositories import Repository
-from learnloop.vault.loader import add_note
+from learnloop.services.probe_episodes import enter_episode
+from learnloop.vault.loader import add_note, load_vault
 from learnloop.vault.writer import upsert_practice_item
 from learnloop_sidecar.server import serve
 
-from tests.helpers import NOW, NOW_ISO, create_basic_vault, seed_due_item
+from tests.helpers import NOW, NOW_ISO, admit_probe_instrument_card, create_basic_vault, seed_due_item
 
 
 def _rpc(messages: list[dict]) -> list[dict]:
@@ -461,6 +462,94 @@ def test_sidecar_ask_requires_ready_provider(tmp_path):
     )[1]
     assert response["error"]["data"]["code"] == "provider_unavailable"
     assert response["error"]["data"]["retryable"] is True
+
+
+# --- preview_tutor_opening (§12.1 proactive handoff) ------------------------
+
+
+def test_preview_tutor_opening_after_stop_diagnosing(tmp_path):
+    server = _TutorServer(answer_md="Let's contrast this with the confusable case.")
+    server.start()
+    try:
+        vault_root, paths = _tutor_vault(tmp_path, server)
+        repository = Repository(paths.sqlite_path)
+        admit_probe_instrument_card(repository)
+        loaded = load_vault(vault_root)
+        enter_episode(loaded, repository, "lo_svd_definition", clock=FrozenClock(NOW))
+
+        stop = _rpc(
+            [
+                _init(vault_root),
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "stop_probe_diagnosing",
+                    "params": {"practiceItemId": "pi_svd_define_001"},
+                },
+            ]
+        )[1]["result"]
+        assert stop["stopped"] is True
+
+        opening = _rpc(
+            [
+                _init(vault_root),
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "preview_tutor_opening",
+                    "params": {"practiceItemId": "pi_svd_define_001"},
+                },
+            ]
+        )[1]["result"]
+        assert opening["openingMd"] == "Let's contrast this with the confusable case."
+
+        opening_calls = [request for request in server.requests if request["path"] == "/tutor-qa"]
+        assert len(opening_calls) == 1
+        assert opening_calls[0]["body"]["context"]["question_md"] == ""
+        assert opening_calls[0]["body"]["context"]["diagnostic_decision"] is not None
+
+        # Ephemeral: no question_event was persisted and the Q&A budget is untouched.
+        transcript = _rpc(
+            [
+                _init(vault_root),
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "get_tutor_transcript",
+                    "params": {"context": "practice", "practiceItemId": "pi_svd_define_001"},
+                },
+            ]
+        )[1]["result"]
+        assert transcript["events"] == []
+        assert transcript["remaining"] == 3
+    finally:
+        server.stop()
+
+
+def test_preview_tutor_opening_without_decision_degrades_silently(tmp_path):
+    # No diagnostic episode ever closed into tutoring for this item — the
+    # overlay must fall back to the ordinary learner-speaks-first flow rather
+    # than erroring or fabricating an opening.
+    server = _TutorServer()
+    server.start()
+    try:
+        vault_root, _paths = _tutor_vault(tmp_path, server)
+
+        opening = _rpc(
+            [
+                _init(vault_root),
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "preview_tutor_opening",
+                    "params": {"practiceItemId": "pi_svd_define_001"},
+                },
+            ]
+        )[1]["result"]
+        assert opening["openingMd"] is None
+        assert [request for request in server.requests if request["path"] == "/tutor-qa"] == []
+    finally:
+        server.stop()
 
 
 # --- promote_tutor_question (spec_tutor_promotion.md §8 W4) -----------------

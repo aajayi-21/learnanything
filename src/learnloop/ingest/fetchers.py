@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from learnloop.ingest.detect import detect_source_kind
+from learnloop.ingest.resolution import resolve_source
 from learnloop.ingest.models import (
     FetchedSource,
     IngestDependencyMissing,
@@ -360,5 +360,5 @@ _FETCHERS = {
 def fetch_source(source: str) -> FetchedSource:
     """Detect the source kind and fetch it. Raises an :class:`IngestError` subclass on failure."""
 
-    kind = detect_source_kind(source)
-    return _FETCHERS[kind](source)
+    resolved = resolve_source(source)
+    return _FETCHERS[resolved.category](resolved.source)

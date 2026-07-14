@@ -564,7 +564,9 @@ export function ProposalsScreen({
   onInspect,
   onPaletteEntities,
   onError,
-  onHandoff
+  onHandoff,
+  focusPatchId,
+  onFocusConsumed
 }: {
   authoringReady: boolean;
   authoringProvider: string;
@@ -572,6 +574,8 @@ export function ProposalsScreen({
   onPaletteEntities?: (ids: { inspectIds: string[]; practiceItemIds: string[] }) => void;
   onError: (message: string) => void;
   onHandoff?: (patchId: string, itemId: string) => void;
+  focusPatchId?: string | null;
+  onFocusConsumed?: () => void;
 }) {
   const [snapshot, setSnapshot] = useState<ProposalsSnapshot | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -601,6 +605,24 @@ export function ProposalsScreen({
       cancelled = true;
     };
   }, [applySnapshot, onError]);
+
+  useEffect(() => {
+    if (!snapshot || !focusPatchId) return;
+    const batch = snapshot.batches.find((candidate) => candidate.id === focusPatchId);
+    if (!batch) return;
+    setCollapsed((current) => {
+      if (!current.has(batch.id)) return current;
+      const next = new Set(current);
+      next.delete(batch.id);
+      return next;
+    });
+    const first = batch.items.find((item) => item.decision === "pending") ?? batch.items[0];
+    setFocusedItemId(first?.id ?? null);
+    window.requestAnimationFrame(() => {
+      document.querySelector(`[data-proposal-batch-id="${batch.id}"]`)?.scrollIntoView({ block: "start" });
+    });
+    onFocusConsumed?.();
+  }, [snapshot, focusPatchId, onFocusConsumed]);
 
   useEffect(() => {
     if (!onPaletteEntities) return;
@@ -769,7 +791,7 @@ export function ProposalsScreen({
             snapshot.batches.map((batch) => {
               const expanded = !collapsed.has(batch.id);
               return (
-                <div key={batch.id}>
+                <div key={batch.id} data-proposal-batch-id={batch.id}>
                   <BatchHeader batch={batch} expanded={expanded} onToggle={() => toggleBatch(batch.id)} />
                   {expanded
                     ? batch.items.map((item) => (
