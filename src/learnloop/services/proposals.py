@@ -386,6 +386,7 @@ def generate_authoring_proposal(
     codex_revision: str | None = None,
     merge_context_source_refs: bool = False,
     row_transform: Callable[[list[dict[str, Any]]], None] | None = None,
+    prompt_version: str | None = None,
     clock: Clock | None = None,
 ) -> str:
     """Run authoring generation through a CodexClient and persist the result.
@@ -419,7 +420,7 @@ def generate_authoring_proposal(
             "purpose": "authoring",
             **provider_fields,
             "prompt_template": "authoring",
-            "prompt_version": AUTHORING_PROMPT_VERSION,
+            "prompt_version": prompt_version or AUTHORING_PROMPT_VERSION,
             "input_context_hash": authoring_context_hash(context),
             "output_schema": "AuthoringProposal",
             "started_at": now,

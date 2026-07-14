@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from math import log
 from pathlib import Path
 from typing import Any
+
+from learnloop.codex.prompts import PRACTICE_GENERATION_PROMPT_VERSION
 
 from learnloop.ai.client import AIProviderClient
 from learnloop.clock import Clock, SystemClock, parse_utc
@@ -640,6 +643,220 @@ def generate_goal_practice_proposal(
         codex_revision=codex_revision,
     )
     return PracticeExpansionResult(patch_id=patch_id, plan=plan)
+
+
+@dataclass(frozen=True)
+class LeakageBlock:
+    """One generated practice item blocked by the held-out leakage gate (§8.5)."""
+
+    client_item_id: str | None
+    learning_object_id: str | None
+    findings: list[dict[str, str]]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "client_item_id": self.client_item_id,
+            "learning_object_id": self.learning_object_id,
+            "findings": self.findings,
+        }
+
+
+@dataclass(frozen=True)
+class CrossSourcePracticeResult:
+    patch_id: str
+    plan: PracticeExpansionPlan
+    # Multi-source grounding actually placed in the generation context, per LO.
+    context_span_count: int
+    leakage_blocked: list[LeakageBlock] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "patch_id": self.patch_id,
+            "plan": self.plan.as_dict(),
+            "context_span_count": self.context_span_count,
+            "leakage_blocked": [block.as_dict() for block in self.leakage_blocked],
+        }
+
+
+def _blueprint_shaping(vault: LoadedVault, learning_object) -> list[dict[str, Any]]:
+    """Task-family / capability distribution from the LO's assessment blueprints.
+
+    Shapes generation toward the exam's declared task families (§8.5). Weights are
+    normalized across the LO's blueprints; capabilities come from recipe components."""
+
+    families: list[dict[str, Any]] = []
+    total = sum(max(bp.weight, 0.0) for bp in (learning_object.blueprints or []))
+    for blueprint in learning_object.blueprints or []:
+        capabilities = sorted(
+            {
+                comp.capability
+                for recipe in blueprint.recipes or []
+                for comp in [*(recipe.all_of or []), *(recipe.any_of or [])]
+            }
+        )
+        families.append(
+            {
+                "task_family": blueprint.id,
+                "weight": round(blueprint.weight, 4),
+                "normalized_weight": round(blueprint.weight / total, 4) if total > 0 else 0.0,
+                "capabilities": capabilities,
+            }
+        )
+    return families
+
+
+def _cross_source_instructions(
+    plan: PracticeExpansionPlan,
+    context_by_lo: dict[str, list[dict[str, Any]]],
+    shaping_by_lo: dict[str, list[dict[str, Any]]],
+    *,
+    extra_instructions: str | None,
+    focus_facets: list[str] | None,
+) -> str:
+    lines = [
+        "Generate additional LearnLoop Practice Items grounded in MULTIPLE cited sources.",
+        "Create only practice_item proposal items; do not create Learning Objects, concepts, or edges.",
+        "Each new Practice Item must attach to one of the target learning_object_id values below.",
+        "CROSS_SOURCE_CONTEXT gives bounded grounding spans per learning object: the "
+        "semantic_authority span defines the concept; alternate/support spans offer "
+        "variety in wording and representation. Ground items in this material; prefer the "
+        "semantic-authority span for the canonical claim and draw surface variety from the alternates.",
+        "BLUEPRINT_SHAPING gives the assessment task-family distribution per learning object. "
+        "Distribute generated items across task families roughly in proportion to normalized_weight, "
+        "and exercise the listed capabilities.",
+        "HARD leakage rule (enforced by a deterministic code gate, not trust): NEVER reproduce "
+        "held-out exam wording, numbers, diagrams, or answer-structure fingerprints. Generate a fresh "
+        "surface. An item that echoes held-out material is blocked and cannot be applied.",
+        "Reuse existing facet ids from each target's existing_evidence_facets; mint a new facet id only "
+        "when no existing facet covers the item.",
+        "Calibrate difficulty to each target's recommended_difficulty_band (~70-85% expected success). "
+        "For each target, create exactly requested_new_items Practice Items.",
+        f"Targets: {[target.as_dict() for target in plan.targets]}",
+        f"CROSS_SOURCE_CONTEXT: {json.dumps(context_by_lo, sort_keys=True, separators=(",", ":"))}",
+        f"BLUEPRINT_SHAPING: {json.dumps(shaping_by_lo, sort_keys=True, separators=(",", ":"))}",
+    ]
+    if focus_facets:
+        lines.append(
+            "Focus facets: prioritize items whose evidence_facets target these facet ids: "
+            f"{sorted(focus_facets)}."
+        )
+    if extra_instructions:
+        lines.append(f"Additional instructions: {extra_instructions}")
+    return "\n".join(lines)
+
+
+def generate_cross_source_practice_proposal(
+    root: Path,
+    codex_client: AIProviderClient,
+    *,
+    subjects: list[str] | None = None,
+    target_items_per_lo: int = 5,
+    max_new_per_lo: int = 3,
+    max_los: int | None = None,
+    focus_concepts: list[str] | None = None,
+    focus_facets: list[str] | None = None,
+    learning_object_ids: list[str] | None = None,
+    max_spans_per_item: int = 4,
+    extra_instructions: str | None = None,
+    codex_revision: str | None = None,
+) -> CrossSourcePracticeResult:
+    """Assessment-blueprint-driven, multi-source practice generation with HARD
+    leakage controls (spec §8.5, ING M8).
+
+    Draws bounded ``entity_source_links`` grounding spans (semantic authority first,
+    alternates for variety) per target LO, shaped by the LO's assessment blueprints,
+    and runs a deterministic held-out leakage gate over every generated surface: any
+    item that reproduces held-out exam wording/numbers is blocked (never auto-applied
+    and marked invalid). Per-item context is capped at ``max_spans_per_item`` so it
+    does not grow with source count (KM §12.9)."""
+
+    from learnloop.services.practice_leakage import (
+        build_cross_source_spans,
+        build_held_out_inventory,
+        screen_practice_payload,
+    )
+
+    vault = load_vault(root)
+    repository = Repository(VaultPaths(vault.root, vault.config).sqlite_path)
+    sync_vault_state(vault, repository)
+    plan = build_practice_expansion_plan(
+        vault,
+        repository,
+        subjects=subjects,
+        target_items_per_lo=target_items_per_lo,
+        max_new_per_lo=max_new_per_lo,
+        max_los=max_los,
+        focus_concepts=focus_concepts,
+        learning_object_ids=learning_object_ids,
+    )
+    if not plan.targets:
+        raise PracticeExpansionError("No completed probe Learning Objects need more Practice Items.")
+
+    context_by_lo: dict[str, list[dict[str, Any]]] = {}
+    shaping_by_lo: dict[str, list[dict[str, Any]]] = {}
+    span_count = 0
+    for target in plan.targets:
+        lo = vault.learning_objects.get(target.learning_object_id)
+        if lo is None:
+            continue
+        spans = build_cross_source_spans(
+            vault, repository, target.learning_object_id, max_spans_per_item=max_spans_per_item
+        )
+        context_by_lo[target.learning_object_id] = [span.as_dict() for span in spans]
+        shaping_by_lo[target.learning_object_id] = _blueprint_shaping(vault, lo)
+        span_count += len(spans)
+
+    held_out = build_held_out_inventory(vault, repository, subject_ids=subjects)
+    lo_by_client: dict[str, str] = {}
+    blocked: list[LeakageBlock] = []
+
+    def _leakage_gate(rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            if row.get("item_type") != "practice_item":
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            findings = screen_practice_payload(payload, held_out)
+            if not findings:
+                continue
+            # A gate, not a prompt hope: block the item hard. It never auto-applies
+            # and is marked invalid so review cannot silently accept leaked content.
+            row["_auto_apply"] = False
+            row["validation_status"] = "invalid"
+            existing = row.get("validation_errors") or []
+            row["validation_errors"] = ["held_out_leakage"] + list(existing)
+            blocked.append(
+                LeakageBlock(
+                    client_item_id=row.get("client_item_id"),
+                    learning_object_id=payload.get("learning_object_id"),
+                    findings=findings,
+                )
+            )
+
+    patch_id = generate_authoring_proposal(
+        root,
+        codex_client,
+        subjects=_target_subjects(plan, subjects),
+        instructions=_cross_source_instructions(
+            plan,
+            context_by_lo,
+            shaping_by_lo,
+            extra_instructions=extra_instructions,
+            focus_facets=focus_facets,
+        ),
+        focus_concepts=focus_concepts,
+        focus_facets=focus_facets,
+        codex_revision=codex_revision,
+        prompt_version=PRACTICE_GENERATION_PROMPT_VERSION,
+        row_transform=_leakage_gate,
+    )
+    return CrossSourcePracticeResult(
+        patch_id=patch_id,
+        plan=plan,
+        context_span_count=span_count,
+        leakage_blocked=blocked,
+    )
 
 
 def _validate_mode_mix(mode_mix: dict[str, int] | None) -> None:

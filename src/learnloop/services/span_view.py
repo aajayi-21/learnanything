@@ -28,7 +28,18 @@ _NEIGHBOR_RADIUS = 3
 # Neighbor previews are truncated; the focused span returns full text.
 _NEIGHBOR_CHAR_CAP = 240
 
-_VALID_CONTEXTS = {"provenance", "gate_diagnostic", "registry_review", "library", "other"}
+_VALID_CONTEXTS = {
+    "provenance",
+    "gate_diagnostic",
+    "registry_review",
+    "library",
+    "other",
+    # ING M8 (§9.2, §11): tutor-citation click-through, provenance-panel open, and
+    # conflict-review span open all record exposure with their own discriminator.
+    "tutor_citation",
+    "provenance_panel",
+    "conflict_review",
+}
 
 
 class SpanViewError(ValueError):

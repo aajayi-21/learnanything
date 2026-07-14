@@ -57,6 +57,10 @@ HINT_EQUIVALENT_TYPES = frozenset({"prerequisite", "mechanism", "strategy"})
 _LEAK_MIN_TOKENS = 3
 _LEAK_OVERLAP_THRESHOLD = 0.8
 
+# ING M8 (§9.2): total source-span citations offered to one tutor turn. Bounded so
+# the grading/tutor context does not grow with source count (KM §12.9).
+_MAX_CITATION_SPANS = 4
+
 
 class TutorQAError(ValueError):
     pass
@@ -266,6 +270,7 @@ def ask_question(
         {vault.canonical_facet_id(str(facet)) for facet in answer.facets}
         & set(candidates)
     )
+    citations = _validated_citations(answer, ai_context.source_spans)
     hint_equivalent = context == "practice" and answer.question_type in HINT_EQUIVALENT_TYPES
     leak_suspected = (
         context == "practice"
@@ -306,8 +311,38 @@ def ask_question(
         "facets": facets,
         "hint_equivalent": hint_equivalent,
         "leak_suspected": leak_suspected,
+        "citations": citations,
         "remaining": max(0, limit - used - 1),
     }
+
+
+def _validated_citations(answer: Any, source_spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only citations naming a span actually provided in context (§9.2).
+
+    Never model-invented: a citation whose (extraction_id, span_id) was not in
+    ``source_spans`` is dropped. Labels are taken from the provided span so the UI
+    chip is trustworthy regardless of what the model echoed."""
+
+    provided = {
+        (str(span.get("extraction_id")), str(span.get("span_id"))): span
+        for span in source_spans
+    }
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for citation in getattr(answer, "citations", None) or []:
+        key = (str(citation.extraction_id), str(citation.span_id))
+        if key not in provided or key in seen:
+            continue
+        seen.add(key)
+        span = provided[key]
+        out.append(
+            {
+                "extraction_id": key[0],
+                "span_id": key[1],
+                "label": span.get("label") or citation.label,
+            }
+        )
+    return out
 
 
 def build_tutor_opening(
@@ -576,6 +611,8 @@ def _build_context(
         if lo is not None:
             lo_summaries.append({"id": lo.id, "title": lo.title, "summary": lo.summary})
 
+    source_spans = _source_spans(vault, repository, lo_ids)
+
     rubric = vault.rubric_for_item(item) if item is not None else None
     expected = None
     if item is not None:
@@ -619,7 +656,35 @@ def _build_context(
         note_body=note.body if note is not None else None,
         learning_object_summaries=lo_summaries,
         diagnostic_decision=_diagnostic_decision_for(repository, item, context),
+        source_spans=source_spans,
     )
+
+
+def _source_spans(
+    vault: LoadedVault, repository: Repository, lo_ids: list[str]
+) -> list[dict[str, Any]]:
+    """Bounded semantic-authority source spans for the LO(s) in tutor context (§9.2).
+
+    Reuses the cross-source span builder (semantic authority first, alternates for
+    variety, held-out excluded) and caps the TOTAL across LOs so the context does
+    not grow with source count (KM §12.9). Degrades to [] when no links exist."""
+
+    from learnloop.services.practice_leakage import build_cross_source_spans
+
+    spans: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for lo_id in lo_ids:
+        for span in build_cross_source_spans(
+            vault, repository, lo_id, max_spans_per_item=_MAX_CITATION_SPANS
+        ):
+            key = (span.extraction_id, span.span_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            spans.append(span.as_dict())
+            if len(spans) >= _MAX_CITATION_SPANS:
+                return spans
+    return spans
 
 
 def _diagnostic_decision_for(

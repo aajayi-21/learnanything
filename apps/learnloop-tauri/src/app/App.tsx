@@ -516,7 +516,9 @@ export function App() {
           subjects={subjectOptions}
           onSelectSubject={setRegistrySubjectId}
           onOpenSource={(extractionId, spanId, entityType, entityId) =>
-            setOpenSource({ extractionId, spanId, context: "registry_review", entityType, entityId })
+            // ING M8 (§11): opens originate from the entity provenance panel embedded
+            // in the registry cards, so tag exposure with the provenance_panel context.
+            setOpenSource({ extractionId, spanId, context: "provenance_panel", entityType, entityId })
           }
         />
       );

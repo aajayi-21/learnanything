@@ -1340,24 +1340,73 @@ def maintenance_feed_command(
 @app.command("exam-readiness")
 def exam_readiness_command(
     subject: Annotated[str | None, typer.Option("--subject", help="Restrict to one subject.")] = None,
+    total_items: Annotated[int | None, typer.Option("--total-items", help="Exam item count for per-family variance sizing.")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
     vault: Annotated[Path | None, typer.Option("--vault")] = None,
 ) -> None:
-    """Lightweight exam-readiness-by-task-family report (§15) — deterministic, no LLM."""
+    """Fully calibrated exam-readiness report (§15) — deterministic, no LLM.
+
+    Predicted score distribution per task family (mean/variance) against
+    practice-exam Brier calibration where data exists; Ready vs Demonstrated
+    are reported side by side, never blended."""
 
     from learnloop.services.exam_readiness import exam_readiness_report
 
     vault_root = _root(vault)
     loaded = load_vault(vault_root)
     repository = Repository(VaultPaths(vault_root, loaded.config).sqlite_path)
-    report = exam_readiness_report(loaded, repository, subject_id=subject)
+    report = exam_readiness_report(loaded, repository, subject_id=subject, total_exam_items=total_items)
     if json_output:
         typer.echo(_dump({"version": 1, "report": report.as_dict()}))
         return
     typer.echo(f"Exam readiness (Ready vs Demonstrated) — {len(report.rows)} task families")
     for row in report.rows:
         ready = f"{row.ready:.2f}" if row.ready is not None else "n/a"
-        typer.echo(f"  {row.task_family}: weight={row.normalized_weight:.2f} ready={ready} demonstrated={row.demonstrated_fraction:.2f}")
+        std = f"±{row.predicted['std']:.2f}" if row.predicted else ""
+        typer.echo(
+            f"  {row.task_family}: weight={row.normalized_weight:.2f} "
+            f"predicted={ready}{std} demonstrated={row.demonstrated_fraction:.2f}"
+        )
+    if report.predicted_score is not None:
+        ps = report.predicted_score
+        typer.echo(
+            f"Predicted exam score: {ps['mean']:.2f} ± {ps['std']:.2f} (predicted performance) | "
+            f"demonstrated {report.demonstrated_score:.2f} (evidence banked)"
+        )
+    if report.has_calibration:
+        typer.echo("Calibration overlay: past practice-exam predictions available (Brier); see --json.")
+
+
+@app.command("source-outcomes")
+def source_outcomes_command(
+    subject: Annotated[str | None, typer.Argument(help="Subject id to analyze (all subjects if omitted).")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault")] = None,
+) -> None:
+    """Provenance-outcome associations (§11) — report-only, additive suggestions.
+
+    Reports ASSOCIATIONS (repeated failure despite exposed coverage; alternate-
+    explanation exposure preceding resolution; concepts needing more examples),
+    gated on minimum samples with visible uncertainty (counts). Never a source
+    ranking, never a state write."""
+
+    from learnloop.services.source_outcome_analytics import analyze_source_outcomes
+
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    repository = Repository(VaultPaths(vault_root, loaded.config).sqlite_path)
+    report = analyze_source_outcomes(loaded, repository, subject_id=subject)
+    if json_output:
+        typer.echo(_dump({"version": 1, "report": report.as_dict()}))
+        return
+    typer.echo(
+        f"Provenance-outcome associations — {len(report.associations)} "
+        f"(min_attempts={report.thresholds['min_attempts']}, "
+        f"min_exposures={report.thresholds['min_exposures']})"
+    )
+    for assoc in report.associations:
+        typer.echo(f"  [{assoc.kind}] {assoc.title}: {assoc.uncertainty_note}")
+        typer.echo(f"    counts={assoc.counts} -> {assoc.suggestion.get('label')}")
 
 
 @app.command("resolve-conflict")

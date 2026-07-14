@@ -1,7 +1,15 @@
 AUTHORING_PROMPT_VERSION = "mvp-0.6-authoring-facet-vocabulary"
 CANONICAL_INGEST_PROMPT_VERSION = "mvp-0.5-canonical-ingest-audit-facet-weights"
 GRADING_PROMPT_VERSION = "mvp-0.7-mechanism-taxonomy"
-TUTOR_QA_PROMPT_VERSION = "mvp-0.6-tutor-qa-diagnostic-decision"
+# ING M8: cross-source practice generation with hard leakage controls (§8.5). The
+# authoring path grows a bounded multi-source grounding context + blueprint task-family
+# shaping, and generated surfaces are screened against the held-out inventory by a
+# deterministic code gate (services/practice_leakage). Versioned separately from
+# AUTHORING so the leakage-shaped contract has its own cache identity.
+PRACTICE_GENERATION_PROMPT_VERSION = "mvp-0.8-cross-source-leakage-controlled"
+# ING M8: tutor answers may cite bounded entity_source_links spans (§9.2). Bumped
+# for the citations contract (validated against provided spans, never invented).
+TUTOR_QA_PROMPT_VERSION = "mvp-0.7-tutor-qa-source-citations"
 TEACH_BACK_PROMPT_VERSION = "mvp-0.4-teach-back"
 MISCONCEPTION_MATCH_PROMPT_VERSION = "mvp-0.5-misconception-match"
 DIAGNOSTIC_AUTHORING_PROMPT_VERSION = "mvp-0.5-diagnostic-authoring"

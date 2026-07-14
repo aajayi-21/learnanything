@@ -182,6 +182,10 @@ class TutorQAContext:
     # scaffold_level, answer_reveal_budget, target_facets, …) steers the tutor
     # prose instead of being re-derived from scratch.
     diagnostic_decision: dict | None = None
+    # ING M8 (§9.2): bounded semantic-authority source spans for the LO/facets in
+    # context ({extraction_id, span_id, label, relation, semantic_authority, text}).
+    # The tutor may cite ONLY these; held-out exam spans are excluded upstream.
+    source_spans: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -983,7 +987,12 @@ _TUTOR_QA_SHARED = (
     "of context.candidate_facets the question is genuinely about (empty when "
     "none apply); never invent facet ids outside that list. Use "
     "context.thread as prior conversation turns and stay consistent with them. "
-    "Write answer_md as concise Markdown (LaTeX math allowed)."
+    "Write answer_md as concise Markdown (LaTeX math allowed). "
+    "When context.source_spans is non-empty and a span grounds a claim you make, "
+    "add it to `citations` as {extraction_id, span_id, label} using ONLY the "
+    "extraction_id/span_id pairs present in context.source_spans — never invent a "
+    "span, and cite only spans your answer actually relies on. Leave citations "
+    "empty when no provided span is relevant."
 )
 
 _TUTOR_QA_CONTEXT_TASKS = {
