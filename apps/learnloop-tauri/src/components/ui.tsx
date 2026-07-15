@@ -10,11 +10,11 @@ export const navTabs = [
   { id: "proposals", key: "5", label: "Proposals" },
   { id: "registry", key: "6", label: "Registry" },
   { id: "library", key: "7", label: "Library" },
-  { id: "errors", key: "8", label: "Review" },
   { id: "maintain", key: "0", label: "Maintain" }
 ] as const;
 
-export type TopTab = (typeof navTabs)[number]["id"];
+// `errors` is an overlay-only route used by `learnloop diff`, not a visible tab.
+export type TopTab = (typeof navTabs)[number]["id"] | "errors";
 
 function getAppWindow(): ReturnType<typeof getCurrentWindow> | null {
   try {

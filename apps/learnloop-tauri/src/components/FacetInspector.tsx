@@ -232,7 +232,7 @@ function FacetBody({
         <Faint style={{ display: "block", marginTop: 6 }}>no capability evidence yet</Faint>
       )}
       <div style={{ marginTop: 12, borderTop: `1px solid ${COLOR.border}`, paddingTop: 10 }}>
-        <FacetEvidenceReceipt facetId={facetId} />
+        <FacetEvidenceReceipt facetId={facetId} onInspect={onInspect} />
       </div>
 
       {/* (e) shared with */}

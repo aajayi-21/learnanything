@@ -1,7 +1,7 @@
 // KM3b §9.6 provenance UI: attempt trace, unresolved-cause card, capability
 // grid, recipe tree, and the facet evidence drawer (Demonstrated timeline).
 // Terminal aesthetic — inline styles over term.tsx primitives.
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api/client";
 import type {
   AttemptTraceDto,
@@ -16,11 +16,16 @@ import type {
   UnresolvedCauseDto,
 } from "../api/dto";
 import { BlockBar, COLOR, Dim, Faint, FONT_MONO, Pill, SectionHeader, type PillColor } from "./term";
+import { CommandOverlayFrame } from "./CommandOverlayFrame";
 
 const pct = (value: number | null | undefined): string =>
   value == null ? "—" : `${Math.round(value * 100)}%`;
 
 const shortFacet = (facetId: string): string => facetId.replace(/^facet_/, "");
+const facetTitle = (facetId: string): string =>
+  shortFacet(facetId)
+    .replace(/[_-]+/g, " ")
+    .replace(/^\w/, (letter) => letter.toUpperCase());
 
 // -- Attempt trace view (criterion DAG per attempt) ---------------------------
 
@@ -169,7 +174,7 @@ export function RecipeTree({ readiness }: { readiness: LoReadinessDto }) {
   return (
     <div style={{ fontFamily: FONT_MONO }}>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-        <Pill color="cyan">Ready {pct(readiness.readiness)}</Pill>
+        <Pill color="cyan">projected ready · {pct(readiness.readiness)}</Pill>
         {readiness.bottleneck && (
           <span style={{ fontSize: 11 }}>
             <Faint>bottleneck</Faint>{" "}
@@ -195,7 +200,7 @@ export function RecipeTree({ readiness }: { readiness: LoReadinessDto }) {
             <span style={{ color: COLOR.amber, overflowWrap: "anywhere" }}>{bp.blueprintId}</span>
             <span style={{ flex: 1 }} />
             <Faint>weight</Faint> <Dim>{bp.weight}</Dim>
-            <Faint>P(success)</Faint> <span style={{ color: COLOR.cyan }}>{pct(bp.successProbability)}</span>
+            <Faint>projected</Faint> <span style={{ color: COLOR.cyan }}>{pct(bp.successProbability)}</span>
           </div>
           {bp.recipes.map((recipe) => {
             const isBest = recipe.recipeId === bp.bestRecipeId;
@@ -209,13 +214,13 @@ export function RecipeTree({ readiness }: { readiness: LoReadinessDto }) {
                 }}
               >
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 11 }}>
-                  <span style={{ color: COLOR.text }}>
-                    {recipe.composition === "conjunctive" ? "AND" : recipe.composition.toUpperCase()}
-                  </span>
-                  <Faint>recipe</Faint>
+                  <Faint>path</Faint>
                   <span style={{ color: COLOR.textDim, overflowWrap: "anywhere" }}>{recipe.recipeId}</span>
-                  {isBest && <Pill color="cyan">best path</Pill>}
-                  <span style={{ marginLeft: "auto", color: COLOR.cyan }}>{pct(recipe.successProbability)}</span>
+                  <Pill color="slate" style={{ fontSize: 11 }}>
+                    {recipe.composition === "conjunctive" ? "all requirements" : recipe.composition.replace(/_/g, " ")}
+                  </Pill>
+                  {isBest && <Pill color="cyan">current best</Pill>}
+                  <span style={{ marginLeft: "auto" }}><Faint>projected </Faint><span style={{ color: COLOR.cyan }}>{pct(recipe.successProbability)}</span></span>
                 </div>
                 <div style={{ marginTop: 4 }}>
                   {recipe.components.map((c, i) => (
@@ -251,10 +256,10 @@ function GridCell({ demonstrated, ready, tested }: { demonstrated: boolean; read
         minWidth: 104
       }}
     >
-      <div style={{ color: tone, fontSize: 10, whiteSpace: "nowrap" }}>
+      <div style={{ color: tone, fontSize: 11, whiteSpace: "nowrap" }}>
         <span aria-hidden>{marker}</span> {label}
       </div>
-      <div style={{ marginTop: 3, display: "flex", alignItems: "center", gap: 6, color: COLOR.textDim, fontSize: 10 }}>
+      <div style={{ marginTop: 3, display: "flex", alignItems: "center", gap: 6, color: COLOR.textDim, fontSize: 11 }}>
         <BlockBar value={ready} width={5} color={COLOR.cyan} />
         <span>{pct(ready)}</span>
       </div>
@@ -268,8 +273,24 @@ export function CapabilityGridView({ result }: { result: CapabilityGridResult })
     return <Faint>Capability grid is available for mvp-0.7 vaults; this vault keeps the facet radar.</Faint>;
   }
   const cellOf = new Map(grid.cells.map((c) => [`${c.facetId}:${c.capability}`, c]));
+  const required = grid.cells.filter((cell) => cell.required);
+  const demonstrated = required.filter((cell) => cell.demonstrated).length;
+  const tested = required.filter((cell) => !cell.demonstrated && cell.tested).length;
+  const untested = required.length - demonstrated - tested;
   return (
     <div style={{ fontFamily: FONT_MONO }}>
+      <div style={{ color: COLOR.textDim, fontSize: 11, lineHeight: 1.5, marginBottom: 10 }}>
+        Each required cell pairs a facet with the capability the learner must show. Status reflects direct evidence; the bar is predicted recall.
+        <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 7, marginTop: 7, fontSize: 11 }}>
+          <span><b style={{ color: COLOR.text }}>{required.length}</b> required</span>
+          <span style={{ color: COLOR.textFaint }}>·</span>
+          <span><b style={{ color: COLOR.green }}>{demonstrated}</b> demonstrated</span>
+          <span style={{ color: COLOR.textFaint }}>·</span>
+          <span><b style={{ color: COLOR.cyan }}>{tested}</b> tested</span>
+          <span style={{ color: COLOR.textFaint }}>·</span>
+          <span><b style={{ color: untested ? COLOR.amber : COLOR.textFaint }}>{untested}</b> untested</span>
+        </div>
+      </div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ borderCollapse: "separate", borderSpacing: 0, border: `1px solid ${COLOR.border}`, fontSize: 11, minWidth: "100%" }}>
           <thead>
@@ -285,7 +306,7 @@ export function CapabilityGridView({ result }: { result: CapabilityGridResult })
                     color: COLOR.amber,
                     background: COLOR.bgElev,
                     borderLeft: `1px solid ${COLOR.border}`,
-                    fontSize: 10,
+                    fontSize: 11,
                     fontWeight: 400,
                     overflowWrap: "anywhere"
                   }}
@@ -315,7 +336,7 @@ export function CapabilityGridView({ result }: { result: CapabilityGridResult })
                           background: COLOR.bgInput
                         }}
                       >
-                        ·
+                        —
                       </td>
                     );
                   }
@@ -326,15 +347,19 @@ export function CapabilityGridView({ result }: { result: CapabilityGridResult })
           </tbody>
         </table>
       </div>
-      <div style={{ marginTop: 7, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 10 }}>
+      <div style={{ marginTop: 7, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11 }}>
         <span style={{ color: COLOR.green }}>● demonstrated</span>
         <span style={{ color: COLOR.cyan }}>◌ tested</span>
-        <span style={{ color: COLOR.textFaint }}>· untested / not required</span>
-        <Faint>bar = pooled Ready prediction</Faint>
+        <span style={{ color: COLOR.textFaint }}>· required, untested</span>
+        <span style={{ color: COLOR.textFaint }}>— not required</span>
+        <Faint>bar = predicted recall</Faint>
       </div>
       {readiness && (
-        <div style={{ marginTop: 10 }}>
-          <SectionHeader>Why not ready</SectionHeader>
+        <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${COLOR.border}` }}>
+          <div style={{ color: COLOR.textFaint, fontSize: 11, marginBottom: 6 }}>recipe tree · readiness paths</div>
+          <div style={{ color: COLOR.textDim, fontSize: 11, lineHeight: 1.55, marginBottom: 10, maxWidth: 720 }}>
+            Blueprints define acceptable paths through the requirements. LearnLoop projects each path, uses the strongest current route, and marks its weakest gating requirement as the bottleneck.
+          </div>
           <RecipeTree readiness={readiness} />
         </div>
       )}
@@ -364,6 +389,35 @@ function pointChannel(p: DemonstratedTimelinePointDto): "direct" | "embedded" | 
 
 const round3 = (v: number): string => (Math.round(v * 1000) / 1000).toString();
 
+function formatEvidenceTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function ReceiptEntityLink({
+  children,
+  title,
+  onClick
+}: {
+  children: ReactNode;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" title={title} onClick={onClick} style={receiptEntityLinkStyle}>
+      <span aria-hidden style={{ marginRight: 4 }}>↗</span>
+      <span style={receiptEntityLinkLabelStyle}>{children}</span>
+    </button>
+  );
+}
+
 const BOUND_LABEL: Record<string, string> = {
   group_budget: "correlation-group budget",
   attempt_ceiling: "attempt-wide ceiling",
@@ -376,77 +430,111 @@ function ReadyDerivationLine({ ready }: { ready: ReadyDerivationDto }) {
   const slices = ready.pooledCapabilities.length;
   const days = ready.daysSinceLastEvidence;
   return (
-    <div style={{ margin: "8px 0", padding: 8, border: `1px solid ${COLOR.border}`, borderRadius: 4 }}>
-      <div style={{ marginBottom: 4 }}>
-        <Pill color="amber">ready (pooled recall) {pct(ready.pooledRecallMean)}</Pill>
-      </div>
-      <div style={{ color: COLOR.text }}>
-        {n} direct observation{n === 1 ? "" : "s"} ({u} unassisted)
-        {slices > 0 && (
-          <>
-            , pooled across {slices} capability slice{slices === 1 ? "" : "s"} (
-            {ready.pooledCapabilities.map((s) => s.capability).join(", ")})
-          </>
-        )}
-        {days != null && (
-          <>
-            , last evidence {days} day{days === 1 ? "" : "s"} ago
-          </>
-        )}
-      </div>
-      <div style={{ marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
-        <Faint>
-          β({round3(ready.recallAlpha)}, {round3(ready.recallBeta)}) · independent evidence mass{" "}
-          {round3(ready.independentEvidenceMass)}
-        </Faint>
-      </div>
-      {ready.notes.map((note, i) => (
-        <div key={i} style={{ marginTop: 2 }}>
-          <Faint>· {note}</Faint>
+    <section style={{ marginTop: 16 }}>
+      <div style={receiptSectionLabelStyle}>readiness receipt</div>
+      <div style={{ padding: "10px 12px", border: `1px solid ${COLOR.border}`, borderLeft: `2px solid ${COLOR.amber}`, background: COLOR.bgInput }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ color: COLOR.amber, fontSize: 18, fontWeight: 600 }}>{pct(ready.pooledRecallMean)}</span>
+          <span style={{ color: COLOR.textDim, fontSize: 11 }}>pooled ready recall</span>
         </div>
-      ))}
-    </div>
+        <div style={{ marginTop: 5, color: COLOR.text, fontSize: 11, lineHeight: 1.55 }}>
+          {n} direct observation{n === 1 ? "" : "s"} ({u} unassisted)
+          {slices > 0 && (
+            <>
+              , pooled across {slices} capability slice{slices === 1 ? "" : "s"} (
+              {ready.pooledCapabilities.map((s) => s.capability).join(", ")})
+            </>
+          )}
+          {days != null && (
+            <>
+              , last evidence {days} day{days === 1 ? "" : "s"} ago
+            </>
+          )}
+        </div>
+        <div style={{ marginTop: 5, fontVariantNumeric: "tabular-nums", fontSize: 10 }}>
+          <Faint>
+            β({round3(ready.recallAlpha)}, {round3(ready.recallBeta)}) · independent evidence mass{" "}
+            {round3(ready.independentEvidenceMass)}
+          </Faint>
+        </div>
+        {ready.notes.map((note, i) => (
+          <div key={i} style={{ marginTop: 2, fontSize: 10 }}>
+            <Faint>· {note}</Faint>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
 // One observation's per-cell derivation (raw vs capped credit + binding rule).
-function ObservationDetail({ point }: { point: DemonstratedTimelinePointDto }) {
+function ObservationDetail({
+  point,
+  ordinal,
+  onInspect
+}: {
+  point: DemonstratedTimelinePointDto;
+  ordinal: number;
+  onInspect: (entityId: string) => void;
+}) {
   const rows = point.derivation ?? [];
+  const channel = pointChannel(point);
+  const channelMeta = CHANNEL_META[channel];
+  const deltaTone = point.delta < 0 ? COLOR.red : point.delta > 0 ? COLOR.green : COLOR.textFaint;
   return (
-    <div style={{ marginTop: 6, padding: 8, border: `1px solid ${COLOR.borderStrong}`, borderRadius: 4 }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "baseline", marginBottom: 4 }}>
-        <span style={{ color: COLOR.textDim }}>{point.t}</span>
-        {point.isCorrection && <Pill color="red">correction ({point.delta >= 0 ? "+" : ""}{pct(point.delta)})</Pill>}
-        {point.primed && <Pill color="amber">primed</Pill>}
-        <Faint>attempt {point.attemptId}</Faint>
+    <article style={{ marginTop: 9, border: `1px solid ${COLOR.borderStrong}`, borderLeft: `2px solid ${channelMeta.color}`, background: COLOR.bgInput }}>
+      <div style={{ padding: "10px 12px", borderBottom: `1px solid ${COLOR.border}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={observationEyebrowStyle}>observation {String(ordinal).padStart(2, "0")}</span>
+          <span style={{ color: channelMeta.color, fontSize: 10 }}>{channelMeta.glyph} {channelMeta.label}</span>
+          <span style={{ flex: 1 }} />
+          <span style={{ color: deltaTone, fontSize: 11, fontWeight: 600 }}>
+            {point.delta > 0 ? "▲ +" : point.delta < 0 ? "▼ " : "＝ "}{pct(point.delta)}
+          </span>
+          {point.isCorrection ? <Pill color="red">correction</Pill> : null}
+          {point.primed ? <Pill color="amber">primed</Pill> : null}
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginTop: 7, fontSize: 10 }}>
+          <ReceiptEntityLink title={`learnloop show ${point.attemptId}`} onClick={() => onInspect(point.attemptId)}>
+            <time dateTime={point.t}>{formatEvidenceTime(point.t)}</time>
+          </ReceiptEntityLink>
+          <Faint>· attempt</Faint>
+          <ReceiptEntityLink title={`learnloop show ${point.attemptId}`} onClick={() => onInspect(point.attemptId)}>
+            {point.attemptId}
+          </ReceiptEntityLink>
+          {point.surfaceGroup ? <Faint>· surface {point.surfaceGroup}</Faint> : null}
+        </div>
       </div>
       {rows.length === 0 ? (
-        <Faint>{point.assisted ? "assisted — certifies no credit (§5.4)" : "no direct credit this observation"}</Faint>
+        <div style={{ padding: "10px 12px", color: COLOR.textDim, fontSize: 10 }}>
+          {point.assisted ? "Assisted observation — certifies no direct credit." : "No direct credit was recorded for this observation."}
+        </div>
       ) : (
         rows.map((d, i) => {
           const meta = CHANNEL_META[d.channel];
           return (
             <div
               key={`${d.capability}:${i}`}
-              style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "baseline", padding: "2px 0", fontVariantNumeric: "tabular-nums" }}
+              style={{ display: "grid", gridTemplateColumns: "16px minmax(0, 1fr) auto", gap: 8, alignItems: "start", padding: "9px 12px", borderTop: i > 0 ? `1px solid ${COLOR.border}` : "none", fontVariantNumeric: "tabular-nums" }}
             >
-              <span style={{ color: meta.color, width: 14, textAlign: "center" }}>{meta.glyph}</span>
-              <Pill color="slate">{d.capability}</Pill>
-              <Pill color={meta.pill}>{meta.label}</Pill>
-              <span style={{ color: COLOR.textDim }}>
-                credit {round3(d.cappedCredit)}
-                {d.rawCredit !== d.cappedCredit && (
-                  <span style={{ color: COLOR.textFaint }}> (staged {round3(d.rawCredit)})</span>
-                )}
-              </span>
-              {d.boundBy.length > 0 && (
-                <Faint>bound by {d.boundBy.map((b) => BOUND_LABEL[b] ?? b).join(" + ")}</Faint>
-              )}
+              <span style={{ color: meta.color, textAlign: "center" }}>{meta.glyph}</span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ color: COLOR.text, fontSize: 11 }}>{d.capability}</div>
+                <div style={{ marginTop: 3, color: COLOR.textFaint, fontSize: 9, lineHeight: 1.45 }}>
+                  {meta.label}
+                  {d.rawCredit !== d.cappedCredit ? ` · staged ${round3(d.rawCredit)}` : ""}
+                  {d.boundBy.length > 0 ? ` · bound by ${d.boundBy.map((b) => BOUND_LABEL[b] ?? b).join(" + ")}` : ""}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ color: meta.color, fontSize: 14, fontWeight: 600 }}>{round3(d.cappedCredit)}</div>
+                <div style={{ color: COLOR.textFaint, fontSize: 9, marginTop: 2 }}>banked credit</div>
+              </div>
             </div>
           );
         })
       )}
-    </div>
+    </article>
   );
 }
 
@@ -462,7 +550,7 @@ function EvidenceScrubber({
 }) {
   if (!points.length) return null;
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, margin: "6px 0" }} role="group" aria-label="Evidence observations">
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 5, margin: "7px 0" }} role="group" aria-label="Evidence observations">
       {points.map((p, i) => {
         const channel = pointChannel(p);
         const meta = CHANNEL_META[channel];
@@ -479,18 +567,21 @@ function EvidenceScrubber({
             style={{
               fontFamily: FONT_MONO,
               cursor: "pointer",
-              background: isSel ? COLOR.bgElev : "transparent",
-              border: `1px solid ${isSel ? COLOR.borderStrong : COLOR.border}`,
-              borderRadius: 3,
-              padding: "1px 5px",
+              background: isSel ? "#241d12" : COLOR.bgInput,
+              border: `1px solid ${isSel ? COLOR.amber : COLOR.border}`,
+              borderRadius: 2,
+              padding: "4px 7px",
               color: meta.color,
               display: "inline-flex",
               alignItems: "center",
-              gap: 3,
+              gap: 5,
             }}
           >
-            <span>{meta.glyph}</span>
-            {p.isCorrection && <span style={{ color: COLOR.red }}>▲</span>}
+            <span style={{ color: isSel ? COLOR.amber : COLOR.textFaint, fontSize: 9, letterSpacing: "0.08em" }}>
+              {String(i + 1).padStart(2, "0")}
+            </span>
+            <span style={{ fontSize: 10 }}>{meta.glyph}</span>
+            {p.isCorrection ? <span style={{ color: COLOR.red, fontSize: 9 }}>↩</span> : null}
           </button>
         );
       })}
@@ -503,13 +594,13 @@ function ScrubberLegend() {
     <div style={{ display: "flex", flexWrap: "wrap", gap: 10, margin: "2px 0 6px" }}>
       {(["direct", "embedded", "assisted"] as const).map((c) => (
         <span key={c} style={{ display: "inline-flex", gap: 4, alignItems: "baseline" }}>
-          <span style={{ color: CHANNEL_META[c].color }}>{CHANNEL_META[c].glyph}</span>
-          <Faint>{CHANNEL_META[c].label}</Faint>
+          <span style={{ color: CHANNEL_META[c].color, fontSize: 10 }}>{CHANNEL_META[c].glyph}</span>
+          <Faint style={{ fontSize: 9 }}>{CHANNEL_META[c].label}</Faint>
         </span>
       ))}
       <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline" }}>
-        <span style={{ color: COLOR.red }}>▲</span>
-        <Faint>correction</Faint>
+        <span style={{ color: COLOR.red, fontSize: 10 }}>▲</span>
+        <Faint style={{ fontSize: 9 }}>correction</Faint>
       </span>
     </div>
   );
@@ -518,15 +609,25 @@ function ScrubberLegend() {
 function DemonstratedCurve({ timeline }: { timeline: FacetEvidenceTimelineDto }) {
   const points = timeline.points;
   if (!points.length) return <Faint>No demonstrated evidence yet.</Faint>;
-  const w = 320;
-  const h = 70;
-  const pad = 6;
-  const maxV = Math.max(1e-6, ...points.map((p) => p.demonstrated));
-  const xs = (i: number) => (points.length === 1 ? w / 2 : pad + (i * (w - 2 * pad)) / (points.length - 1));
-  const ys = (v: number) => h - pad - (v / maxV) * (h - 2 * pad);
+  const w = 560;
+  const h = 112;
+  const left = 28;
+  const right = 8;
+  const top = 8;
+  const bottom = 18;
+  const xs = (i: number) => (points.length === 1 ? (w + left - right) / 2 : left + (i * (w - left - right)) / (points.length - 1));
+  const ys = (value: number) => top + (1 - Math.max(0, Math.min(1, value))) * (h - top - bottom);
   const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${xs(i).toFixed(1)},${ys(p.demonstrated).toFixed(1)}`).join(" ");
   return (
-    <svg width={w} height={h} style={{ display: "block" }} role="img" aria-label="Demonstrated curve">
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ display: "block" }} role="img" aria-label="Demonstrated curve">
+      {[0, 0.5, 1].map((value) => (
+        <g key={value}>
+          <line x1={left} x2={w - right} y1={ys(value)} y2={ys(value)} stroke={COLOR.border} strokeWidth={1} />
+          <text x={left - 5} y={ys(value) + 3} fill={COLOR.textFaint} fontSize={8} textAnchor="end">
+            {Math.round(value * 100)}%
+          </text>
+        </g>
+      ))}
       <path d={path} fill="none" stroke={COLOR.green} strokeWidth={1.5} />
       {points.map((p, i) => (
         <circle
@@ -535,6 +636,8 @@ function DemonstratedCurve({ timeline }: { timeline: FacetEvidenceTimelineDto })
           cy={ys(p.demonstrated)}
           r={p.isCorrection ? 3.5 : 2}
           fill={p.isCorrection ? COLOR.red : COLOR.green}
+          stroke={COLOR.bgInput}
+          strokeWidth={1}
         >
           <title>
             {p.t} · demonstrated {pct(p.demonstrated)}
@@ -547,7 +650,7 @@ function DemonstratedCurve({ timeline }: { timeline: FacetEvidenceTimelineDto })
   );
 }
 
-export function FacetEvidenceReceipt({ facetId }: { facetId: string }) {
+export function FacetEvidenceReceipt({ facetId, onInspect }: { facetId: string; onInspect: (entityId: string) => void }) {
   const [timeline, setTimeline] = useState<FacetEvidenceTimelineDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -570,88 +673,214 @@ export function FacetEvidenceReceipt({ facetId }: { facetId: string }) {
   const latestCaps = timeline?.points.length
     ? timeline.points[timeline.points.length - 1].demonstratedCapabilities
     : [];
+  const latestPoint = timeline?.points.length ? timeline.points[timeline.points.length - 1] : null;
+  const latestTone = latestPoint && latestPoint.delta < 0
+    ? COLOR.red
+    : latestPoint && latestPoint.delta > 0
+      ? COLOR.green
+      : COLOR.textFaint;
 
   return (
     <div style={{ fontFamily: FONT_MONO }}>
-      {error && <Dim>{error}</Dim>}
+      {error ? <div style={{ padding: 18, color: COLOR.red, fontSize: 11 }}>{error}</div> : null}
+      {!error && !timeline ? <div style={{ padding: 18, color: COLOR.textFaint, fontSize: 11 }}>reading evidence ledger…</div> : null}
       {timeline && (
         <>
-          <div style={{ margin: "6px 0" }}>
-            <Pill color="green">demonstrated {pct(timeline.demonstrated)}</Pill>{" "}
-            {corrections.length > 0 && <Pill color="red">{corrections.length} correction{corrections.length === 1 ? "" : "s"}</Pill>}{" "}
-            {!timeline.supported && <Faint>legacy vault — no capability ledger</Faint>}
+          <div style={receiptHeroStyle}>
+            <div style={receiptStatusLineStyle}>
+              <span style={receiptContextStyle}>facet evidence · immutable ledger</span>
+              <span style={receiptSeparatorStyle}>·</span>
+              <span><b style={{ color: COLOR.green }}>{timeline.points.length}</b> <span style={{ color: COLOR.textDim }}>observations</span></span>
+              <span style={receiptSeparatorStyle}>·</span>
+              <span><b style={{ color: corrections.length ? COLOR.red : COLOR.textFaint }}>{corrections.length}</b> <span style={{ color: COLOR.textDim }}>corrections</span></span>
+            </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginTop: 7 }}>
+              <h1 style={receiptTitleStyle}>{facetTitle(facetId)}</h1>
+              <span style={{ color: COLOR.textFaint, fontSize: 10 }}>{facetId}</span>
+            </div>
+            <div style={{ marginTop: 7, display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}>
+              <span style={{ color: COLOR.green, fontSize: 18, fontWeight: 600 }}>{pct(timeline.demonstrated)}</span>
+              <span style={{ color: COLOR.textDim, fontSize: 11 }}>demonstrated</span>
+              {latestCaps.length > 0 ? (
+                <>
+                  <span style={receiptSeparatorStyle}>·</span>
+                  <span style={{ color: COLOR.cyan, fontSize: 11 }}>{latestCaps.length}</span>
+                  <span style={{ color: COLOR.textDim, fontSize: 11 }}>capabilities represented</span>
+                </>
+              ) : null}
+              {latestPoint ? (
+                <>
+                  <span style={receiptSeparatorStyle}>·</span>
+                  <span style={{ color: latestTone, fontSize: 11, fontWeight: 600 }}>
+                    {latestPoint.delta > 0 ? "▲ +" : latestPoint.delta < 0 ? "▼ " : "＝ "}{pct(latestPoint.delta)}
+                  </span>
+                  <span style={{ color: COLOR.textDim, fontSize: 11 }}>latest evidence</span>
+                </>
+              ) : null}
+              {!timeline.supported ? <Faint style={{ fontSize: 10 }}>legacy vault · no capability ledger</Faint> : null}
+            </div>
           </div>
-          {timeline.ready && <ReadyDerivationLine ready={timeline.ready} />}
-          <Dim>
-            Demonstrated curve (an exact fold over the immutable evidence ledger; corrections step
-            it and may go down)
-          </Dim>
-          <div style={{ margin: "6px 0" }}>
-            <DemonstratedCurve timeline={timeline} />
+
+          <div style={receiptBodyStyle}>
+            <section>
+              <div style={receiptSectionLabelStyle}>demonstrated curve</div>
+              <div style={{ color: COLOR.textDim, fontSize: 10, lineHeight: 1.5, marginBottom: 7 }}>
+                Exact fold over the immutable evidence ledger. Corrections are red and may move the curve down.
+              </div>
+              <div style={{ border: `1px solid ${COLOR.border}`, background: COLOR.bgInput, padding: "8px 10px 3px" }}>
+                <DemonstratedCurve timeline={timeline} />
+              </div>
+            </section>
+
+            {timeline.ready && <ReadyDerivationLine ready={timeline.ready} />}
+
+            {timeline.points.length > 0 && (
+              <section style={{ marginTop: 16 }}>
+                <div style={receiptSectionLabelStyle}>observation ledger</div>
+                <div style={{ color: COLOR.textDim, fontSize: 10, marginBottom: 7 }}>
+                  Select an observation to inspect its credit derivation.
+                </div>
+                <ScrubberLegend />
+                <EvidenceScrubber
+                  points={timeline.points}
+                  selected={selected}
+                  onSelect={(i) => setSelected((prev) => (prev === i ? null : i))}
+                />
+                {selected != null && timeline.points[selected] && (
+                  <ObservationDetail point={timeline.points[selected]} ordinal={selected + 1} onInspect={onInspect} />
+                )}
+              </section>
+            )}
+
+            {latestCaps.length > 0 && (
+              <section style={{ marginTop: 16 }}>
+                <div style={receiptSectionLabelStyle}>represented capabilities</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {latestCaps.map((cap) => (
+                    <Pill key={cap} color="cyan">{cap}</Pill>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {timeline.countedToward.length > 0 && (
+              <section style={{ marginTop: 16 }}>
+                <div style={receiptSectionLabelStyle}>also counted toward</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "5px 12px", alignItems: "center" }}>
+                  {timeline.countedToward.map((lo) => (
+                    <ReceiptEntityLink
+                      key={lo.learningObjectId}
+                      title={`learnloop show ${lo.learningObjectId}`}
+                      onClick={() => onInspect(lo.learningObjectId)}
+                    >
+                      {lo.learningObjectTitle}
+                    </ReceiptEntityLink>
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
-          {timeline.points.length > 0 && (
-            <div>
-              <Faint>evidence (tap an observation for its derivation):</Faint>
-              <ScrubberLegend />
-              <EvidenceScrubber
-                points={timeline.points}
-                selected={selected}
-                onSelect={(i) => setSelected((prev) => (prev === i ? null : i))}
-              />
-              {selected != null && timeline.points[selected] && (
-                <ObservationDetail point={timeline.points[selected]} />
-              )}
-            </div>
-          )}
-          {latestCaps.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
-              <Faint>capabilities:</Faint>
-              {latestCaps.map((cap) => (
-                <Pill key={cap} color="cyan">
-                  {cap}
-                </Pill>
-              ))}
-            </div>
-          )}
-          {timeline.countedToward.length > 0 && (
-            <div>
-              <Faint>also counted toward:</Faint>{" "}
-              {timeline.countedToward.map((lo, i) => (
-                <span key={lo.learningObjectId} style={{ color: COLOR.amberLink }}>
-                  {lo.learningObjectTitle}
-                  {i < timeline.countedToward.length - 1 ? ", " : ""}
-                </span>
-              ))}
-            </div>
-          )}
         </>
       )}
     </div>
   );
 }
 
-export function FacetEvidenceDrawer({ facetId, onClose }: { facetId: string; onClose: () => void }) {
+export function FacetEvidenceDrawer({
+  facetId,
+  onClose,
+  onInspect
+}: {
+  facetId: string;
+  onClose: () => void;
+  onInspect: (entityId: string) => void;
+}) {
   return (
-    <div
-      style={{
-        border: `1px solid ${COLOR.borderStrong}`,
-        borderRadius: 4,
-        padding: 12,
-        fontFamily: FONT_MONO,
-        background: COLOR.bgElev,
-      }}
+    <CommandOverlayFrame
+      command="show"
+      context={facetId}
+      badge={<Pill color="cyan">facet evidence</Pill>}
+      footerKeys={<span><span style={{ color: COLOR.text }}>esc</span> close</span>}
+      footerRight={<span>evidence receipt · <Dim>learnloop show {facetId}</Dim></span>}
+      onClose={onClose}
+      ariaLabel={`Evidence for ${facetTitle(facetId)}`}
+      width="min(680px, 100%)"
+      zIndex={220}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <SectionHeader>Evidence · {shortFacet(facetId)}</SectionHeader>
-        <button
-          type="button"
-          onClick={onClose}
-          style={{ fontFamily: FONT_MONO, background: "transparent", border: "none", color: COLOR.textDim, cursor: "pointer" }}
-        >
-          ✕ close
-        </button>
+      <div className="ll-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+        <FacetEvidenceReceipt facetId={facetId} onInspect={onInspect} />
       </div>
-      <FacetEvidenceReceipt facetId={facetId} />
-    </div>
+    </CommandOverlayFrame>
   );
 }
+
+const receiptHeroStyle = {
+  padding: "14px 18px",
+  borderBottom: `1px solid ${COLOR.border}`,
+  background: `linear-gradient(110deg, ${COLOR.bgElev} 0%, ${COLOR.bg} 70%)`
+};
+
+const receiptStatusLineStyle = {
+  display: "flex",
+  flexWrap: "wrap" as const,
+  alignItems: "baseline",
+  rowGap: 4,
+  color: COLOR.textFaint,
+  fontSize: 10
+};
+
+const receiptContextStyle = {
+  color: COLOR.textFaint,
+  fontSize: 9,
+  letterSpacing: "0.14em",
+  textTransform: "uppercase" as const
+};
+
+const receiptSeparatorStyle = {
+  color: COLOR.textFaint,
+  margin: "0 7px"
+};
+
+const receiptTitleStyle = {
+  margin: 0,
+  color: COLOR.text,
+  fontSize: 17,
+  lineHeight: 1.3,
+  fontWeight: 600,
+  letterSpacing: "-0.02em"
+};
+
+const receiptBodyStyle = {
+  padding: "14px 18px 20px"
+};
+
+const receiptSectionLabelStyle = {
+  color: COLOR.amber,
+  fontSize: 9,
+  letterSpacing: "0.12em",
+  textTransform: "uppercase" as const,
+  marginBottom: 5
+};
+
+const observationEyebrowStyle = {
+  color: COLOR.amber,
+  fontSize: 9,
+  letterSpacing: "0.12em",
+  textTransform: "uppercase" as const
+};
+
+const receiptEntityLinkStyle = {
+  padding: 0,
+  border: 0,
+  background: "transparent",
+  color: COLOR.amberLink,
+  fontFamily: FONT_MONO,
+  fontSize: 10,
+  cursor: "pointer"
+};
+
+const receiptEntityLinkLabelStyle = {
+  textDecorationLine: "underline",
+  textDecorationThickness: "1px",
+  textUnderlineOffset: 3
+};

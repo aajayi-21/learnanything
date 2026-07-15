@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC
 from typing import Any
 
 from learnloop.clock import SystemClock, parse_utc
 from learnloop.db.repositories import GradingEvidenceRecord, Repository
+from learnloop.services.confusable_concepts import learner_observed_confusable_concepts
 from learnloop.services.grading import resolved_rubric
 from learnloop.services.mastery import display_mastery, sigmoid
 from learnloop.services.scheduler import (
@@ -165,6 +167,11 @@ def learning_object_detail(vault: LoadedVault, repository: Repository, learning_
     learning_object = vault.learning_objects.get(learning_object_id)
     if learning_object is None:
         raise SidecarError("not_found", f"Learning Object {learning_object_id} was not found.")
+    prerequisite_concepts = [
+        {**concept_reference_dto(vault, value), "source": "authored"}
+        for value in learning_object.prerequisites
+    ]
+    confusable_concepts = _learning_object_confusable_concepts(vault, repository, learning_object_id)
     return to_camel(
         {
             "id": learning_object.id,
@@ -176,6 +183,8 @@ def learning_object_detail(vault: LoadedVault, repository: Repository, learning_
             "summary": learning_object.summary,
             "prerequisites": learning_object.prerequisites,
             "confusables": learning_object.confusables,
+            "prerequisite_concepts": prerequisite_concepts,
+            "confusable_concepts": confusable_concepts,
             "difficulty_prior": learning_object.difficulty_prior,
             "tags": learning_object.tags,
             "mastery": mastery_dto(repository, learning_object.id, vault),
@@ -185,6 +194,120 @@ def learning_object_detail(vault: LoadedVault, repository: Repository, learning_
             "blueprints": list(learning_object.blueprints),
         }
     )
+
+
+def _learning_object_confusable_concepts(
+    vault: LoadedVault,
+    repository: Repository,
+    learning_object_id: str,
+) -> list[dict[str, Any]]:
+    learning_object = vault.learning_objects[learning_object_id]
+    rows = [
+        {**concept_reference_dto(vault, value), "source": "authored"}
+        for value in learning_object.confusables
+    ]
+    by_concept_id = {
+        str(row["concept_id"]): row
+        for row in rows
+        if row["resolved"] and row["concept_id"] is not None
+    }
+    for observed in learner_observed_confusable_concepts(vault, repository, learning_object_id):
+        metadata = {
+            "probability": observed.probability,
+            "prior_probability": observed.prior_probability,
+            "evidence_count": observed.evidence_count,
+            "last_observed_at": observed.last_observed_at,
+        }
+        existing = by_concept_id.get(observed.concept_id)
+        if existing is not None:
+            existing.update(metadata)
+            existing["source"] = "authored_and_learner_observed"
+            continue
+        row = {
+            **concept_reference_dto(vault, observed.concept_id),
+            **metadata,
+            "source": "learner_observed",
+        }
+        rows.append(row)
+        by_concept_id[observed.concept_id] = row
+    return rows
+
+
+def resolve_concept_id(vault: LoadedVault, reference: str) -> str | None:
+    """Resolve an exact concept id or an unambiguous title/alias reference."""
+
+    if reference in vault.concepts:
+        return reference
+    needle = _normalize_concept_reference(reference)
+    if not needle:
+        return None
+    matches: set[str] = set()
+    for concept_id, concept in vault.concepts.items():
+        values = [concept_id, concept.title, *concept.aliases]
+        if any(_normalize_concept_reference(value) == needle for value in values):
+            matches.add(concept_id)
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def concept_reference_dto(vault: LoadedVault, reference: str) -> dict[str, Any]:
+    concept_id = resolve_concept_id(vault, reference)
+    concept = vault.concepts.get(concept_id) if concept_id is not None else None
+    return {
+        "reference": reference,
+        "concept_id": concept_id,
+        "title": concept.title if concept is not None else reference,
+        "resolved": concept is not None,
+    }
+
+
+def concept_detail(vault: LoadedVault, concept_id: str) -> dict[str, Any]:
+    concept = vault.concepts.get(concept_id)
+    if concept is None:
+        raise SidecarError("not_found", f"Concept {concept_id} was not found.")
+
+    relations: list[dict[str, Any]] = []
+    for edge in sorted(vault.edges, key=lambda item: (item.relation_type, item.id)):
+        if edge.source != concept_id and edge.target != concept_id:
+            continue
+        other_id = edge.target if edge.source == concept_id else edge.source
+        direction = "outgoing" if edge.source == concept_id else "incoming"
+        relations.append(
+            {
+                "id": edge.id,
+                "relation_type": edge.relation_type,
+                "direction": direction,
+                "concept": concept_reference_dto(vault, other_id),
+                "strength": edge.strength,
+                "rationale": edge.rationale,
+            }
+        )
+
+    learning_objects = [
+        {
+            "id": learning_object.id,
+            "title": learning_object.title,
+            "knowledge_type": learning_object.knowledge_type,
+            "status": learning_object.status,
+        }
+        for learning_object in sorted(vault.learning_objects.values(), key=lambda item: (item.title.lower(), item.id))
+        if learning_object.concept == concept_id
+    ]
+    return to_camel(
+        {
+            "id": concept_id,
+            "title": concept.title,
+            "type": concept.type,
+            "aliases": concept.aliases,
+            "description": concept.description,
+            "tags": concept.tags,
+            "relations": relations,
+            "learning_objects": learning_objects,
+        }
+    )
+
+
+def _normalize_concept_reference(value: str) -> str:
+    return " ".join(part for part in re.split(r"[^a-z0-9]+", value.lower()) if part)
 
 
 def attempt_detail(vault: LoadedVault, repository: Repository, attempt_id: str) -> dict[str, Any]:

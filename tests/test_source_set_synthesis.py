@@ -262,6 +262,65 @@ def test_bootstrap_end_to_end_applies_learnable_map(tmp_path):
     assert links and links[0]["revision_id"] == "rev_text"
 
 
+def test_bootstrap_canonicalizes_prerequisite_and_confusable_concepts(tmp_path):
+    root, repo = _setup(tmp_path)
+
+    def builder(context, _call_count):
+        payload = _default_payload(context)
+        payload.concepts.extend(
+            [
+                SynthConcept(
+                    client_item_id="c_orthogonal",
+                    id="concept_orthogonal_matrix",
+                    title="Orthogonal matrix",
+                    aliases=["orthogonal matrices"],
+                ),
+                SynthConcept(
+                    client_item_id="c_general_diag",
+                    id="concept_general_diagonalization",
+                    title="General diagonalization",
+                ),
+            ]
+        )
+        learning_object = payload.learning_objects[0]
+        learning_object.prerequisite_concept_client_ids = ["c_orthogonal"]
+        learning_object.confusable_concept_client_ids = ["c_general_diag"]
+        return payload
+
+    create_study_map(
+        root,
+        "set_la",
+        client=FakeSynthesisClient(builder=builder),
+        repository=repo,
+        clock=_CLOCK,
+        apply=True,
+    )
+
+    learning_object = load_vault(root).learning_objects["lo_diagonalize_symmetric"]
+    assert learning_object.prerequisites == ["concept_orthogonal_matrix"]
+    assert learning_object.confusables == ["concept_general_diagonalization"]
+
+
+def test_bootstrap_rejects_unresolved_concept_relationships(tmp_path):
+    root, repo = _setup(tmp_path)
+
+    def builder(context, _call_count):
+        payload = _default_payload(context)
+        payload.learning_objects[0].prerequisites = ["free text that is not a concept"]
+        return payload
+
+    with pytest.raises(StudyMapError) as exc:
+        create_study_map(
+            root,
+            "set_la",
+            client=FakeSynthesisClient(builder=builder),
+            repository=repo,
+            clock=_CLOCK,
+        )
+
+    assert exc.value.code == "unresolved_concept_reference"
+
+
 def test_facets_cite_textbook_not_exam_and_held_out_wording_absent(tmp_path):
     root, repo = _setup(tmp_path, with_exam=True)
     client = FakeSynthesisClient()

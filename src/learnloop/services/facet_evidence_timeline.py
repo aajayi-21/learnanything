@@ -33,9 +33,10 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Any, Iterable
 
 from learnloop.clock import Clock, SystemClock, parse_utc
-from learnloop.db.repositories import Repository
+from learnloop.db.repositories import GradingEvidenceRecord, Repository
 from learnloop.services.capability_mapping import (
     CriterionOutcome,
     allocate_success_mass,
@@ -141,6 +142,36 @@ class TimelinePoint:
             "demonstrated_capabilities": list(self.demonstrated_capabilities),
             "derivation": [item.as_dict() for item in self.derivation],
         }
+
+
+@dataclass(frozen=True)
+class FacetTimelineSnapshot:
+    """Bulk-loaded immutable inputs for one evidence-ledger replay."""
+
+    attempts: tuple[dict[str, Any], ...]
+    grading_by_attempt: dict[str, tuple[GradingEvidenceRecord, ...]]
+    contracts_by_id: dict[str, dict[str, Any]]
+    merge_map: dict[str, str]
+
+
+def load_facet_timeline_snapshot(repository: Repository) -> FacetTimelineSnapshot:
+    """Load the complete timeline ledger with a bounded number of DB reads."""
+
+    grading_by_attempt: dict[str, list[GradingEvidenceRecord]] = defaultdict(list)
+    contract_ids: set[str] = set()
+    for record in repository.list_grading_evidence_history(include_superseded=True):
+        grading_by_attempt[record.attempt_id].append(record)
+        if record.assessment_contract_version_id:
+            contract_ids.add(record.assessment_contract_version_id)
+    return FacetTimelineSnapshot(
+        attempts=tuple(repository.list_attempt_history()),
+        grading_by_attempt={
+            attempt_id: tuple(records)
+            for attempt_id, records in grading_by_attempt.items()
+        },
+        contracts_by_id=repository.fetch_assessment_contract_versions(contract_ids),
+        merge_map=repository.facet_merge_map(),
+    )
 
 
 def fold_demonstrated_timeline(
@@ -366,19 +397,26 @@ def _decoded_attribution(raw: str | None) -> object:
         return None
 
 
-def _observation_events(
-    vault: LoadedVault, repository: Repository, canonical_facet: str
-) -> list[ObservationEvent]:
-    """Extract ordered observation events for a facet from persisted rows.
+def _observation_events_by_facet(
+    vault: LoadedVault,
+    snapshot: FacetTimelineSnapshot,
+    canonical_facets: Iterable[str],
+) -> dict[str, list[ObservationEvent]]:
+    """Extract events for every requested facet in one grading-ledger walk.
 
     Reads the full grading history (``include_superseded=True``) so regrades
     surface as later epochs; attempts are ordered chronologically and epochs
     within an attempt by grading time.
     """
 
-    events: list[ObservationEvent] = []
+    requested = {
+        vault.canonical_facet_id(str(facet_id)) for facet_id in canonical_facets
+    }
+    events_by_facet: dict[str, list[ObservationEvent]] = {
+        facet_id: [] for facet_id in requested
+    }
     seen_groups_by_cell: dict[tuple[str, str], set[str]] = defaultdict(set)
-    merge_map = repository.facet_merge_map()
+    merge_map = snapshot.merge_map
 
     def resolve(facet_id: str) -> str:
         current = vault.canonical_facet_id(facet_id)
@@ -388,9 +426,9 @@ def _observation_events(
             current = merge_map[current]
         return current
 
-    for attempt in repository.list_attempt_history():
+    for attempt in snapshot.attempts:
         item = vault.practice_items.get(attempt["practice_item_id"])
-        rows = repository.fetch_grading_evidence(attempt["id"], include_superseded=True)
+        rows = snapshot.grading_by_attempt.get(str(attempt["id"]), ())
         # Group by immutable grading revision when present. Timestamp remains the
         # compatibility key for legacy/manual regrades; a FrozenClock can give
         # revisions the same timestamp, so it cannot be the primary new-data key.
@@ -447,7 +485,7 @@ def _observation_events(
             }
             contract = None
             if len(version_ids) == 1:
-                stored = repository.fetch_assessment_contract_version(next(iter(version_ids)))
+                stored = snapshot.contracts_by_id.get(next(iter(version_ids)))
                 contract = stored.get("contract") if stored is not None else None
             if contract is not None:
                 from learnloop.services.assessment_contracts import rubric_from_contract
@@ -484,56 +522,100 @@ def _observation_events(
                 resolve=resolve,
             )
             marked_by_latest_epoch = marked
-            per_capability = {
-                capability: credit
-                for (facet, capability), credit in credits.items()
-                if facet == canonical_facet
-            }
             # Avoid an event for a facet this historical epoch never targeted.
             historical_facets = {
                 resolve(target.facet)
                 for criterion in rubric.criteria
                 for target in criterion.targets
             }
-            if not per_capability and canonical_facet not in historical_facets:
-                continue
-            # §5.1 per-observation receipt for this facet's cells: raw vs capped
-            # credit and the binding cap rule, one entry per capability. Assisted
-            # epochs certify nothing, so the channel is "assisted" (zero credit).
-            derivation = tuple(
-                ObservationDerivation(
-                    capability=capability,
-                    channel=(
-                        "assisted"
-                        if assisted
-                        else relationship_by_cell.get((canonical_facet, capability), "direct")
-                    ),
-                    raw_credit=contribution.raw_credit,
-                    capped_credit=contribution.capped_credit,
-                    bound_by=contribution.bound_by,
+            credited_facets = {facet for facet, _capability in credits}
+            for canonical_facet in requested & (historical_facets | credited_facets):
+                per_capability = {
+                    capability: credit
+                    for (facet, capability), credit in credits.items()
+                    if facet == canonical_facet
+                }
+                # §5.1 per-observation receipt for this facet's cells: raw vs
+                # capped credit and the binding cap rule, one entry per
+                # capability. Assisted epochs certify nothing, so the channel
+                # is "assisted" (zero credit).
+                derivation = tuple(
+                    ObservationDerivation(
+                        capability=capability,
+                        channel=(
+                            "assisted"
+                            if assisted
+                            else relationship_by_cell.get(
+                                (canonical_facet, capability), "direct"
+                            )
+                        ),
+                        raw_credit=contribution.raw_credit,
+                        capped_credit=contribution.capped_credit,
+                        bound_by=contribution.bound_by,
+                    )
+                    for contribution in itemization
+                    if contribution.cell[0] == canonical_facet
+                    for capability in (contribution.cell[1],)
                 )
-                for contribution in itemization
-                if contribution.cell[0] == canonical_facet
-                for capability in (contribution.cell[1],)
-            )
-            events.append(
-                ObservationEvent(
-                    attempt_id=attempt["id"],
-                    event_at=epoch_at,
-                    kind="observation" if index == 0 else "correction",
-                    surface_group=group,
-                    assisted=assisted,
-                    per_capability_positive=per_capability,
-                    authoritative=True,
-                    primed=bool(attempt.get("primed")),
-                    derivation=derivation,
+                events_by_facet[canonical_facet].append(
+                    ObservationEvent(
+                        attempt_id=attempt["id"],
+                        event_at=epoch_at,
+                        kind="observation" if index == 0 else "correction",
+                        surface_group=group,
+                        assisted=assisted,
+                        per_capability_positive=per_capability,
+                        authoritative=True,
+                        primed=bool(attempt.get("primed")),
+                        derivation=derivation,
+                    )
                 )
-            )
         for cell, groups in marked_by_latest_epoch.items():
             seen_groups_by_cell[cell].update(groups)
     # Stable global order: by event time, then attempt id, then original order.
-    events.sort(key=lambda event: (event.event_at, event.attempt_id))
-    return events
+    for events in events_by_facet.values():
+        events.sort(key=lambda event: (event.event_at, event.attempt_id))
+    return events_by_facet
+
+
+def _observation_events(
+    vault: LoadedVault,
+    repository: Repository,
+    canonical_facet: str,
+) -> list[FacetEvidenceEvent]:
+    """Compatibility wrapper for callers that inspect one facet's events."""
+    snapshot = load_facet_timeline_snapshot(repository)
+    return _observation_events_by_facet(
+        vault,
+        snapshot,
+        [canonical_facet],
+    ).get(canonical_facet, [])
+
+
+def facet_evidence_timelines(
+    vault: LoadedVault,
+    repository: Repository,
+    facet_ids: Iterable[str],
+    *,
+    snapshot: FacetTimelineSnapshot | None = None,
+) -> dict[str, list[TimelinePoint]]:
+    """Build multiple Demonstrated curves from one bulk ledger replay."""
+
+    canonical = {
+        vault.canonical_facet_id(str(facet_id)) for facet_id in facet_ids
+    }
+    if not canonical:
+        return {}
+    loaded = snapshot or load_facet_timeline_snapshot(repository)
+    events_by_facet = _observation_events_by_facet(vault, loaded, canonical)
+    repeat_discount = _repeat_discount(vault)
+    return {
+        facet_id: fold_demonstrated_timeline(
+            events_by_facet.get(facet_id, []),
+            repeat_surface_discount=repeat_discount,
+        )
+        for facet_id in canonical
+    }
 
 
 def facet_evidence_timeline(
@@ -543,10 +625,7 @@ def facet_evidence_timeline(
     surface. Empty list when the facet has no graded evidence."""
 
     canonical = vault.canonical_facet_id(facet_id)
-    events = _observation_events(vault, repository, canonical)
-    return fold_demonstrated_timeline(
-        events, repeat_surface_discount=_repeat_discount(vault)
-    )
+    return facet_evidence_timelines(vault, repository, [canonical]).get(canonical, [])
 
 
 # -- §5.1 Ready derivation (B5 phase 2) ---------------------------------------

@@ -152,6 +152,40 @@ def test_in_session_regrade_is_not_double_listed(tmp_path):
     assert all(entry["kind"] != "regrade" for entry in changelog)
 
 
+def test_review_feed_bulk_loads_timeline_history_once(tmp_path, monkeypatch):
+    vault, repository = _seeded(tmp_path)
+    session_id = repository.create_session(clock=FrozenClock(NOW))
+    _record(vault, repository, at=NOW, points=4)
+    repository.end_session(session_id, clock=FrozenClock(NOW + timedelta(hours=1)))
+
+    calls = {"attempts": 0, "grading": 0}
+    original_attempts = repository.list_attempt_history
+    original_grading = repository.list_grading_evidence_history
+
+    def attempts_once():
+        calls["attempts"] += 1
+        return original_attempts()
+
+    def grading_once(*, include_superseded=False):
+        calls["grading"] += 1
+        return original_grading(include_superseded=include_superseded)
+
+    monkeypatch.setattr(repository, "list_attempt_history", attempts_once)
+    monkeypatch.setattr(repository, "list_grading_evidence_history", grading_once)
+    monkeypatch.setattr(
+        repository,
+        "fetch_grading_evidence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Review must not query grading evidence per attempt")
+        ),
+    )
+
+    changelog = build_learner_review_feed(vault, repository)["changelog"]
+
+    assert changelog[0]["facets_demonstrated"] == 1
+    assert calls == {"attempts": 1, "grading": 1}
+
+
 def test_algorithm_version_bump_yields_exactly_one_recalibration_entry(tmp_path):
     vault, repository = _seeded(tmp_path)
     # Two rebuilds under the same version → no recalibration; a third under a

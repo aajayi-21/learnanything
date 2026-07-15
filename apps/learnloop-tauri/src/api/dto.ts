@@ -419,6 +419,9 @@ export interface PracticeItemStateDto {
 export interface MasteryDto {
   mean: number;
   variance: number;
+  plausibleLower?: number;
+  plausibleUpper?: number;
+  plausibleMass?: number;
   evidenceCount: number;
   lastEvidenceAt: IsoTimestamp | null;
 }
@@ -1059,6 +1062,7 @@ export interface ProbeEpisodeInspectorDetail {
 export type InspectorEntity =
   | { version: number; kind: "practice_item"; id: string; detail: PracticeItemDetail }
   | { version: number; kind: "learning_object"; id: string; detail: LearningObjectDetail }
+  | { version: number; kind: "concept"; id: string; detail: ConceptInspectorDetail }
   | { version: number; kind: "attempt"; id: string; detail: AttemptInspectorDetail }
   | { version: number; kind: "error_event"; id: string; detail: ErrorEventDto }
   | { version: number; kind: "note"; id: string; detail: NoteInspectorDetail }
@@ -1066,7 +1070,7 @@ export type InspectorEntity =
   | { version: number; kind: "not_found"; id: string; suggestions: InspectorSearchResult[] };
 
 export interface InspectorSearchResult {
-  kind: "practice_item" | "learning_object" | "attempt" | "error_event";
+  kind: "practice_item" | "learning_object" | "concept" | "attempt" | "error_event";
   id: string;
   title: string;
   subtitle: string | null;
@@ -1083,6 +1087,8 @@ export interface LearningObjectDetail {
   summary: string;
   prerequisites: string[];
   confusables: string[];
+  prerequisiteConcepts?: ConceptReferenceDto[];
+  confusableConcepts?: ConceptReferenceDto[];
   difficultyPrior: number | null;
   tags: string[];
   mastery: MasteryDto | null;
@@ -1090,6 +1096,41 @@ export interface LearningObjectDetail {
   // distinct from the readiness *projection* in LoReadinessDto. Absent on legacy
   // LOs that predate blueprints. See LoBlueprintDto (graph-editor section).
   blueprints?: LoBlueprintDto[];
+}
+
+export interface ConceptReferenceDto {
+  reference: string;
+  conceptId: string | null;
+  title: string;
+  resolved: boolean;
+  source?: "authored" | "learner_observed" | "authored_and_learner_observed";
+  probability?: number;
+  priorProbability?: number;
+  evidenceCount?: number;
+  lastObservedAt?: IsoTimestamp | null;
+}
+
+export interface ConceptInspectorDetail {
+  id: string;
+  title: string;
+  type: "concept" | "procedure" | "skill" | "misconception";
+  aliases: string[];
+  description: string | null;
+  tags: string[];
+  relations: Array<{
+    id: string;
+    relationType: "prerequisite" | "confusable_with" | "part_of" | "related";
+    direction: "incoming" | "outgoing";
+    concept: ConceptReferenceDto;
+    strength: number;
+    rationale: string | null;
+  }>;
+  learningObjects: Array<{
+    id: string;
+    title: string;
+    knowledgeType: string;
+    status: string;
+  }>;
 }
 
 export interface CommandError {

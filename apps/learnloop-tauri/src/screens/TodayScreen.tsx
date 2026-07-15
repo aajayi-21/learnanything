@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api/client";
 import type {
   ClaimCandidateDto,
@@ -20,6 +20,7 @@ import { ClaimSurface, mintVisitId } from "../components/ClaimSurface";
 import { GoalBanner } from "../components/GoalBanner";
 import { GoalWizard } from "../components/GoalWizard";
 import { GoalReviewCard, type ReviewReason } from "../components/GoalReviewCard";
+import { FacetEvidenceDrawer } from "../components/KnowledgeModel";
 import { masteryTone } from "../app/algoConfig";
 import { MarkdownMath } from "../render/MarkdownMath";
 
@@ -39,6 +40,8 @@ export function TodayScreen({
   onEndSession,
   onInspect,
   onTakeExam,
+  noGoalBannerDismissed = false,
+  onDismissNoGoalBanner,
   onError
 }: {
   session: SessionSnapshot | null;
@@ -51,6 +54,8 @@ export function TodayScreen({
   onInspect: (id: string) => void;
   /** Wired by App.tsx to launch the ExamScreen for a goal; banner hides the exam button when absent. */
   onTakeExam?: (goalId: string) => void;
+  noGoalBannerDismissed?: boolean;
+  onDismissNoGoalBanner?: () => void;
   onError: (message: string) => void;
 }) {
   const [queue, setQueue] = useState<QueueSnapshot | null>(null);
@@ -61,6 +66,7 @@ export function TodayScreen({
   const [ending, setEnding] = useState(false);
   const [goals, setGoals] = useState<GoalDto[] | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [evidenceFacetId, setEvidenceFacetId] = useState<string | null>(null);
   const [dismissedReview, setDismissedReview] = useState<Set<string>>(() => new Set());
   const queueRequestRef = useRef<{ key: string; promise: Promise<QueueSnapshot>; id: number } | null>(null);
   const queueRequestSeqRef = useRef(0);
@@ -375,9 +381,10 @@ export function TodayScreen({
             onTakeExam={onTakeExam}
             onNewGoal={() => setWizardOpen(true)}
           />
-        ) : (
+        ) : !noGoalBannerDismissed ? (
           <NoGoalFallback
             pressure={decayPressure}
+            onDismiss={onDismissNoGoalBanner ?? (() => undefined)}
             onSetGoal={() => setWizardOpen(true)}
             onReadFirst={() => {
               const first = items[0];
@@ -396,7 +403,7 @@ export function TodayScreen({
               }
             }}
           />
-        )
+        ) : null
       ) : null}
 
       {reviewCandidate ? (
@@ -465,6 +472,7 @@ export function TodayScreen({
             producerVersion={algorithmVersion}
             onPractice={() => focusedItem && onOpenPractice(focusedItem.practiceItemId)}
             onInspect={onInspect}
+            onOpenFacet={setEvidenceFacetId}
             onError={onError}
           />
         </div>
@@ -483,6 +491,17 @@ export function TodayScreen({
 
       {wizardOpen ? (
         <GoalWizard onClose={() => setWizardOpen(false)} onCreated={refreshAfterGoalChange} onError={onError} />
+      ) : null}
+
+      {evidenceFacetId ? (
+        <FacetEvidenceDrawer
+          facetId={evidenceFacetId}
+          onClose={() => setEvidenceFacetId(null)}
+          onInspect={(entityId) => {
+            setEvidenceFacetId(null);
+            onInspect(entityId);
+          }}
+        />
       ) : null}
     </div>
   );
@@ -701,7 +720,7 @@ function QueueRow({
         borderLeft: `3px solid ${borderLeft}`,
         cursor: "pointer",
         display: "grid",
-        gridTemplateColumns: "34px 1fr 180px 200px 130px",
+        gridTemplateColumns: "34px minmax(0, 1fr) 200px 130px",
         gap: 18,
         alignItems: "center",
         transition: "background 100ms ease"
@@ -748,11 +767,6 @@ function QueueRow({
           <Faint>·</Faint>
           <Pill color={modePillColor(item.practiceMode)}>{item.practiceMode}</Pill>
         </div>
-      </div>
-
-      <div style={{ fontSize: 11, color: COLOR.textDim, lineHeight: 1.35 }}>
-        <Faint>chosen because</Faint>
-        <div style={{ color: COLOR.text, marginTop: 3 }}>{item.dominantReason}</div>
       </div>
 
       <span style={{ display: "inline-flex", gap: 10, alignItems: "center", fontSize: 12 }}>
@@ -888,6 +902,7 @@ function QueueDetail({
   producerVersion,
   onPractice,
   onInspect,
+  onOpenFacet,
   onError
 }: {
   item: ScheduledItemDto | null;
@@ -897,6 +912,7 @@ function QueueDetail({
   producerVersion: string;
   onPractice: () => void;
   onInspect: (id: string) => void;
+  onOpenFacet: (facetId: string) => void;
   onError: (message: string) => void;
 }) {
   if (!item) {
@@ -1006,9 +1022,16 @@ function QueueDetail({
           <SectionHeader>Evidence facets</SectionHeader>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {detail.evidenceFacets.map((facet) => (
-              <Pill key={facet} color="cyan">
-                {facet}
-              </Pill>
+              <button
+                key={facet}
+                type="button"
+                onClick={() => onOpenFacet(facet)}
+                title={`learnloop show ${facet}`}
+                aria-label={`Open evidence receipt for ${facet}`}
+                style={evidenceFacetButtonStyle}
+              >
+                <Pill color="cyan" style={{ cursor: "pointer" }}>↗ {facet}</Pill>
+              </button>
             ))}
           </div>
         </>
@@ -1020,6 +1043,13 @@ function QueueDetail({
     </div>
   );
 }
+
+const evidenceFacetButtonStyle: CSSProperties = {
+  padding: 0,
+  border: 0,
+  background: "transparent",
+  cursor: "pointer"
+};
 
 function QueueRankingStrip({ algorithmVersion }: { algorithmVersion: string }) {
   return (
@@ -1150,11 +1180,13 @@ function ReentryPanel({ summary }: { summary: ReentrySummaryDto }) {
 // list fills the hero slot. Fresh vault (no history): three real actions.
 function NoGoalFallback({
   pressure,
+  onDismiss,
   onSetGoal,
   onReadFirst,
   onDiagnostic
 }: {
   pressure: DecayPressureDto | null;
+  onDismiss: () => void;
   onSetGoal: () => void;
   onReadFirst: () => void;
   onDiagnostic: () => void;
@@ -1175,12 +1207,20 @@ function NoGoalFallback({
       {label}
     </span>
   );
+  const dismiss = (
+    <button type="button" onClick={onDismiss} title="dismiss" aria-label="Dismiss no active goal banner" style={dismissBannerButtonStyle}>
+      ×
+    </button>
+  );
 
   if (pressure && pressure.hasHistory && pressure.facets.length > 0) {
     return (
       <div style={{ margin: "16px 24px 0", padding: "14px 18px", border: `1px solid ${COLOR.border}` }}>
-        <div style={{ fontSize: 11, color: COLOR.amber, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.14em" }}>
-          decay pressure — no active goal
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ fontSize: 11, color: COLOR.amber, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.14em", flex: 1 }}>
+            decay pressure — no active goal
+          </div>
+          {dismiss}
         </div>
         <div style={{ marginTop: 4, fontSize: 11, color: COLOR.textFaint }}>
           facets crossing the recall target soonest
@@ -1210,8 +1250,11 @@ function NoGoalFallback({
   // Fresh vault: no goal, no history.
   return (
     <div style={{ margin: "16px 24px 0", padding: "14px 18px", border: `1px dashed ${COLOR.border}` }}>
-      <div style={{ fontSize: 13, color: COLOR.textDim, lineHeight: 1.6 }}>
-        No goal yet, and not enough practice history to project decay. Start here:
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ fontSize: 13, color: COLOR.textDim, lineHeight: 1.6, flex: 1 }}>
+          No goal yet, and not enough practice history to project decay. Start here:
+        </div>
+        {dismiss}
       </div>
       <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
         {action("read first", onReadFirst)}
@@ -1221,6 +1264,17 @@ function NoGoalFallback({
     </div>
   );
 }
+
+const dismissBannerButtonStyle: CSSProperties = {
+  border: 0,
+  background: "transparent",
+  color: COLOR.textFaint,
+  padding: "0 4px",
+  fontFamily: FONT_MONO,
+  fontSize: 16,
+  lineHeight: 1,
+  cursor: "pointer"
+};
 
 function unique(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)));

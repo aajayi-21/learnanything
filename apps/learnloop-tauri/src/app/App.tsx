@@ -68,6 +68,9 @@ export function App() {
   // screen, which refreshes progress. Entered from the command palette.
   const [calibrationSessionId, setCalibrationSessionId] = useState<string | null>(null);
   const [inspectorId, setInspectorId] = useState<string | null>(null);
+  // Review is a command overlay (`learnloop diff`), not a body-replacing tab.
+  // Keep the current screen mounted beneath it just as `learnloop show` does.
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [libraryFocus, setLibraryFocus] = useState<{ patchId: string; itemId: string } | null>(null);
   const [proposalFocusPatchId, setProposalFocusPatchId] = useState<string | null>(null);
   const [ingestJobId, setIngestJobId] = useState<string | null>(null);
@@ -78,6 +81,10 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [finishSummary, setFinishSummary] = useState<SessionEndSummary | null>(null);
   const [askTarget, setAskTarget] = useState<AskTarget | null>(null);
+  // Today unmounts when navigating to another tab. Keep this dismissal at the
+  // app/session level so the no-goal decay banner stays dismissed when the
+  // learner returns during the same practice session.
+  const [todayNoGoalBannerDismissed, setTodayNoGoalBannerDismissed] = useState(false);
   // In-memory mirror of the practice draft, reported by PracticeScreen when it
   // unmounts. The backend checkpoint is also updated, but `session.checkpoint`
   // is only loaded at startup — without this mirror, esc-ing to Today and
@@ -151,8 +158,8 @@ export function App() {
         return;
       }
       if (textTarget) return;
-      if (event.altKey && /^[1-8]$/.test(event.key)) {
-        const next = navTabs[Number(event.key) - 1];
+      if (event.altKey && /^[0-9]$/.test(event.key)) {
+        const next = navTabs.find((candidate) => candidate.key === event.key);
         if (next) {
           gotoTab(next.id);
           event.preventDefault();
@@ -218,6 +225,7 @@ export function App() {
   );
 
   function beginSession(next: SessionSnapshot) {
+    setTodayNoGoalBannerDismissed(false);
     setSession(next);
     setTab("today");
     setTodayStage("queue");
@@ -270,6 +278,7 @@ export function App() {
   }
 
   function endSession(summary: SessionEndSummary) {
+    setTodayNoGoalBannerDismissed(false);
     setSession(null);
     setLocalDraft(null);
     setPracticeItemId(null);
@@ -285,6 +294,11 @@ export function App() {
   }
 
   function gotoTab(next: TopTab) {
+    if (next === "errors") {
+      setReviewOpen(true);
+      return;
+    }
+    setReviewOpen(false);
     setTab(next);
     if (next !== "today") setTodayStage("queue");
   }
@@ -368,6 +382,7 @@ export function App() {
         setAlgoConfig(next.config);
         setSnapshot(next);
         setSession(next.activeSession ?? null);
+        setTodayNoGoalBannerDismissed(false);
         setPracticeItemId(null);
         setAttemptId(null);
         setBlockReview(null);
@@ -490,6 +505,8 @@ export function App() {
           onEndSession={endSession}
           onInspect={setInspectorId}
           onTakeExam={openExam}
+          noGoalBannerDismissed={todayNoGoalBannerDismissed}
+          onDismissNoGoalBanner={() => setTodayNoGoalBannerDismissed(true)}
           onError={onError}
         />
       );
@@ -517,6 +534,7 @@ export function App() {
           onFileFocusConsumed={() => setLibraryFilePath(null)}
           onAsk={setAskTarget}
           onNoteSelected={setLibraryNoteId}
+          onInspect={setInspectorId}
         />
       );
     }
@@ -557,10 +575,6 @@ export function App() {
         />
       );
     }
-    // F2 Review (§4.9) — keeps the stable tab id "errors".
-    if (tab === "errors") {
-      return <ReviewScreen onError={onError} onRepair={openRepair} />;
-    }
     return <EmptyPlaceholder title={tab} />;
   }
 
@@ -580,6 +594,18 @@ export function App() {
         {toast ? <div className="toast" onClick={() => setToast(null)}>{toast}</div> : null}
         {renderBody()}
       </TerminalFrame>
+      {reviewOpen ? (
+        <ReviewScreen
+          onClose={() => setReviewOpen(false)}
+          onError={onError}
+          onRepair={(misconceptionId) => {
+            setReviewOpen(false);
+            openRepair(misconceptionId);
+          }}
+          onInspect={setInspectorId}
+          inspectorOpen={Boolean(inspectorId)}
+        />
+      ) : null}
       <InspectorOverlay
         entityId={inspectorId}
         onClose={() => setInspectorId(null)}

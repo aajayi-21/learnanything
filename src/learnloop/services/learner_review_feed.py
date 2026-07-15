@@ -6,7 +6,7 @@ from typing import Any
 
 from learnloop.db.repositories import Repository
 from learnloop.services.remediation import misconception_status_history
-from learnloop.services.session_learning_diff import session_learning_diff
+from learnloop.services.session_learning_diff import session_learning_diffs
 from learnloop.vault.models import LoadedVault
 
 
@@ -35,9 +35,11 @@ def build_learner_review_feed(
     # in-session (already counted as the session diff's `corrections`) and
     # out-of-session (surfaced here as their own system-authored entries).
     session_windows: list[tuple[str, str]] = []
-    for session in repository.review_session_rows():
+    sessions = repository.review_session_rows()
+    learning_diffs = session_learning_diffs(vault, repository, sessions)
+    for session in sessions:
         attempts = session["attempts"]
-        learning_diff = session_learning_diff(vault, repository, session["id"])
+        learning_diff = learning_diffs.get(str(session["id"]), _empty_belief_change())
         started_at = session.get("started_at")
         ended_at = session.get("ended_at")
         if started_at is not None and ended_at is not None:

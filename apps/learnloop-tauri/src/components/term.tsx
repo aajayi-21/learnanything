@@ -3,7 +3,8 @@
 // the handoff layout language (Today, Graph, Library). The desktop shell/nav in
 // ui.tsx keeps its own CSS-class styling; these primitives style screen *bodies*.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 
 export const COLOR = {
@@ -352,45 +353,160 @@ export function DisclosureHeader({
   open,
   onToggle,
   children,
+  eyebrow,
+  description,
+  meta,
+  tooltip,
+  tone = COLOR.amber,
   style = {}
 }: {
   open: boolean;
   onToggle: () => void;
   children: ReactNode;
+  eyebrow?: ReactNode;
+  description?: ReactNode;
+  meta?: ReactNode;
+  tooltip?: ReactNode;
+  tone?: string;
   style?: CSSProperties;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={open}
-      style={{
-        width: "100%",
-        marginTop: 22,
-        marginBottom: open ? 12 : 0,
-        padding: 0,
-        border: "none",
-        background: "transparent",
-        display: "flex",
-        alignItems: "baseline",
-        gap: 8,
-        color: COLOR.amber,
-        fontFamily: FONT_MONO,
-        fontSize: 14,
-        textAlign: "left",
-        cursor: "pointer",
-        ...style
-      }}
-    >
-      <span aria-hidden style={{ color: open ? COLOR.amber : COLOR.textFaint, fontSize: 11, width: 10 }}>
-        {open ? "▾" : "▸"}
-      </span>
-      <span style={{ textDecoration: "underline", textUnderlineOffset: 3 }}>{children}</span>
-      <span style={{ flex: 1 }} />
-      <span style={{ color: COLOR.textFaint, fontSize: 10, fontWeight: 400 }}>
-        {open ? "collapse" : "expand"}
-      </span>
-    </button>
+    <div style={{ display: "flex", alignItems: "baseline", gap: 8, width: "100%", marginTop: 22, marginBottom: open ? 14 : 0, ...style }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: 0,
+          border: "none",
+          background: "transparent",
+          display: "flex",
+          alignItems: "baseline",
+          gap: 8,
+          color: tone,
+          fontFamily: FONT_MONO,
+          textAlign: "left",
+          cursor: "pointer"
+        }}
+      >
+        <span style={{ flex: 1, minWidth: 0 }}>
+          {eyebrow ? (
+            <span style={{ display: "block", color: COLOR.textFaint, fontSize: 11, marginBottom: 3 }}>
+              {eyebrow}
+            </span>
+          ) : null}
+          <span style={{ color: tone, fontSize: 14, fontWeight: 400, textDecoration: "underline", textDecorationThickness: "1px", textUnderlineOffset: 3 }}>
+            {children}
+          </span>
+          {description ? (
+            <span style={{ display: "block", color: COLOR.textDim, fontSize: 11, fontWeight: 400, lineHeight: 1.5, marginTop: 6, maxWidth: 720 }}>
+              {description}
+            </span>
+          ) : null}
+        </span>
+        <span style={{ color: COLOR.textFaint, fontSize: 11, fontWeight: 400, whiteSpace: "nowrap" }}>
+          {meta ? <span style={{ marginRight: 12 }}>{meta}</span> : null}
+          {open ? "▾ collapse" : "▸ expand"}
+        </span>
+      </button>
+      {tooltip ? <HelpTooltip label={`About ${String(children)}`}>{tooltip}</HelpTooltip> : null}
+    </div>
+  );
+}
+
+export function HelpTooltip({ label, children }: { label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ left: number; width: number; top?: number; bottom?: number } | null>(null);
+  const tooltipId = useId();
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setPosition(null);
+      return;
+    }
+    const updatePosition = () => {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const viewportPadding = 8;
+      const width = Math.min(320, window.innerWidth - viewportPadding * 2);
+      const left = Math.max(viewportPadding, Math.min(rect.right - width, window.innerWidth - width - viewportPadding));
+      const roomBelow = window.innerHeight - rect.bottom;
+      setPosition(
+        roomBelow >= 150
+          ? { left, width, top: rect.bottom + 6 }
+          : { left, width, bottom: window.innerHeight - rect.top + 6 }
+      );
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open]);
+
+  return (
+    <span style={{ display: "inline-flex", flexShrink: 0 }}>
+      <button
+        ref={anchorRef}
+        type="button"
+        aria-label={label}
+        aria-describedby={open ? tooltipId : undefined}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        style={{
+          width: 17,
+          height: 17,
+          padding: 0,
+          border: `1px solid ${COLOR.borderStrong}`,
+          borderRadius: "50%",
+          background: "transparent",
+          color: open ? COLOR.amber : COLOR.textFaint,
+          fontFamily: FONT_MONO,
+          fontSize: 10,
+          lineHeight: "15px",
+          textAlign: "center",
+          cursor: "help"
+        }}
+      >
+        ?
+      </button>
+      {open && position ? createPortal(
+          <span
+            id={tooltipId}
+            role="tooltip"
+            style={{
+              position: "fixed",
+              zIndex: 1000,
+              left: position.left,
+              width: position.width,
+              top: position.top,
+              bottom: position.bottom,
+              maxHeight: "min(280px, calc(100vh - 16px))",
+              overflowY: "auto",
+              padding: "9px 10px",
+              border: `1px solid ${COLOR.borderStrong}`,
+              background: COLOR.bgElev,
+              boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+              color: COLOR.textDim,
+              fontFamily: FONT_MONO,
+              fontSize: 11,
+              fontWeight: 400,
+              lineHeight: 1.5,
+              textAlign: "left"
+            }}
+          >
+            {children}
+          </span>,
+          document.body
+        ) : null}
+    </span>
   );
 }
 

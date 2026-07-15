@@ -20,7 +20,7 @@ PROBE_DIALOGUE_TURN_PROMPT_VERSION = "mvp-0.6-probe-dialogue-turn"
 PROMOTION_ANALYSIS_PROMPT_VERSION = "mvp-0.1-promotion-analysis"
 TUTOR_PROMOTION_PROMPT_VERSION = "mvp-0.1-tutor-promotion"
 SOURCE_UNIT_INVENTORY_PROMPT_VERSION = "mvp-0.7-source-unit-inventory-role-aware"
-SOURCE_SET_SYNTHESIS_PROMPT_VERSION = "mvp-0.7-source-set-synthesis-bootstrap"
+SOURCE_SET_SYNTHESIS_PROMPT_VERSION = "mvp-0.7-source-set-synthesis-concept-relations"
 APPEND_RECONCILIATION_PROMPT_VERSION = "mvp-0.7-append-reconciliation"
 
 # spec_misconception_diagnostics.md §5.2 — the five constraints a generated
@@ -301,6 +301,13 @@ facet -> learning-object/blueprint -> criterion -> practice-item chain, and set
 the service can normalize the dependency graph. Never emit a blueprint recipe or
 criterion target that references a facet you did not also propose (or that is not
 already registered).
+For Learning Object prerequisites and confusables, use
+`prerequisite_concept_client_ids`/`confusable_concept_client_ids` when referring
+to concepts proposed in this response. Use `prerequisites`/`confusables` only for
+canonical concept ids from `registry_index`. Never put titles, aliases, or free
+text in those lists. A prerequisite is expected upstream knowledge; a confusable
+is a plausible concept substitution worth contrastive discrimination, not merely
+a related topic.
 6. IDENTIFIABILITY: do not mint two facets that no assessment can distinguish. If
 a distinction matters but no criterion/recipe can separate the facets, either
 author a distinguishing criterion/item or collapse them.

@@ -11,6 +11,7 @@ from learnloop.clock import FrozenClock
 from learnloop.services.facet_evidence_timeline import (
     ObservationEvent,
     facet_evidence_timeline,
+    facet_evidence_timelines,
     fold_demonstrated_timeline,
 )
 
@@ -144,6 +145,45 @@ def test_hinted_attempt_contributes_flat_point(blueprint_vault):
     # Assisted evidence earns no certification credit (§5.4): the curve stays at 0.
     assert series
     assert series[-1].demonstrated == 0.0
+
+
+def test_bulk_timelines_read_grading_history_once(blueprint_vault, monkeypatch):
+    vault, repository = blueprint_vault
+    _attempt(vault, repository, "pi_comp_a", 4)
+
+    calls = {"attempts": 0, "grading": 0, "contracts": 0}
+    original_attempts = repository.list_attempt_history
+    original_grading = repository.list_grading_evidence_history
+    original_contracts = repository.fetch_assessment_contract_versions
+
+    def attempts_once():
+        calls["attempts"] += 1
+        return original_attempts()
+
+    def grading_once(*, include_superseded=False):
+        calls["grading"] += 1
+        return original_grading(include_superseded=include_superseded)
+
+    def contracts_once(version_ids):
+        calls["contracts"] += 1
+        return original_contracts(version_ids)
+
+    monkeypatch.setattr(repository, "list_attempt_history", attempts_once)
+    monkeypatch.setattr(repository, "list_grading_evidence_history", grading_once)
+    monkeypatch.setattr(repository, "fetch_assessment_contract_versions", contracts_once)
+    monkeypatch.setattr(
+        repository,
+        "fetch_grading_evidence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk timeline replay must not query per attempt")
+        ),
+    )
+
+    timelines = facet_evidence_timelines(vault, repository, [COMP_A, INTEG])
+
+    assert timelines[COMP_A][-1].demonstrated > 0.0
+    assert timelines[INTEG] == []
+    assert calls == {"attempts": 1, "grading": 1, "contracts": 1}
 
 
 def test_real_regrade_renders_as_correction_step(blueprint_vault):

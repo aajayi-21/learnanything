@@ -415,6 +415,8 @@ def _normalize(synth: Any, inputs: _SynthesisInputs, vault: LoadedVault, now: st
 
     # id assignment maps: client_item_id -> entity id
     concept_ids: dict[str, str] = {}
+    concept_client_for_id: dict[str, str] = {}
+    concept_reference_index: dict[str, set[str]] = {}
     facet_client_to_id: dict[str, str] = {}
     lo_client_to_id: dict[str, str] = {}
 
@@ -429,6 +431,15 @@ def _normalize(synth: Any, inputs: _SynthesisInputs, vault: LoadedVault, now: st
         used_ids.add(candidate)
         return candidate
 
+    def register_concept_reference(concept_id: str, *values: str) -> None:
+        for value in (concept_id, *values):
+            key = snake_case(str(value or ""))
+            if key:
+                concept_reference_index.setdefault(key, set()).add(concept_id)
+
+    for existing_id, existing in vault.concepts.items():
+        register_concept_reference(existing_id, existing.title, *existing.aliases)
+
     # concepts
     for concept in getattr(synth, "concepts", []) or []:
         c = d(concept)
@@ -436,11 +447,52 @@ def _normalize(synth: Any, inputs: _SynthesisInputs, vault: LoadedVault, now: st
         cid = unique(str(cid))
         ckey = c.get("client_item_id") or cid
         concept_ids[ckey] = cid
+        concept_client_for_id[cid] = ckey
+        register_concept_reference(cid, c.get("title") or "", *(c.get("aliases") or []))
         payload = {"id": cid, "title": c.get("title") or cid, "type": c.get("type") or "concept",
-                   "description": c.get("description") or ""}
+                   "description": c.get("description") or "", "aliases": c.get("aliases") or []}
         rows.append(_row("concept", cid, payload, [], client_id=ckey, now=now))
         gate_items.append(GateItem(client_item_id=ckey, item_type="concept",
                                    entity_id=cid, payload=payload, establishes_semantic=False))
+
+    def resolve_concept_reference(reference: str) -> tuple[str | None, str | None]:
+        if reference in concept_ids:
+            return concept_ids[reference], reference
+        if reference in vault.concepts:
+            return reference, None
+        if reference in concept_client_for_id:
+            return reference, concept_client_for_id[reference]
+        matches = concept_reference_index.get(snake_case(reference), set())
+        if len(matches) != 1:
+            return None, None
+        concept_id = next(iter(matches))
+        return concept_id, concept_client_for_id.get(concept_id)
+
+    def resolve_concept_references(
+        *,
+        learning_object_id: str,
+        field_name: str,
+        client_references: list[str],
+        canonical_references: list[str],
+    ) -> tuple[list[str], list[str]]:
+        resolved: list[str] = []
+        dependencies: list[str] = []
+        unresolved: list[str] = []
+        for reference in [*client_references, *canonical_references]:
+            concept_id, dependency = resolve_concept_reference(str(reference))
+            if concept_id is None:
+                unresolved.append(str(reference))
+                continue
+            if concept_id not in resolved:
+                resolved.append(concept_id)
+            if dependency is not None and dependency not in dependencies:
+                dependencies.append(dependency)
+        if unresolved:
+            raise StudyMapError(
+                "unresolved_concept_reference",
+                f"Learning Object {learning_object_id} has unresolved {field_name}: {', '.join(unresolved)}",
+            )
+        return resolved, dependencies
 
     # facets
     for facet in getattr(synth, "facets", []) or []:
@@ -493,11 +545,25 @@ def _normalize(synth: Any, inputs: _SynthesisInputs, vault: LoadedVault, now: st
         oid = unique(str(oid))
         lokey = client or oid
         lo_client_to_id[lokey] = oid
-        concept_client = obj.get("concept_client_id") or ""
-        concept_id = (
-            concept_ids.get(concept_client)
-            or obj.get("concept_id")
-            or _slug("concept", obj.get("title", ""), oid)
+        concept_client = str(obj.get("concept_client_id") or "")
+        concept_reference = concept_client or str(obj.get("concept_id") or "")
+        concept_id, concept_dependency = resolve_concept_reference(concept_reference)
+        if concept_id is None:
+            raise StudyMapError(
+                "unresolved_concept_reference",
+                f"Learning Object {oid} has unresolved concept: {concept_reference or '(missing)'}",
+            )
+        prerequisites, prerequisite_dependencies = resolve_concept_references(
+            learning_object_id=oid,
+            field_name="prerequisites",
+            client_references=list(obj.get("prerequisite_concept_client_ids") or []),
+            canonical_references=list(obj.get("prerequisites") or []),
+        )
+        confusables, confusable_dependencies = resolve_concept_references(
+            learning_object_id=oid,
+            field_name="confusables",
+            client_references=list(obj.get("confusable_concept_client_ids") or []),
+            canonical_references=list(obj.get("confusables") or []),
         )
         gate_refs, yaml_refs, _spans = _span_refs(obj.get("provenance", []), inputs, default_relation="primary")
         payload = {
@@ -507,10 +573,17 @@ def _normalize(synth: Any, inputs: _SynthesisInputs, vault: LoadedVault, now: st
             "summary": obj.get("summary") or "",
             "subjects": [subject_id],
             "knowledge_type": obj.get("knowledge_type") or "concept",
-            "prerequisites": obj.get("prerequisites") or [],
+            "prerequisites": prerequisites,
+            "confusables": confusables,
             "provenance": {"origin": "codex_proposal", "source_refs": yaml_refs},
         }
-        deps = [concept_client] if concept_client and concept_client in concept_ids else []
+        deps = list(
+            dict.fromkeys(
+                dependency
+                for dependency in [concept_dependency, *prerequisite_dependencies, *confusable_dependencies]
+                if dependency
+            )
+        )
         rows.append(_row("learning_object", oid, payload, deps, client_id=lokey, now=now))
         gate_items.append(
             GateItem(

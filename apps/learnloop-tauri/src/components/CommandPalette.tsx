@@ -1,7 +1,7 @@
 // Command palette / inline `learnloop` shell.
 //
 // Open with Ctrl/Cmd+P or `:` from anywhere. Mirrors the MVP CLI surface:
-//   today · review · why · show · attempt · propose · proposals · accept ·
+//   today · review · diff · why · show · attempt · propose · proposals · accept ·
 //   reject · ingest · add-subject · add-note · merge-concepts · doctor ·
 //   init · goto · help · clear
 //
@@ -55,6 +55,7 @@ const GRAMMAR: Record<string, GrammarSpec> = {
   today: { help: "Launch the today loop", args: [], flags: [] },
   ask: { help: "Ask the tutor a question about the current context", args: [], flags: [] },
   review: { help: "Print the current due queue", args: [], flags: ["--energy", "--minutes", "--json"] },
+  diff: { help: "Open the learner-model change ledger", args: [], flags: [] },
   why: { help: "Explain a queued item's scheduler priority", args: [{ name: "practice_item_id", kind: "practice_item" }], flags: [] },
   show: { help: "Universal inspector — open any LO / PI / attempt / error", args: [{ name: "id", kind: "any" }], flags: [] },
   attempt: { help: "Open the practice screen for an item", args: [{ name: "practice_item_id", kind: "practice_item" }], flags: [] },
@@ -146,6 +147,11 @@ async function runCommand(name: string, args: string[], flags: Flags, ctx: CmdCt
     }
     case "review":
       return runReview(args, flags, ctx);
+    case "diff": {
+      ctx.onGoto("errors");
+      ctx.close();
+      return [{ type: "log", text: "→ learner-model diff" }];
+    }
     case "why":
       return runWhy(args);
     case "show":

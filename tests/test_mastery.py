@@ -69,4 +69,7 @@ def test_display_mastery_formula():
     display = display_mastery(state)
     assert display.mastery_mean == pytest.approx(0.5)
     assert display.mastery_variance == pytest.approx((0.5 * 0.5) ** 2 * 1.0)
+    assert display.plausible_lower == pytest.approx(1.0 - display.plausible_upper)
+    assert display.plausible_lower == pytest.approx(0.217, abs=0.001)
+    assert display.plausible_mass == pytest.approx(0.8)
     assert sigmoid(0.0) == pytest.approx(0.5)

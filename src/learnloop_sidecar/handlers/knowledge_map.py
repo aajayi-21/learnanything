@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from functools import lru_cache
 import hashlib
 import heapq
 import json
@@ -231,7 +232,7 @@ def _facet_field(vault, repository) -> dict[str, Any]:
 
     from learnloop.services.capability_mapping import CAPABILITY_VOCABULARY
     from learnloop.services.certification import is_demonstrated_credit
-    from learnloop.services.facet_evidence_timeline import facet_evidence_timeline
+    from learnloop.services.facet_evidence_timeline import facet_evidence_timelines
 
     facet_ids = {
         vault.canonical_facet_id(facet_id)
@@ -327,6 +328,16 @@ def _facet_field(vault, repository) -> dict[str, Any]:
             reason.source for reason in reasons
         )
 
+    # Correction badges need the same immutable evidence replay as Review.
+    # Build every facet timeline in one bulk pass rather than replaying the
+    # complete grading history independently for each point.
+    timelines = facet_evidence_timelines(vault, repository, facets)
+    latest_correction_by_facet = {
+        facet_id: corrections[-1]
+        for facet_id, timeline in timelines.items()
+        if (corrections := [point for point in timeline if point.is_correction])
+    }
+
     points: list[dict[str, Any]] = []
     for index, facet_id in enumerate(facets):
         requirement = sorted(required.get(facet_id, set()))
@@ -363,11 +374,7 @@ def _facet_field(vault, repository) -> dict[str, Any]:
             else:
                 status = "required"
             capabilities.append({"capability": capability, "status": status})
-        corrections = [
-            point for point in facet_evidence_timeline(vault, repository, facet_id)
-            if point.is_correction
-        ]
-        latest_correction = corrections[-1] if corrections else None
+        latest_correction = latest_correction_by_facet.get(facet_id)
         points.append(
             {
                 "id": facet_id,
@@ -799,6 +806,19 @@ def _blended_distances(
 
 
 def _classical_mds(distances: list[list[float]]) -> tuple[list[tuple[float, float]], float]:
+    """Cached exact MDS keyed by the deterministic distance matrix."""
+
+    frozen = tuple(tuple(float(value) for value in row) for row in distances)
+    coords, stress = _classical_mds_cached(frozen)
+    # Keep the historical mutable-list return contract; cached values remain
+    # immutable so no caller can corrupt a later viewing request.
+    return list(coords), stress
+
+
+@lru_cache(maxsize=32)
+def _classical_mds_cached(
+    distances: tuple[tuple[float, ...], ...]
+) -> tuple[tuple[tuple[float, float], ...], float]:
     """Torgerson classical MDS to 2D, plus Kruskal stress-1.
 
     Coordinates are rescaled uniformly (one shared factor, preserving the
@@ -807,9 +827,9 @@ def _classical_mds(distances: list[list[float]]) -> tuple[list[tuple[float, floa
 
     n = len(distances)
     if n == 0:
-        return [], 0.0
+        return (), 0.0
     if n == 1:
-        return [(0.0, 0.0)], 0.0
+        return ((0.0, 0.0),), 0.0
 
     # B = -1/2 * J D^2 J (double centering).
     sq = [[distances[i][j] ** 2 for j in range(n)] for i in range(n)]
@@ -853,7 +873,7 @@ def _classical_mds(distances: list[list[float]]) -> tuple[list[tuple[float, floa
     extent = max((max(abs(x), abs(y)) for x, y in coords), default=0.0)
     if extent > 0:
         coords = [(x / extent, y / extent) for x, y in coords]
-    return coords, stress
+    return tuple(coords), stress
 
 
 def _jacobi_eigh(matrix: list[list[float]]) -> tuple[list[float], list[list[float]]]:

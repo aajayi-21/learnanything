@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from math import copysign, exp, log
+from math import copysign, exp, log, sqrt
 from typing import TYPE_CHECKING, Any
 
 from learnloop.clock import parse_utc
@@ -64,6 +64,9 @@ class MasteryObservation:
 class MasteryDisplay:
     mastery_mean: float
     mastery_variance: float
+    plausible_lower: float
+    plausible_upper: float
+    plausible_mass: float
 
 
 @dataclass(frozen=True)
@@ -124,7 +127,19 @@ def logit(value: float) -> float:
 def display_mastery(state: MasteryState) -> MasteryDisplay:
     mean = sigmoid(state.logit_mean)
     variance = (mean * (1 - mean)) ** 2 * state.logit_variance
-    return MasteryDisplay(mastery_mean=mean, mastery_variance=variance)
+    # Central 80% interval of the Gaussian posterior in latent logit space,
+    # transformed to the display probability scale. Computing it here avoids
+    # the misleading probability-space approximation mean ± sqrt(variance).
+    plausible_mass = 0.8
+    central_80_z = 1.2815515655446004
+    logit_sd = sqrt(max(state.logit_variance, 0.0))
+    return MasteryDisplay(
+        mastery_mean=mean,
+        mastery_variance=variance,
+        plausible_lower=sigmoid(state.logit_mean - central_80_z * logit_sd),
+        plausible_upper=sigmoid(state.logit_mean + central_80_z * logit_sd),
+        plausible_mass=plausible_mass,
+    )
 
 
 def initial_mastery_state(learning_object_id: str, algorithm_version: str, now_iso: str) -> MasteryState:

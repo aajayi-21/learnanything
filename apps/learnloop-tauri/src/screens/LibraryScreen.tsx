@@ -46,7 +46,8 @@ function kindColor(kind: string | undefined): PillColor {
 // Single-character typed file glyph, matching the handoff legend.
 function FileGlyph({ name, kind }: { name: string; kind: string | undefined }) {
   if (name.startsWith("lo_")) return <span style={{ color: COLOR.purplePill }}>L</span>;
-  if (name.startsWith("pi_")) return <span style={{ color: COLOR.cyan }}>P</span>;
+  if (name.startsWith("pi_") || name.startsWith("practice_")) return <span style={{ color: COLOR.cyan }}>P</span>;
+  if (name.startsWith("concept_")) return <span style={{ color: COLOR.green }}>C</span>;
   if (kind === "md") return <span style={{ color: COLOR.green }}>m</span>;
   if (kind === "yaml") return <span style={{ color: COLOR.amber }}>y</span>;
   if (kind === "sqlite") return <span style={{ color: COLOR.pink }}>▦</span>;
@@ -56,9 +57,16 @@ function FileGlyph({ name, kind }: { name: string; kind: string | undefined }) {
 
 function entityPill(name: string): { color: PillColor; label: string } | null {
   if (name.startsWith("lo_")) return { color: "purple", label: "learning_object" };
-  if (name.startsWith("pi_")) return { color: "cyan", label: "practice_item" };
+  if (name.startsWith("pi_") || name.startsWith("practice_")) return { color: "cyan", label: "practice_item" };
+  if (name.startsWith("concept_")) return { color: "green", label: "concept" };
   if (name.startsWith("error_")) return { color: "red", label: "error_taxonomy" };
   return null;
+}
+
+function inspectableTreeEntityId(node: VaultTreeNode): string | null {
+  if (node.type !== "file") return null;
+  const stem = node.name.replace(/\.(?:ya?ml|json|md|txt)$/i, "");
+  return /^(?:lo_|pi_|practice_|concept_)/.test(stem) ? stem : null;
 }
 
 function firstFilePath(nodes: VaultTreeNode[]): string | null {
@@ -116,7 +124,8 @@ export function LibraryScreen({
   focusFilePath = null,
   onFileFocusConsumed,
   onAsk,
-  onNoteSelected
+  onNoteSelected,
+  onInspect
 }: {
   onError: (message: string) => void;
   focus?: { patchId: string; itemId: string } | null;
@@ -126,6 +135,7 @@ export function LibraryScreen({
   onFileFocusConsumed?: () => void;
   onAsk?: (target: { context: "library"; noteId: string }) => void;
   onNoteSelected?: (noteId: string | null) => void;
+  onInspect: (entityId: string) => void;
 }) {
   const [snapshot, setSnapshot] = useState<VaultTreeSnapshot | null>(null);
   const [proposals, setProposals] = useState<ProposalsSnapshot | null>(null);
@@ -532,7 +542,15 @@ export function LibraryScreen({
 
           <div style={{ padding: "8px 0" }}>
             {snapshot ? (
-              <TreeLevel nodes={snapshot.tree} depth={0} collapsed={collapsed} selected={selected} onToggle={toggleDir} onSelect={(path) => setSelected({ kind: "file", path })} />
+              <TreeLevel
+                nodes={snapshot.tree}
+                depth={0}
+                collapsed={collapsed}
+                selected={selected}
+                onToggle={toggleDir}
+                onSelect={(path) => setSelected({ kind: "file", path })}
+                onInspect={onInspect}
+              />
             ) : (
               <div style={{ padding: "8px 16px", color: COLOR.textFaint, fontSize: 13 }}>loading vault…</div>
             )}
@@ -642,7 +660,8 @@ function TreeLevel({
   collapsed,
   selected,
   onToggle,
-  onSelect
+  onSelect,
+  onInspect
 }: {
   nodes: VaultTreeNode[];
   depth: number;
@@ -650,6 +669,7 @@ function TreeLevel({
   selected: Selection;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
+  onInspect: (entityId: string) => void;
 }) {
   return (
     <div>
@@ -667,16 +687,30 @@ function TreeLevel({
                 <span style={{ color: COLOR.amberLink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, flex: 1 }}>{node.name}/</span>
               </div>
               {!isCollapsed && node.children ? (
-                <TreeLevel nodes={node.children} depth={depth + 1} collapsed={collapsed} selected={selected} onToggle={onToggle} onSelect={onSelect} />
+                <TreeLevel
+                  nodes={node.children}
+                  depth={depth + 1}
+                  collapsed={collapsed}
+                  selected={selected}
+                  onToggle={onToggle}
+                  onSelect={onSelect}
+                  onInspect={onInspect}
+                />
               ) : null}
             </div>
           );
         }
         const isSelected = selected?.kind === "file" && node.path === selected.path;
+        const inspectableId = inspectableTreeEntityId(node);
         return (
           <div
             key={node.path}
             onClick={() => onSelect(node.path)}
+            onContextMenu={inspectableId ? (event) => {
+              event.preventDefault();
+              onInspect(inspectableId);
+            } : undefined}
+            title={inspectableId ? `Right-click to learnloop show ${inspectableId}` : undefined}
             style={{
               padding: "2px 8px",
               paddingLeft: indent + 14,

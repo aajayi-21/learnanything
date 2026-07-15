@@ -903,6 +903,28 @@ class Repository:
             ).fetchall()
         return [_grading_evidence(row) for row in rows]
 
+    def list_grading_evidence_history(
+        self, *, include_superseded: bool = False
+    ) -> list[GradingEvidenceRecord]:
+        """Every grading-evidence row in stable replay order.
+
+        Timeline/report surfaces replay the immutable grading ledger.  Their
+        bulk path must not issue one query per attempt (and, historically, one
+        such query per facet per session), so expose the same records as
+        :meth:`fetch_grading_evidence` through one read.
+        """
+
+        superseded_filter = "" if include_superseded else " WHERE superseded_at IS NULL"
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM grading_evidence{superseded_filter}
+                ORDER BY attempt_id, created_at,
+                         COALESCE(grading_revision, -1), criterion_id, id
+                """
+            ).fetchall()
+        return [_grading_evidence(row) for row in rows]
+
     def find_attempt_id_by_evidence_agent_run(
         self,
         *,
@@ -6938,6 +6960,27 @@ class Repository:
         payload = dict(row)
         payload["contract"] = _loads(payload["contract_json"], {})
         return payload
+
+    def fetch_assessment_contract_versions(
+        self, version_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Bulk-load content-addressed assessment contracts by id."""
+
+        ids = sorted({str(version_id) for version_id in version_ids if version_id})
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM assessment_contract_versions WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        contracts: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            payload = dict(row)
+            payload["contract"] = _loads(payload["contract_json"], {})
+            contracts[str(payload["id"])] = payload
+        return contracts
 
     def insert_unresolved_cause_factor(
         self,

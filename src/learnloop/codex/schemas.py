@@ -609,6 +609,7 @@ class SynthConcept(BaseModel):
     title: str = ""
     type: Literal["concept", "procedure", "skill", "misconception"] = "concept"
     description: str = ""
+    aliases: list[str] = Field(default_factory=list)
 
 
 class SynthFacet(BaseModel):
@@ -666,7 +667,10 @@ class SynthLearningObject(BaseModel):
     title: str = ""
     summary: str = ""
     knowledge_type: str = ""
+    prerequisite_concept_client_ids: list[str] = Field(default_factory=list)
     prerequisites: list[str] = Field(default_factory=list)
+    confusable_concept_client_ids: list[str] = Field(default_factory=list)
+    confusables: list[str] = Field(default_factory=list)
     provenance: list[SynthSpanRef] = Field(default_factory=list)
 
 

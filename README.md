@@ -70,6 +70,17 @@ npm install
 npm run dev
 ```
 
+`marker-pdf` is not required for canonical source ingestion. Webpages, YouTube
+transcripts, Markdown, HTML, and text files do not use it, and text-based PDFs
+fall back to the base `pypdf` dependency. Marker is an optional, heavier PDF
+provider that preserves richer layout, tables, math, figures, and geometry; it
+is required for scanned or image-only PDFs that need OCR, or when
+`[ingest.pdf].engine` is explicitly set to `"marker"`. Install it with:
+
+```bash
+uv sync --extra dev --extra pdf
+```
+
 The Tauri shell starts the Python `learnloop_sidecar` automatically. When the
 tracked linear-algebra fixture is present, it is used as the development default.
 Click the green vault path in the app header to select another vault, or use the

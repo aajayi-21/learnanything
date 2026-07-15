@@ -10,7 +10,7 @@ from pathlib import Path
 from learnloop.db.repositories import Repository
 from learnloop.services.patches import apply_accepted_items
 from learnloop.vault.loader import add_note, load_vault
-from learnloop.vault.writer import upsert_learning_object
+from learnloop.vault.writer import upsert_concept, upsert_concept_edge, upsert_learning_object
 from learnloop_sidecar.server import serve
 
 from tests.helpers import ALGORITHM_VERSION, NOW_ISO, add_followup_item, create_basic_vault, seed_due_item
@@ -1054,6 +1054,69 @@ def test_sidecar_inspect_note_source_ref_with_timestamp_suffix(tmp_path):
     assert result["detail"]["locator"] == "t=1.0-2.0"
     assert result["detail"]["sourceType"] == "canonical_source"
     assert "Captioned explanation" in result["detail"]["body"]
+
+
+def test_sidecar_inspect_concept_and_resolve_lo_concept_references(tmp_path):
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    upsert_concept(
+        vault_root,
+        "matrix_factorization",
+        {
+            "title": "Matrix Factorization",
+            "type": "concept",
+            "aliases": ["matrix factors"],
+            "description": "Representing a matrix as a product of simpler factors.",
+            "tags": ["linear-algebra"],
+            "created_at": NOW_ISO,
+            "updated_at": NOW_ISO,
+        },
+    )
+    upsert_concept_edge(
+        vault_root,
+        {
+            "id": "edge_svd_matrix_factorization_confusable",
+            "relation_type": "confusable_with",
+            "source": "singular_value_decomposition",
+            "target": "matrix_factorization",
+            "strength": 0.7,
+            "rationale": "A learner may name the broader family instead of SVD.",
+            "created_at": NOW_ISO,
+            "updated_at": NOW_ISO,
+        },
+    )
+    loaded = load_vault(vault_root)
+    learning_object = loaded.learning_objects["lo_svd_definition"].model_dump(mode="json")
+    learning_object["prerequisites"] = ["matrix factors", "legacy free text"]
+    learning_object["confusables"] = ["matrix_factorization"]
+    upsert_learning_object(vault_root, learning_object)
+
+    responses = _rpc(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"vaultPath": str(vault_root)}},
+            {"jsonrpc": "2.0", "id": 2, "method": "inspect_entity", "params": {"id": "matrix factors"}},
+            {"jsonrpc": "2.0", "id": 3, "method": "inspect_entity", "params": {"id": "lo_svd_definition"}},
+        ]
+    )
+
+    concept = responses[1]["result"]
+    assert concept["kind"] == "concept"
+    assert concept["id"] == "matrix_factorization"
+    assert concept["detail"]["title"] == "Matrix Factorization"
+    assert concept["detail"]["learningObjects"] == []
+    assert concept["detail"]["relations"][0]["relationType"] == "confusable_with"
+    assert concept["detail"]["relations"][0]["concept"]["conceptId"] == "singular_value_decomposition"
+
+    detail = responses[2]["result"]["detail"]
+    assert detail["prerequisiteConcepts"][0] == {
+        "reference": "matrix factors",
+        "conceptId": "matrix_factorization",
+        "title": "Matrix Factorization",
+        "resolved": True,
+        "source": "authored",
+    }
+    assert detail["prerequisiteConcepts"][1]["resolved"] is False
+    assert detail["confusableConcepts"][0]["conceptId"] == "matrix_factorization"
 
 
 def test_sidecar_get_concept_graph_serializes_concepts_and_rollups(tmp_path):

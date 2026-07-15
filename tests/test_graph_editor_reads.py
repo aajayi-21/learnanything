@@ -29,6 +29,28 @@ from tests.test_km3_projections import COMP_A, COMP_B, INTEG, LO_ID, build_bluep
 FIXTURE_VAULT = Path(__file__).resolve().parents[1] / "fixtures" / "linear_algebra"
 
 
+def test_classical_mds_reuses_exact_cached_layout():
+    from learnloop_sidecar.handlers.knowledge_map import (
+        _classical_mds,
+        _classical_mds_cached,
+    )
+
+    distances = [
+        [0.0, 1.0, 0.5],
+        [1.0, 0.0, 0.75],
+        [0.5, 0.75, 0.0],
+    ]
+    _classical_mds_cached.cache_clear()
+
+    first = _classical_mds(distances)
+    second = _classical_mds(distances)
+
+    assert first == second
+    assert _classical_mds_cached.cache_info().hits == 1
+    first[0][0] = (99.0, 99.0)
+    assert _classical_mds(distances)[0][0] != (99.0, 99.0)
+
+
 def _call(ctx, name: str, params: dict):
     from learnloop_sidecar.registry import METHOD_REGISTRY
 

@@ -8,9 +8,11 @@ from learnloop_sidecar.context import SidecarContext
 from learnloop_sidecar.dto import ParamsModel, to_camel, versioned
 from learnloop_sidecar.handlers.serializers import (
     attempt_detail,
+    concept_detail,
     error_event_dto,
     learning_object_detail,
     practice_item_detail,
+    resolve_concept_id,
 )
 from learnloop_sidecar.registry import method
 
@@ -28,6 +30,9 @@ def inspect_entity(ctx: SidecarContext, params: InspectInput) -> dict[str, Any]:
         return versioned(
             {"kind": "learning_object", "id": params.id, "detail": learning_object_detail(vault, repository, params.id)}
         )
+    concept_id = resolve_concept_id(vault, params.id)
+    if concept_id is not None:
+        return versioned({"kind": "concept", "id": concept_id, "detail": concept_detail(vault, concept_id)})
     note_detail = _note_detail(vault, params.id)
     if note_detail is not None:
         return versioned({"kind": "note", "id": params.id, "detail": note_detail})
@@ -147,6 +152,25 @@ def _search_suggestions(vault: Any, query: str) -> list[dict[str, Any]]:
                     "id": learning_object.id,
                     "title": learning_object.title,
                     "subtitle": learning_object.knowledge_type,
+                    "score": score,
+                }
+            )
+
+    for concept_id, concept in vault.concepts.items():
+        score = max(
+            _match_score(normalized_query, concept_id),
+            _match_score(normalized_query, concept.title),
+            _match_score(normalized_query, concept.description),
+            _match_score(normalized_query, " ".join(concept.aliases)),
+            _match_score(normalized_query, " ".join(concept.tags)),
+        )
+        if score > 0:
+            suggestions.append(
+                {
+                    "kind": "concept",
+                    "id": concept_id,
+                    "title": concept.title,
+                    "subtitle": concept.type,
                     "score": score,
                 }
             )

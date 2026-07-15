@@ -16,23 +16,28 @@ import type {
   InspectorEntity,
   InspectorSearchResult,
   LearningObjectDetail,
+  MasteryDto,
   NoteInspectorDetail,
   ProbeEpisodeInspectorDetail,
   PracticeItemDetail,
   ErrorEventDto,
   CapabilityGridResult,
+  ConceptInspectorDetail,
+  ConceptReferenceDto,
   SchedulerComponents,
   SchedulerExplanationDto
 } from "../api/dto";
-import { BlockBar, COLOR, Dim, DisclosureHeader, Divider, Faint, FONT_MONO, Meta, modePillColor, Pill, SectionHeader, type PillColor } from "./term";
+import { BlockBar, COLOR, Dim, DisclosureHeader, Divider, Faint, FONT_MONO, HelpTooltip, Meta, modePillColor, Pill, SectionHeader, type PillColor } from "./term";
 import { CapabilityGridView } from "./KnowledgeModel";
 import { RecipeTreeEditor } from "./recipeedit/RecipeTreeEditor";
 import { MarkdownMath } from "../render/MarkdownMath";
+import { CommandOverlayFrame, commandOverlayActionStyle } from "./CommandOverlayFrame";
 
 // ── kind → header pill ──────────────────────────────────────────────────
 const KIND_PILL: Record<string, { color: PillColor; label: string }> = {
   practice_item: { color: "cyan", label: "practice_item" },
   learning_object: { color: "purple", label: "learning_object" },
+  concept: { color: "cyan", label: "concept" },
   attempt: { color: "amber", label: "attempt" },
   error_event: { color: "red", label: "error_event" },
   note: { color: "cyan", label: "note" },
@@ -147,28 +152,33 @@ export function InspectorOverlay({
   const pill = entity && entity.kind in KIND_PILL ? KIND_PILL[entity.kind] : null;
 
   return (
-    <div style={backdropStyle} onClick={onClose}>
-      <div style={modalStyle} onClick={(event) => event.stopPropagation()}>
-        {/* ── header ── */}
-        <div style={headerStyle}>
-          <span style={{ color: COLOR.amber, fontWeight: 700 }}>❯</span>
-          <span style={{ color: COLOR.text, fontSize: 13 }}>
-            learnloop <span style={{ color: COLOR.amber }}>show</span>
-          </span>
-          <Faint>·</Faint>
-          <span style={{ color: COLOR.amberLink, fontSize: 13, fontFamily: FONT_MONO }}>{entityId}</span>
-          {pill ? <Pill color={pill.color}>{pill.label}</Pill> : null}
-          <span style={{ flex: 1 }} />
-          {history.length > 0 ? (
-            <button type="button" onClick={back} style={headerActionStyle}>
-              ← back · {history.length}
-            </button>
+    <CommandOverlayFrame
+      command="show"
+      context={entityId}
+      badge={pill ? <Pill color={pill.color}>{pill.label}</Pill> : null}
+      headerActions={history.length > 0 ? (
+        <button type="button" onClick={back} style={commandOverlayActionStyle}>
+          ← back · {history.length}
+        </button>
+      ) : null}
+      footerKeys={(
+        <>
+          <span><span style={{ color: COLOR.text }}>esc</span> close</span>
+          <span><span style={{ color: COLOR.text }}>backspace</span> back</span>
+          {entity?.kind === "practice_item" ? <span><span style={{ color: COLOR.text }}>→</span> parent</span> : null}
+          {entity?.kind === "learning_object" && childPracticeItemId ? (
+            <span><span style={{ color: COLOR.text }}>←</span> child</span>
           ) : null}
-          <button type="button" onClick={onClose} style={{ ...headerActionStyle, color: COLOR.textDim, marginLeft: 6 }}>
-            esc ×
-          </button>
-        </div>
-
+        </>
+      )}
+      footerRight={(
+        <span>
+          CLI mirror · <Dim>learnloop show {entityId}</Dim>
+        </span>
+      )}
+      onClose={onClose}
+      ariaLabel={`Inspect ${entityId}`}
+    >
         {/* ── search ── */}
         <div style={{ padding: "10px 16px", borderBottom: `1px solid ${COLOR.border}`, flexShrink: 0 }}>
           <input
@@ -195,21 +205,7 @@ export function InspectorOverlay({
           )}
         </div>
 
-        {/* ── footer ── */}
-        <div style={footerStyle}>
-          <span><span style={{ color: COLOR.text }}>esc</span> close</span>
-          <span><span style={{ color: COLOR.text }}>backspace</span> back</span>
-          {entity?.kind === "practice_item" ? <span><span style={{ color: COLOR.text }}>→</span> parent</span> : null}
-          {entity?.kind === "learning_object" && childPracticeItemId ? (
-            <span><span style={{ color: COLOR.text }}>←</span> child</span>
-          ) : null}
-          <span style={{ flex: 1 }} />
-          <span>
-            CLI mirror · <Dim>learnloop show {entityId}</Dim>
-          </span>
-        </div>
-      </div>
-    </div>
+    </CommandOverlayFrame>
   );
 }
 
@@ -232,6 +228,8 @@ function InspectorEntityView({
       ? entity.detail.learningObjectTitle
       : entity.kind === "learning_object"
         ? entity.detail.title
+        : entity.kind === "concept"
+          ? entity.detail.title
         : entity.kind === "error_event"
           ? entity.detail.errorTitle ?? entity.detail.errorType
           : entity.kind === "note"
@@ -254,6 +252,8 @@ function InspectorEntityView({
           <PracticeItemBody detail={entity.detail} onGo={onGo} />
         ) : entity.kind === "learning_object" ? (
           <LearningObjectBody detail={entity.detail} childPracticeItemId={childPracticeItemId} onGo={onGo} />
+        ) : entity.kind === "concept" ? (
+          <ConceptBody detail={entity.detail} onGo={onGo} />
         ) : entity.kind === "error_event" ? (
           <ErrorEventBody detail={entity.detail} onGo={onGo} />
         ) : entity.kind === "note" ? (
@@ -339,14 +339,7 @@ function PracticeItemBody({ detail, onGo }: { detail: PracticeItemDetail; onGo: 
 
       <SectionHeader>Mastery · learning_object_mastery</SectionHeader>
       {mastery ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 12 }}>
-          <BlockBar value={mastery.mean} width={14} color={masteryColor(mastery.mean)} />
-          <span style={{ fontFamily: FONT_MONO, color: COLOR.text }}>{mastery.mean.toFixed(2)}</span>
-          <Faint>±{Math.sqrt(mastery.variance).toFixed(2)}</Faint>
-          <span style={{ flex: 1 }} />
-          <Faint>evidence</Faint>
-          <Dim style={{ fontFamily: FONT_MONO }}>{mastery.evidenceCount}</Dim>
-        </div>
+        <MasteryPosteriorBar mastery={mastery} />
       ) : (
         <Faint>no evidence yet</Faint>
       )}
@@ -497,7 +490,7 @@ function LearningObjectBody({
   return (
     <div>
       <InspectorRow label="concept">
-        <Dim style={{ fontFamily: FONT_MONO }}>{detail.concept}</Dim>
+        <IdLink id={detail.concept} onGo={onGo} />
       </InspectorRow>
       <InspectorRow label="knowledge_type">
         <Pill color="purple">{detail.knowledgeType}</Pill>
@@ -521,32 +514,138 @@ function LearningObjectBody({
       {detail.summary ? (
         <>
           <SectionHeader>Summary</SectionHeader>
-          <div style={{ fontSize: 13, color: COLOR.text, lineHeight: 1.6 }}>{detail.summary}</div>
+          <div style={panelStyle}>{detail.summary}</div>
         </>
       ) : null}
 
-      <SectionHeader>Mastery posterior</SectionHeader>
+      <SectionHeader>Mastery · learning_object_mastery</SectionHeader>
       {detail.mastery ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
-          <Stat label="mean" value={detail.mastery.mean.toFixed(2)} color={masteryColor(detail.mastery.mean)} />
-          <Stat label="uncertainty" value={`±${Math.sqrt(detail.mastery.variance).toFixed(2)}`} />
-          <Stat label="evidence" value={detail.mastery.evidenceCount} />
-          <Stat label="last_evidence" value={relTime(detail.mastery.lastEvidenceAt)} />
-        </div>
+        <MasteryPosteriorBar mastery={detail.mastery} showLastEvidence />
       ) : (
         <Faint>no evidence yet</Faint>
       )}
 
-      <PillList label="Subjects" items={detail.subjects} />
-      <PillList label="Prerequisites" items={detail.prerequisites} onGo={onGo} color="amber" />
-      <PillList label="Confusables" items={detail.confusables} onGo={onGo} color="pink" />
-      <PillList label="Tags" items={detail.tags} color="slate" />
+      <LearningObjectRelations
+        subjects={detail.subjects}
+        prerequisites={detail.prerequisiteConcepts ?? fallbackConceptRefs(detail.prerequisites)}
+        confusables={detail.confusableConcepts ?? fallbackConceptRefs(detail.confusables)}
+        tags={detail.tags}
+        onGo={onGo}
+      />
 
       <LoCapabilitySection loId={detail.id} />
 
       <RecipeTreeEditor loId={detail.id} blueprints={detail.blueprints} onGo={onGo} />
     </div>
   );
+}
+
+// ── concept ──────────────────────────────────────────────────────────────
+function ConceptBody({ detail, onGo }: { detail: ConceptInspectorDetail; onGo: (id: string) => void }) {
+  return (
+    <div>
+      <InspectorRow label="concept_type">
+        <Pill color={detail.type === "misconception" ? "red" : detail.type === "procedure" ? "amber" : "cyan"}>
+          {detail.type}
+        </Pill>
+      </InspectorRow>
+      <InspectorRow label="aliases">
+        {detail.aliases.length ? detail.aliases.join(" · ") : <Faint>none</Faint>}
+      </InspectorRow>
+      <InspectorRow label="tags">
+        {detail.tags.length ? (
+          <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
+            {detail.tags.map((tag) => <Pill key={tag} color="slate">#{tag}</Pill>)}
+          </span>
+        ) : <Faint>none</Faint>}
+      </InspectorRow>
+
+      <SectionHeader>Description</SectionHeader>
+      {detail.description ? <div style={panelStyle}>{detail.description}</div> : <Faint>no description configured</Faint>}
+
+      <SectionHeader>Learning objects</SectionHeader>
+      {detail.learningObjects.length ? (
+        <div style={{ border: `1px solid ${COLOR.border}` }}>
+          {detail.learningObjects.map((learningObject, index) => (
+            <div
+              key={learningObject.id}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) auto auto",
+                gap: 10,
+                alignItems: "center",
+                padding: "8px 12px",
+                borderTop: index > 0 ? `1px solid ${COLOR.border}` : "none",
+                fontSize: 12
+              }}
+            >
+              <IdLink id={learningObject.id} onGo={onGo}>{learningObject.title}</IdLink>
+              <Pill color="slate">{learningObject.knowledgeType}</Pill>
+              <Pill color={learningObject.status === "active" ? "green" : "slate"}>{learningObject.status}</Pill>
+            </div>
+          ))}
+        </div>
+      ) : <Faint>no learning objects currently teach or assess this concept</Faint>}
+
+      <SectionHeader>Concept relations</SectionHeader>
+      <div style={{ color: COLOR.textDim, fontSize: 11, lineHeight: 1.5, marginBottom: 8 }}>
+        Prerequisite links express learning order. Confusable links identify plausible substitutions that should be distinguished through contrastive practice; they are not prerequisites.
+      </div>
+      {detail.relations.length ? (
+        <div style={{ border: `1px solid ${COLOR.border}` }}>
+          {detail.relations.map((relation, index) => {
+            const presentation = conceptRelationPresentation(relation);
+            return (
+              <div
+                key={relation.id}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "126px minmax(0, 1fr) 54px",
+                  gap: 10,
+                  alignItems: "baseline",
+                  padding: "8px 12px",
+                  borderTop: index > 0 ? `1px solid ${COLOR.border}` : "none",
+                  fontSize: 12
+                }}
+              >
+                <span style={{ color: presentation.color, fontFamily: FONT_MONO }}>{presentation.label}</span>
+                <span style={{ minWidth: 0 }}>
+                  {relation.concept.conceptId ? (
+                    <IdLink id={relation.concept.conceptId} onGo={onGo}>{relation.concept.title}</IdLink>
+                  ) : (
+                    <Dim>{relation.concept.title}</Dim>
+                  )}
+                  <span style={{ display: "block", marginTop: 3, color: COLOR.textFaint, fontSize: 11, lineHeight: 1.45 }}>
+                    {relation.rationale ?? presentation.description}
+                  </span>
+                </span>
+                <Dim style={{ fontFamily: FONT_MONO, textAlign: "right" }}>{relation.strength.toFixed(2)}</Dim>
+              </div>
+            );
+          })}
+        </div>
+      ) : <Faint>no concept-graph relations configured</Faint>}
+    </div>
+  );
+}
+
+function conceptRelationPresentation(
+  relation: ConceptInspectorDetail["relations"][number]
+): { label: string; description: string; color: string } {
+  if (relation.relationType === "confusable_with") {
+    return { label: "confusable_with", description: "A nearby concept that a learner might plausibly substitute for this one.", color: COLOR.pink };
+  }
+  if (relation.relationType === "prerequisite") {
+    return relation.direction === "incoming"
+      ? { label: "prerequisite", description: "Expected before learning this concept.", color: COLOR.amber }
+      : { label: "prerequisite_for", description: "This concept supports the neighboring concept.", color: COLOR.green };
+  }
+  if (relation.relationType === "part_of") {
+    return relation.direction === "outgoing"
+      ? { label: "part_of", description: "This concept is a component of the neighboring concept.", color: COLOR.cyan }
+      : { label: "contains", description: "The neighboring concept is a component of this concept.", color: COLOR.cyan };
+  }
+  return { label: "related", description: "A related concept in the authored concept graph.", color: COLOR.textDim };
 }
 
 // KM3b §9.6: the capability grid (Demonstrated vs Ready per facet×capability)
@@ -569,7 +668,11 @@ function LoCapabilitySection({ loId }: { loId: string }) {
 
   return (
     <div>
-      <DisclosureHeader open={open} onToggle={() => setOpen((v) => !v)}>
+      <DisclosureHeader
+        open={open}
+        onToggle={() => setOpen((v) => !v)}
+        tooltip="Shows the facet–capability requirements for this learning object, the direct evidence and predicted recall for each requirement, the acceptable recipe paths, and the current bottleneck. This view is read-only."
+      >
         Capability grid &amp; recipe tree
       </DisclosureHeader>
       {open && (
@@ -999,7 +1102,56 @@ function SchedulerWhy({ scheduler }: { scheduler: SchedulerExplanationDto }) {
 }
 
 // ── small helpers ────────────────────────────────────────────────────────
-function InspectorRow({ label, children }: { label: string; children: ReactNode }) {
+function MasteryPosteriorBar({ mastery, showLastEvidence = false }: { mastery: MasteryDto; showLastEvidence?: boolean }) {
+  const mean = Math.max(0, Math.min(1, mastery.mean));
+  const fallbackSd = Math.sqrt(Math.max(0, mastery.variance));
+  const lower = Math.max(0, Math.min(mean, mastery.plausibleLower ?? mean - fallbackSd));
+  const upper = Math.min(1, Math.max(mean, mastery.plausibleUpper ?? mean + fallbackSd));
+  const mass = mastery.plausibleMass ?? 0.8;
+  const tone = masteryColor(mean);
+  const intervalLabel = `${Math.round(mass * 100)}% plausible range · ${lower.toFixed(2)}–${upper.toFixed(2)}; likely mastery ${mean.toFixed(2)}`;
+
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap", fontSize: 12 }}>
+      <div
+        role="img"
+        aria-label={intervalLabel}
+        title={intervalLabel}
+        style={{ display: "inline-grid", gap: 3, flex: "0 0 auto", fontFamily: FONT_MONO }}
+      >
+        <span aria-hidden><BlockBar value={mean} width={14} color={tone} /></span>
+        <span aria-hidden style={{ position: "relative", display: "block", width: "14ch", height: 8 }}>
+          <span
+            style={{
+              position: "absolute",
+              top: 3,
+              left: `${lower * 100}%`,
+              width: `${Math.max(0, upper - lower) * 100}%`,
+              borderTop: `1px solid ${COLOR.textFaint}`
+            }}
+          >
+            <span style={{ position: "absolute", left: 0, top: -4, height: 7, borderLeft: `1px solid ${COLOR.textFaint}` }} />
+            <span style={{ position: "absolute", right: 0, top: -4, height: 7, borderRight: `1px solid ${COLOR.textFaint}` }} />
+          </span>
+        </span>
+      </div>
+      <span style={{ minWidth: 34, color: COLOR.text, fontFamily: FONT_MONO }}>{mean.toFixed(2)}</span>
+      <Faint style={{ fontFamily: FONT_MONO }}>±{fallbackSd.toFixed(2)}</Faint>
+      <span style={{ marginLeft: "auto", display: "inline-flex", gap: 7, alignItems: "baseline", flexWrap: "wrap" }}>
+        <Faint>evidence</Faint>
+        <Dim style={{ fontFamily: FONT_MONO }}>{mastery.evidenceCount}</Dim>
+        {showLastEvidence ? (
+          <>
+            <Faint>last</Faint>
+            <Dim style={{ fontFamily: FONT_MONO }}>{relTime(mastery.lastEvidenceAt)}</Dim>
+          </>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+function InspectorRow({ label, children }: { label: ReactNode; children: ReactNode }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 12, padding: "4px 0", alignItems: "baseline", fontSize: 12 }}>
       {/* min-width:0 + overflow-wrap keep long unbreakable ids (source refs)
@@ -1019,36 +1171,89 @@ function Stat({ label, value, color }: { label: string; value: ReactNode; color?
   );
 }
 
-function PillList({
-  label,
-  items,
-  onGo,
-  color = "cyan"
+function LearningObjectRelations({
+  subjects,
+  prerequisites,
+  confusables,
+  tags,
+  onGo
 }: {
-  label: string;
-  items: string[];
-  onGo?: (id: string) => void;
-  color?: PillColor;
+  subjects: string[];
+  prerequisites: ConceptReferenceDto[];
+  confusables: ConceptReferenceDto[];
+  tags: string[];
+  onGo: (id: string) => void;
 }) {
-  if (!items.length) return null;
   return (
     <>
-      <SectionHeader>{`${label} (${items.length})`}</SectionHeader>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {items.map((item) =>
-          onGo ? (
-            <IdLink key={item} id={item} onGo={onGo}>
-              <Pill color={color}>{item}</Pill>
-            </IdLink>
-          ) : (
-            <Pill key={item} color={color}>
-              {item}
-            </Pill>
-          )
+      <SectionHeader>Relationships · classification</SectionHeader>
+      <InspectorRow label="subjects">
+        {subjects.length ? subjects.join(" · ") : <Faint>none</Faint>}
+      </InspectorRow>
+      <InspectorRow
+        label={(
+          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            prerequisite concepts
+            <HelpTooltip label="What are prerequisite concepts?">
+              Concepts expected before this learning object. They express learning order and can affect readiness and upstream evidence propagation.
+            </HelpTooltip>
+          </span>
         )}
-      </div>
+      >
+        <ConceptReferenceLinks items={prerequisites} onGo={onGo} />
+      </InspectorRow>
+      <InspectorRow
+        label={(
+          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            confusable concepts
+            <HelpTooltip label="What are confusable concepts?">
+              Nearby concepts a learner might plausibly substitute for the target. The list combines authored curriculum relationships with repeated learner-observed diagnostic evidence; observed entries require multiple qualifying observations and posterior lift. They are alternatives to distinguish, not prerequisites.
+            </HelpTooltip>
+          </span>
+        )}
+      >
+        <ConceptReferenceLinks items={confusables} onGo={onGo} />
+      </InspectorRow>
+      <InspectorRow label="tags">
+        {tags.length ? (
+          <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
+            {tags.map((tag) => <Pill key={tag} color="slate">#{tag}</Pill>)}
+          </span>
+        ) : <Faint>none</Faint>}
+      </InspectorRow>
     </>
   );
+}
+
+function ConceptReferenceLinks({ items, onGo }: {
+  items: ConceptReferenceDto[];
+  onGo: (id: string) => void;
+}) {
+  if (!items.length) return <Faint>none</Faint>;
+  return <span style={{ display: "inline-flex", gap: 10, flexWrap: "wrap" }}>
+    {items.map((item) => item.resolved && item.conceptId ? (
+      <span key={`${item.reference}:${item.conceptId}`} title={`concept · ${item.conceptId}`}>
+        <IdLink id={item.conceptId} onGo={onGo}>{item.title}</IdLink>
+        {item.source?.includes("learner_observed") && item.probability != null ? (
+          <Pill color="pink" style={{ marginLeft: 6, fontSize: 10 }}>
+            observed {Math.round(item.probability * 100)}% · {item.evidenceCount ?? 0} probes
+          </Pill>
+        ) : null}
+      </span>
+    ) : (
+      <span
+        key={item.reference}
+        title="No unique concept registry match; this legacy reference cannot be opened yet."
+        style={{ color: COLOR.textDim, borderBottom: `1px dotted ${COLOR.textFaint}` }}
+      >
+        {item.title} <Faint>· unresolved</Faint>
+      </span>
+    ))}
+  </span>;
+}
+
+function fallbackConceptRefs(values: string[]): ConceptReferenceDto[] {
+  return values.map((value) => ({ reference: value, conceptId: value, title: value, resolved: true }));
 }
 
 function IdLink({ id, onGo, children }: { id: string; onGo: (id: string) => void; children?: ReactNode }) {
@@ -1142,49 +1347,6 @@ function formatUnknown(value: unknown): string {
 }
 
 // ── layout styles ──────────────────────────────────────────────────────────
-const backdropStyle: CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  zIndex: 200,
-  background: "rgba(8, 8, 13, 0.78)",
-  display: "flex",
-  alignItems: "flex-start",
-  justifyContent: "center",
-  padding: "6vh 5vw",
-  backdropFilter: "blur(2px)"
-};
-
-const modalStyle: CSSProperties = {
-  width: "min(960px, 100%)",
-  maxHeight: "88vh",
-  background: COLOR.bg,
-  border: `1px solid ${COLOR.borderStrong}`,
-  boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
-  display: "flex",
-  flexDirection: "column",
-  fontFamily: FONT_MONO,
-  color: COLOR.text
-};
-
-const headerStyle: CSSProperties = {
-  padding: "12px 16px",
-  borderBottom: `1px solid ${COLOR.border}`,
-  display: "flex",
-  alignItems: "center",
-  gap: 10,
-  flexShrink: 0
-};
-
-const headerActionStyle: CSSProperties = {
-  border: "none",
-  background: "transparent",
-  color: COLOR.amberLink,
-  padding: "2px 0",
-  fontFamily: FONT_MONO,
-  fontSize: 11,
-  cursor: "pointer"
-};
-
 const searchInputStyle: CSSProperties = {
   width: "100%",
   background: COLOR.bgInput,
@@ -1194,17 +1356,6 @@ const searchInputStyle: CSSProperties = {
   fontSize: 13,
   fontFamily: FONT_MONO,
   outline: "none"
-};
-
-const footerStyle: CSSProperties = {
-  borderTop: `1px solid ${COLOR.border}`,
-  padding: "6px 14px",
-  fontSize: 11,
-  color: COLOR.textDim,
-  display: "flex",
-  gap: 18,
-  flexShrink: 0,
-  alignItems: "center"
 };
 
 const panelStyle: CSSProperties = {

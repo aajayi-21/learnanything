@@ -17,7 +17,7 @@ import type {
   LoBlueprintDto,
   RecipeComponentDto,
 } from "../../api/dto";
-import { BlockBar, COLOR, Dim, DisclosureHeader, Faint, FONT_MONO, Pill, SectionHeader, TermSelect } from "../term";
+import { BlockBar, COLOR, Dim, Faint, FONT_MONO, HelpTooltip, Pill, SectionHeader, TermSelect } from "../term";
 
 const CAPABILITIES = [
   "retrieval",
@@ -100,7 +100,6 @@ export function RecipeTreeEditor({
   blueprints: LoBlueprintDto[] | undefined;
   onGo?: (id: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EditBlueprint[]>(() => seed(blueprints ?? []));
   const [original, setOriginal] = useState<EditBlueprint[]>(() => seed(blueprints ?? []));
@@ -123,7 +122,7 @@ export function RecipeTreeEditor({
   }, [loId]);
 
   useEffect(() => {
-    if (!open || facets.length) return;
+    if (!editing || facets.length) return;
     let alive = true;
     api
       .listFacets()
@@ -134,7 +133,7 @@ export function RecipeTreeEditor({
     return () => {
       alive = false;
     };
-  }, [open, facets.length]);
+  }, [editing, facets.length]);
 
   const mutate = useCallback((fn: (bps: EditBlueprint[]) => void) => {
     setDraft((prev) => {
@@ -192,17 +191,24 @@ export function RecipeTreeEditor({
 
   return (
     <div>
-      <DisclosureHeader open={open} onToggle={() => setOpen((v) => !v)}>
-        Recipe editor
-      </DisclosureHeader>
-      {open && (
-        <div>
-          <div style={caption}>
-            Recipes govern readiness and attribution. Concept edges order the curriculum and shape the map.
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <SectionHeader style={{ flex: 1 }}>Recipe editor</SectionHeader>
+        <HelpTooltip label="What is the recipe editor for?">
+          Edits the blueprint recipes that define which combinations of facet–capability evidence can satisfy this learning object. Changes preview their readiness impact and are filed as reviewable proposals; nothing is applied immediately.
+        </HelpTooltip>
+      </div>
+      <div>
+          <div style={{ color: COLOR.textDim, fontSize: 11, lineHeight: 1.5, marginBottom: 10 }}>
+            Edit the facet–capability requirements used for readiness and evidence attribution. Changes are filed as proposals for review.
+          </div>
+          <div style={ruleLegendStyle}>
+            <span><b style={{ color: COLOR.amber }}>all_of</b> · every requirement</span>
+            <span><b style={{ color: COLOR.cyan }}>any_of</b> · one alternative</span>
+            <span><b style={{ color: COLOR.pink }}>integration</b> · coordinated evidence</span>
           </div>
 
           {!hasBlueprints ? (
-            <Faint>No authored recipes to edit on this objective.</Faint>
+            <Faint>No authored requirement blueprint is attached to this learning object. This editor revises existing blueprints; it does not create the first one.</Faint>
           ) : (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "6px 0 10px" }}>
@@ -215,7 +221,7 @@ export function RecipeTreeEditor({
                   }}
                   style={{ ...toggleBtn, color: editing ? COLOR.amber : COLOR.amberLink }}
                 >
-                  {editing ? "× cancel edits" : "edit recipes"}
+                  {editing ? "× discard draft" : "edit requirements"}
                 </button>
                 {editing && changedIds.length > 0 ? (
                   <Pill color="amber">
@@ -246,7 +252,7 @@ export function RecipeTreeEditor({
                   <input
                     value={rationale}
                     onChange={(e) => setRationale(e.target.value)}
-                    placeholder="rationale (required) — why these recipe changes?"
+                    placeholder="rationale (required) — why these requirement changes?"
                     style={rationaleInput}
                   />
                   <button
@@ -276,8 +282,7 @@ export function RecipeTreeEditor({
               ) : null}
             </>
           )}
-        </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -302,7 +307,7 @@ function BlueprintEditor({
   return (
     <div style={{ marginBottom: 12, border: `1px solid ${changed ? COLOR.amber : COLOR.border}`, background: COLOR.bgInput }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", fontSize: 11 }}>
-        <Faint>blueprint</Faint>
+        <Faint>requirement blueprint</Faint>
         <span style={{ fontFamily: FONT_MONO, color: changed ? COLOR.amber : COLOR.text, overflowWrap: "anywhere" }}>{bp.id}</span>
         <span style={{ flex: 1 }} />
         <Faint>weight</Faint>
@@ -362,9 +367,11 @@ function RecipeEditor({
   return (
     <div style={{ padding: "8px 10px", borderTop: `1px solid ${COLOR.border}`, borderLeft: `2px solid ${COLOR.borderStrong}` }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontSize: 11 }}>
-        <span style={{ color: COLOR.text }}>{recipe.composition === "conjunctive" ? "AND" : recipe.composition.toUpperCase()}</span>
-        <Faint>recipe</Faint>
+        <Faint>evidence path</Faint>
         <span style={{ color: COLOR.textDim, overflowWrap: "anywhere" }}>{recipe.id}</span>
+        <Pill color="slate" style={{ fontSize: 11 }}>
+          {recipe.composition === "conjunctive" ? "all requirements" : recipe.composition.replace(/_/g, " ")}
+        </Pill>
       </div>
 
       <RoleGroup label="all_of · every component required" empty="no required components">
@@ -422,7 +429,7 @@ function RoleGroup({ label, empty, children }: { label: string; empty: string; c
   const hasContent = arr.some((c) => c);
   return (
     <div style={{ marginTop: 8 }}>
-      <div style={{ fontSize: 10, color: COLOR.amber, fontFamily: FONT_MONO, letterSpacing: "0.04em" }}>{label}</div>
+      <div style={{ fontSize: 11, color: COLOR.amber, fontFamily: FONT_MONO }}>{label}</div>
       {hasContent ? children : <Faint style={{ fontSize: 11 }}>{empty}</Faint>}
     </div>
   );
@@ -452,7 +459,7 @@ function ComponentRow({
       {editing && onModality ? (
         <TermSelect value={c.modality} options={[...MODALITIES]} onChange={onModality} width={150} style={{ fontSize: 11, padding: "2px 6px" }} />
       ) : (
-        <Pill color="slate" style={{ fontSize: 10 }}>{c.modality}</Pill>
+        <Pill color="slate" style={{ fontSize: 11 }}>{c.modality}</Pill>
       )}
       {editing && onMove && moveLabel ? (
         <button type="button" onClick={onMove} style={linkBtn} title="move between all_of / any_of">
@@ -604,7 +611,10 @@ function BlastRadiusPanel({
 
   return (
     <div style={{ border: `1px solid ${COLOR.border}`, padding: "10px 12px", background: COLOR.bgInput, alignSelf: "start" }}>
-      <SectionHeader style={{ marginTop: 0 }}>Blast radius</SectionHeader>
+      <SectionHeader style={{ marginTop: 0, marginBottom: 7 }}>Projected impact</SectionHeader>
+      <div style={{ color: COLOR.textFaint, fontSize: 11, lineHeight: 1.45, marginBottom: 10 }}>
+        Preview of how this draft would change readiness, the active bottleneck, and connected goals. Nothing is applied until the proposal is reviewed.
+      </div>
       {error ? (
         <Faint style={{ color: COLOR.textFaint }}>preview unavailable · {error}</Faint>
       ) : !preview ? (
@@ -734,11 +744,13 @@ const fileBar: CSSProperties = {
   borderTop: `1px solid ${COLOR.border}`,
 };
 
-const caption: CSSProperties = {
+const ruleLegendStyle: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: "4px 16px",
+  marginBottom: 10,
+  color: COLOR.textDim,
   fontSize: 11,
-  color: COLOR.textFaint,
-  marginBottom: 8,
-  lineHeight: 1.5,
 };
 
 const suggestBox: CSSProperties = {

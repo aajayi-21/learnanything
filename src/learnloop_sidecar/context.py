@@ -321,6 +321,9 @@ def mastery_dto(repository: Repository, learning_object_id: str, vault: LoadedVa
     payload: dict[str, Any] = {
         "mean": display.mastery_mean,
         "variance": display.mastery_variance,
+        "plausible_lower": display.plausible_lower,
+        "plausible_upper": display.plausible_upper,
+        "plausible_mass": display.plausible_mass,
         "evidence_count": state.evidence_count,
         "last_evidence_at": state.last_evidence_at,
     }
