@@ -16,7 +16,17 @@ evidence_weights:
   qkv_roles: 0.25
   value_weighting: 0.25
   weighted_sum: 0.25
-criterion_facet_weights: {}
+criterion_facet_weights:
+  weighted_sum_computation:
+    weighted_sum: 1.0
+  uses_attention_weights:
+    value_weighting: 1.0
+  values_as_content:
+    qkv_roles: 0.5
+    value_weighting: 0.5
+  keys_for_compatibility:
+    qkv_roles: 0.5
+    compatibility_weights: 0.5
 prompt: Softmax has already produced attention weights [0.75, 0.25] over value 
   vectors v1 = [2, 0] and v2 = [0, 4]. Compute the attention output and explain 
   why this step uses values rather than keys.
@@ -43,6 +53,12 @@ retrieval_demand: 0.3
 transfer_distance: 0.25
 scaffold_level: 0.2
 surface_family: value_weighted_sum_compute
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
 misconception_consistent_answer: The output is the average [1,2], and keys are 
   used because keys represent the positions.
 repair_targets:
@@ -57,21 +73,37 @@ grading_rubric:
       points: 1.5
       description: Correctly computes the output vector as [1.5, 1].
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: uses_attention_weights
       points: 0.75
       description: Shows that each value vector is multiplied by its 
         corresponding attention weight.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: values_as_content
       points: 1.0
       description: Explains that values carry the content being mixed into the 
         output.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: keys_for_compatibility
       points: 0.75
       description: Distinguishes keys as used earlier for compatibility scoring 
         rather than final content mixing.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_unweighted_average_values
       description: Computes an unweighted average instead of using the supplied 
@@ -89,4 +121,4 @@ provenance:
         phases.
       quote_hash:
 created_at: '2026-07-13T01:00:14Z'
-updated_at: '2026-07-13T01:00:14Z'
+updated_at: '2026-07-15T01:11:32Z'

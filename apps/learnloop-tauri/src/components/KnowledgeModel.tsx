@@ -136,19 +136,27 @@ export function UnresolvedCauseCard({
 // -- Recipe tree ("why not ready") --------------------------------------------
 
 function ComponentRow({ c, bottleneck }: { c: ComponentReadinessDto; bottleneck: boolean }) {
+  const marker = bottleneck ? "◆" : c.gating ? "●" : "○";
   return (
-    <div style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "2px 0" }}>
-      <span style={{ width: 10, color: bottleneck ? COLOR.red : COLOR.textFaint }}>
-        {bottleneck ? "▸" : c.gating ? "·" : "○"}
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "14px minmax(0, 1fr) 92px 42px",
+        alignItems: "center",
+        gap: 8,
+        padding: "4px 0",
+        fontSize: 11
+      }}
+    >
+      <span aria-hidden style={{ color: bottleneck ? COLOR.red : c.gating ? COLOR.cyan : COLOR.textFaint }}>
+        {marker}
       </span>
-      <span style={{ color: bottleneck ? COLOR.red : COLOR.text, flex: 1 }}>
+      <span style={{ color: bottleneck ? COLOR.red : COLOR.text, minWidth: 0, overflowWrap: "anywhere" }}>
         {shortFacet(c.facet)} · {c.capability}
-        {!c.gating && <Faint> (facilitating)</Faint>}
+        {!c.gating && <Faint> · facilitating</Faint>}
       </span>
-      <div style={{ width: 90 }}>
-        <BlockBar value={c.predictedRecall} width={10} color={bottleneck ? COLOR.red : COLOR.cyan} />
-      </div>
-      <span style={{ minWidth: 40, textAlign: "right", color: COLOR.textDim }}>{pct(c.predictedRecall)}</span>
+      <BlockBar value={c.predictedRecall} width={8} color={bottleneck ? COLOR.red : COLOR.cyan} />
+      <span style={{ textAlign: "right", color: bottleneck ? COLOR.red : COLOR.textDim }}>{pct(c.predictedRecall)}</span>
     </div>
   );
 }
@@ -160,45 +168,64 @@ export function RecipeTree({ readiness }: { readiness: LoReadinessDto }) {
     : null;
   return (
     <div style={{ fontFamily: FONT_MONO }}>
-      <div style={{ marginBottom: 6 }}>
-        <Pill color="cyan">ready {pct(readiness.readiness)}</Pill>{" "}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        <Pill color="cyan">Ready {pct(readiness.readiness)}</Pill>
         {readiness.bottleneck && (
-          <Faint>
-            bottleneck: {shortFacet(readiness.bottleneck.facet)} · {readiness.bottleneck.capability}
-          </Faint>
+          <span style={{ fontSize: 11 }}>
+            <Faint>bottleneck</Faint>{" "}
+            <span style={{ color: COLOR.red }}>
+              ◆ {shortFacet(readiness.bottleneck.facet)} · {readiness.bottleneck.capability}
+            </span>
+          </span>
         )}
       </div>
       {readiness.blueprints.map((bp) => (
-        <div key={bp.blueprintId} style={{ marginBottom: 8 }}>
-          <Dim>
-            blueprint {bp.blueprintId} · weight {bp.weight} · P(success) {pct(bp.successProbability)}
-          </Dim>
+        <div key={bp.blueprintId} style={{ marginBottom: 10, border: `1px solid ${COLOR.border}`, background: COLOR.bgInput }}>
+          <div
+            style={{
+              padding: "7px 10px",
+              display: "flex",
+              alignItems: "baseline",
+              gap: 8,
+              flexWrap: "wrap",
+              fontSize: 11
+            }}
+          >
+            <Faint>blueprint</Faint>
+            <span style={{ color: COLOR.amber, overflowWrap: "anywhere" }}>{bp.blueprintId}</span>
+            <span style={{ flex: 1 }} />
+            <Faint>weight</Faint> <Dim>{bp.weight}</Dim>
+            <Faint>P(success)</Faint> <span style={{ color: COLOR.cyan }}>{pct(bp.successProbability)}</span>
+          </div>
           {bp.recipes.map((recipe) => {
             const isBest = recipe.recipeId === bp.bestRecipeId;
             return (
               <div
                 key={recipe.recipeId}
                 style={{
-                  marginLeft: 8,
-                  marginTop: 4,
-                  paddingLeft: 8,
-                  borderLeft: `2px solid ${isBest ? COLOR.cyan : COLOR.border}`,
+                  padding: "8px 10px",
+                  borderTop: `1px solid ${COLOR.border}`,
+                  borderLeft: `2px solid ${isBest ? COLOR.cyan : "transparent"}`
                 }}
               >
-                <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-                  <Faint>
-                    {recipe.composition === "conjunctive" ? "AND" : recipe.composition} recipe {recipe.recipeId}
-                  </Faint>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 11 }}>
+                  <span style={{ color: COLOR.text }}>
+                    {recipe.composition === "conjunctive" ? "AND" : recipe.composition.toUpperCase()}
+                  </span>
+                  <Faint>recipe</Faint>
+                  <span style={{ color: COLOR.textDim, overflowWrap: "anywhere" }}>{recipe.recipeId}</span>
                   {isBest && <Pill color="cyan">best path</Pill>}
-                  <span style={{ color: COLOR.textDim }}>{pct(recipe.successProbability)}</span>
+                  <span style={{ marginLeft: "auto", color: COLOR.cyan }}>{pct(recipe.successProbability)}</span>
                 </div>
-                {recipe.components.map((c, i) => (
-                  <ComponentRow
-                    key={`${c.facet}:${c.capability}:${i}`}
-                    c={c}
-                    bottleneck={`${c.facet}:${c.capability}` === bottleneckKey}
-                  />
-                ))}
+                <div style={{ marginTop: 4 }}>
+                  {recipe.components.map((c, i) => (
+                    <ComponentRow
+                      key={`${c.facet}:${c.capability}:${i}`}
+                      c={c}
+                      bottleneck={`${c.facet}:${c.capability}` === bottleneckKey}
+                    />
+                  ))}
+                </div>
               </div>
             );
           })}
@@ -211,23 +238,26 @@ export function RecipeTree({ readiness }: { readiness: LoReadinessDto }) {
 // -- Capability grid (facet × capability heatmap) -----------------------------
 
 function GridCell({ demonstrated, ready, tested }: { demonstrated: boolean; ready: number; tested: boolean }) {
-  // Demonstrated = capability-matched credit (green fill); Ready = pooled
-  // prediction (block bar); untested = dim ░.
-  const bg = demonstrated ? COLOR.greenSoft : "transparent";
+  const marker = demonstrated ? "●" : tested ? "◌" : "·";
+  const label = demonstrated ? "demonstrated" : tested ? "tested" : "untested";
+  const tone = demonstrated ? COLOR.green : tested ? COLOR.cyan : COLOR.textFaint;
   return (
     <td
       style={{
-        border: `1px solid ${COLOR.border}`,
-        padding: "3px 6px",
-        textAlign: "center",
-        background: bg,
-        minWidth: 62,
+        borderTop: `1px solid ${COLOR.border}`,
+        borderRight: `1px solid ${COLOR.border}`,
+        padding: "6px 8px",
+        background: demonstrated ? "#152018" : COLOR.bgInput,
+        minWidth: 104
       }}
     >
-      <div style={{ color: demonstrated ? COLOR.green : COLOR.textFaint, fontSize: 11 }}>
-        {demonstrated ? "✓ demo" : tested ? "tested" : "untested"}
+      <div style={{ color: tone, fontSize: 10, whiteSpace: "nowrap" }}>
+        <span aria-hidden>{marker}</span> {label}
       </div>
-      <div style={{ color: COLOR.textDim, fontSize: 11 }}>ready {pct(ready)}</div>
+      <div style={{ marginTop: 3, display: "flex", alignItems: "center", gap: 6, color: COLOR.textDim, fontSize: 10 }}>
+        <BlockBar value={ready} width={5} color={COLOR.cyan} />
+        <span>{pct(ready)}</span>
+      </div>
     </td>
   );
 }
@@ -241,12 +271,25 @@ export function CapabilityGridView({ result }: { result: CapabilityGridResult })
   return (
     <div style={{ fontFamily: FONT_MONO }}>
       <div style={{ overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+        <table style={{ borderCollapse: "separate", borderSpacing: 0, border: `1px solid ${COLOR.border}`, fontSize: 11, minWidth: "100%" }}>
           <thead>
             <tr>
-              <th style={{ textAlign: "left", padding: "3px 6px", color: COLOR.textDim }}>facet \ capability</th>
+              <th style={{ textAlign: "left", padding: "6px 8px", color: COLOR.textFaint, background: COLOR.bgElev, fontWeight: 400 }}>
+                facet / capability
+              </th>
               {grid.capabilities.map((cap) => (
-                <th key={cap} style={{ padding: "3px 6px", color: COLOR.amber }}>
+                <th
+                  key={cap}
+                  style={{
+                    padding: "6px 8px",
+                    color: COLOR.amber,
+                    background: COLOR.bgElev,
+                    borderLeft: `1px solid ${COLOR.border}`,
+                    fontSize: 10,
+                    fontWeight: 400,
+                    overflowWrap: "anywhere"
+                  }}
+                >
                   {cap}
                 </th>
               ))}
@@ -255,12 +298,23 @@ export function CapabilityGridView({ result }: { result: CapabilityGridResult })
           <tbody>
             {grid.facets.map((facet) => (
               <tr key={facet}>
-                <td style={{ padding: "3px 6px", color: COLOR.text, whiteSpace: "nowrap" }}>{shortFacet(facet)}</td>
+                <td style={{ padding: "6px 8px", color: COLOR.text, whiteSpace: "nowrap", borderTop: `1px solid ${COLOR.border}`, background: COLOR.bgElev }}>
+                  {shortFacet(facet)}
+                </td>
                 {grid.capabilities.map((cap) => {
                   const cell = cellOf.get(`${facet}:${cap}`);
                   if (!cell || !cell.required) {
                     return (
-                      <td key={cap} style={{ border: `1px solid ${COLOR.border}`, textAlign: "center", color: COLOR.textFaint }}>
+                      <td
+                        key={cap}
+                        style={{
+                          borderTop: `1px solid ${COLOR.border}`,
+                          borderRight: `1px solid ${COLOR.border}`,
+                          textAlign: "center",
+                          color: COLOR.textFaint,
+                          background: COLOR.bgInput
+                        }}
+                      >
                         ·
                       </td>
                     );
@@ -272,11 +326,11 @@ export function CapabilityGridView({ result }: { result: CapabilityGridResult })
           </tbody>
         </table>
       </div>
-      <div style={{ marginTop: 6 }}>
-        <Faint>
-          Demonstrated = capability-matched direct evidence · Ready = pooled prediction · a cell can be Ready but never
-          Demonstrated ("certified for retrieval, never tested on selection").
-        </Faint>
+      <div style={{ marginTop: 7, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 10 }}>
+        <span style={{ color: COLOR.green }}>● demonstrated</span>
+        <span style={{ color: COLOR.cyan }}>◌ tested</span>
+        <span style={{ color: COLOR.textFaint }}>· untested / not required</span>
+        <Faint>bar = pooled Ready prediction</Faint>
       </div>
       {readiness && (
         <div style={{ marginTop: 10 }}>
@@ -493,7 +547,7 @@ function DemonstratedCurve({ timeline }: { timeline: FacetEvidenceTimelineDto })
   );
 }
 
-export function FacetEvidenceDrawer({ facetId, onClose }: { facetId: string; onClose: () => void }) {
+export function FacetEvidenceReceipt({ facetId }: { facetId: string }) {
   const [timeline, setTimeline] = useState<FacetEvidenceTimelineDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -518,25 +572,7 @@ export function FacetEvidenceDrawer({ facetId, onClose }: { facetId: string; onC
     : [];
 
   return (
-    <div
-      style={{
-        border: `1px solid ${COLOR.borderStrong}`,
-        borderRadius: 4,
-        padding: 12,
-        fontFamily: FONT_MONO,
-        background: COLOR.bgElev,
-      }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <SectionHeader>Evidence · {shortFacet(facetId)}</SectionHeader>
-        <button
-          type="button"
-          onClick={onClose}
-          style={{ fontFamily: FONT_MONO, background: "transparent", border: "none", color: COLOR.textDim, cursor: "pointer" }}
-        >
-          ✕ close
-        </button>
-      </div>
+    <div style={{ fontFamily: FONT_MONO }}>
       {error && <Dim>{error}</Dim>}
       {timeline && (
         <>
@@ -590,6 +626,32 @@ export function FacetEvidenceDrawer({ facetId, onClose }: { facetId: string; onC
           )}
         </>
       )}
+    </div>
+  );
+}
+
+export function FacetEvidenceDrawer({ facetId, onClose }: { facetId: string; onClose: () => void }) {
+  return (
+    <div
+      style={{
+        border: `1px solid ${COLOR.borderStrong}`,
+        borderRadius: 4,
+        padding: 12,
+        fontFamily: FONT_MONO,
+        background: COLOR.bgElev,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <SectionHeader>Evidence · {shortFacet(facetId)}</SectionHeader>
+        <button
+          type="button"
+          onClick={onClose}
+          style={{ fontFamily: FONT_MONO, background: "transparent", border: "none", color: COLOR.textDim, cursor: "pointer" }}
+        >
+          ✕ close
+        </button>
+      </div>
+      <FacetEvidenceReceipt facetId={facetId} />
     </div>
   );
 }

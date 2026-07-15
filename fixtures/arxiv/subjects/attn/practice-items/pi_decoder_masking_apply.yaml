@@ -17,7 +17,19 @@ evidence_facets:
   - offset_embeddings
   - specific_to_decoder
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  autoregressive_property:
+    autoregressive_property: 1.0
+  future_leakage:
+    future_leakage: 1.0
+  masking_mechanism:
+    masking_mechanism: 1.0
+  allowed_positions:
+    allowed_positions: 1.0
+  offset_embeddings:
+    offset_embeddings: 1.0
+  specific_to_decoder:
+    specific_to_decoder: 1.0
 prompt: A Transformer decoder is training on a target sentence and its 
   self-attention layer is allowed to attend to all target positions, including 
   later words. What property is broken, and how does the paper’s decoder prevent
@@ -45,6 +57,13 @@ retrieval_demand: 0.55
 transfer_distance: 0.4
 scaffold_level: 0.15
 surface_family: masking_failure_scenario
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - autoregressive_property
   - future_leakage
@@ -59,32 +78,64 @@ grading_rubric:
       points: 1.0
       description: Identifies the broken property as autoregressive prediction 
         or no future leakage.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: future_leakage
       points: 0.666667
       description: Explains that later target tokens would leak information.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: masking_mechanism
       points: 1.0
       description: States that future positions are masked out in 
         self-attention.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: allowed_positions
       points: 0.666667
       description: States that a position may attend only to earlier positions 
         and itself.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: offset_embeddings
       points: 0.333333
       description: Mentions the offset output embeddings if included.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: specific_to_decoder
       points: 0.333333
       description: Keeps the explanation specific to decoder self-attention, not
         encoder attention.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_encoder_masking
       description: Claims the encoder must use this same causal mask for the 
         same reason.
       max_grade: 2
+      misconception_id:
     - id: fatal_no_autoregression
       description: Does not identify autoregression or future-token leakage.
       max_grade: 2
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -97,4 +148,4 @@ provenance:
         setting, quality also drops off with too many heads.
       quote_hash: sha256:head_count_ablation
 created_at: '2026-05-28T21:34:29Z'
-updated_at: '2026-05-28T21:34:29Z'
+updated_at: '2026-07-15T01:10:54Z'

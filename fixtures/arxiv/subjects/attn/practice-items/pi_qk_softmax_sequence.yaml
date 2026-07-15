@@ -15,7 +15,15 @@ evidence_facets:
   - scale_before_softmax
   - column_softmax_last
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  qk_first:
+    qk_first: 1.0
+  dot_products_second:
+    dot_products_second: 1.0
+  scale_before_softmax:
+    scale_before_softmax: 1.0
+  column_softmax_last:
+    column_softmax_last: 1.0
 prompt: 'Put these steps in order for producing an attention pattern from embeddings:
   apply softmax column-wise; compute query and key vectors; take all key-query dot
   products; scale scores by the square root of the key-query dimension.'
@@ -41,6 +49,13 @@ retrieval_demand: 0.55
 transfer_distance: 0.22
 scaffold_level: 0.35
 surface_family: attention_computation_ordering
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - qk_first
   - dot_products_second
@@ -53,19 +68,40 @@ grading_rubric:
     - id: qk_first
       points: 1.0
       description: Places query/key projection before scoring.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: dot_products_second
       points: 1.0
       description: Places all pairwise dot products after Q/K projection.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: scale_before_softmax
       points: 1.0
       description: Places scaling before softmax.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: column_softmax_last
       points: 1.0
       description: Places column-wise softmax last as normalization.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_softmax_before_scores
       description: Applies softmax before key-query scores exist.
       max_grade: 1
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -94,4 +130,4 @@ provenance:
         softmax... column by column.
       quote_hash: sha256:src_scaled_attention_formula
 created_at: '2026-05-28T21:34:21Z'
-updated_at: '2026-05-28T21:34:21Z'
+updated_at: '2026-07-15T01:11:25Z'

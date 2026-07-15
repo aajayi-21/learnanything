@@ -320,7 +320,7 @@ def upsert_facet(
     vault = load_vault(root)
     paths = VaultPaths(vault.root, vault.config)
     data = _read_yaml_or(paths.facets_path, {"schema_version": 2, "facets": []})
-    if not data.get("schema_version"):
+    if int(data.get("schema_version") or 0) < 2:
         data["schema_version"] = 2
     facets = data.setdefault("facets", [])
     if not isinstance(facets, list):

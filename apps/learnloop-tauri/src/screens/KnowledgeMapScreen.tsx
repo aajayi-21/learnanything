@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { api } from "../api/client";
 import type { DecayPressureDto, KnowledgeFacetPoint, KnowledgeMapHistory, KnowledgeMapPoint, KnowledgeMapSnapshot } from "../api/dto";
 import { EntityLink } from "../components/ui";
-import { FacetEvidenceDrawer } from "../components/KnowledgeModel";
 import { COLOR, Dim, Faint, FONT_MONO, KeyBar, Meta, Pill, SectionHeader } from "../components/term";
 import { FacetInspector } from "../components/FacetInspector";
 import { masteryTone } from "../app/algoConfig";
@@ -35,11 +34,8 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
   // for lack of history, and which cross target soon). Fetched lazily on first
   // switch to "well"; the view degrades gracefully to no-decay if it's absent.
   const [decay, setDecay] = useState<DecayPressureDto | null>(null);
-  // FacetEvidenceDrawer (§4.9 / §5) — the map is its second consumer after Review.
-  const [drawerFacetId, setDrawerFacetId] = useState<string | null>(null);
-  // Facet chosen for the FacetInspector contract overlay. Complementary to the
-  // evidence drawer: this shows the facet's lock/contract/membership, not its
-  // evidence receipt. Facets have no map coordinate — we join by id.
+  // One facet side window owns both its semantic contract and evidence receipt.
+  // Facets have no map coordinate — we join by id.
   const [inspectFacetId, setInspectFacetId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -215,21 +211,12 @@ export function KnowledgeMapView({ onInspect, onError }: { onInspect: (id: strin
             point={activeFacet}
             nextGap={snapshot.facetField.nextGap?.facetId === activeFacet?.id ? snapshot.facetField.nextGap : null}
             onInspect={onInspect}
-            onOpenEvidence={setDrawerFacetId}
             onInspectFacet={setInspectFacetId}
           />
         ) : (
           <PointDetail point={active} onInspect={onInspect} facetLockById={facetLockById} onInspectFacet={setInspectFacetId} />
         )}
       </div>
-
-      {drawerFacetId ? (
-        <div style={drawerBackdrop} onClick={() => setDrawerFacetId(null)}>
-          <div style={drawerPanel} onClick={(e) => e.stopPropagation()}>
-            <FacetEvidenceDrawer facetId={drawerFacetId} onClose={() => setDrawerFacetId(null)} />
-          </div>
-        </div>
-      ) : null}
 
       {inspectFacetId ? (
         <FacetInspector
@@ -314,13 +301,11 @@ export function FacetFieldDetail({
   point,
   nextGap,
   onInspect,
-  onOpenEvidence,
   onInspectFacet
 }: {
   point: KnowledgeFacetPoint | null;
   nextGap: KnowledgeMapSnapshot["facetField"]["nextGap"];
   onInspect: (id: string) => void;
-  onOpenEvidence?: (facetId: string) => void;
   onInspectFacet?: (facetId: string) => void;
 }) {
   if (!point) {
@@ -339,28 +324,16 @@ export function FacetFieldDetail({
         {point.locked ? <span style={{ color: COLOR.amber, marginLeft: 6 }} title={`🔒 locked · ${point.lockSources.join(", ") || "identity locked"}`}>🔒</span> : null}
       </div>
       <Meta>{point.id}</Meta>
-      {onOpenEvidence || onInspectFacet ? (
+      {onInspectFacet ? (
         <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {onOpenEvidence ? (
-            <button
-              type="button"
-              onClick={() => onOpenEvidence(point.id)}
-              title="open the evidence receipt drawer for this facet"
-              style={facetActionButton}
-            >
-              evidence ▸
-            </button>
-          ) : null}
-          {onInspectFacet ? (
-            <button
-              type="button"
-              onClick={() => onInspectFacet(point.id)}
-              title="open the facet contract inspector (locks, membership, merge)"
-              style={facetActionButton}
-            >
-              inspect facet ▸
-            </button>
-          ) : null}
+          <button
+            type="button"
+            onClick={() => onInspectFacet(point.id)}
+            title="open facet evidence, contract, membership, and restructure tools"
+            style={facetActionButton}
+          >
+            inspect facet ▸
+          </button>
         </div>
       ) : null}
       <SectionHeader>Two independent axes</SectionHeader>
@@ -397,24 +370,6 @@ export function FacetFieldDetail({
     </div>
   );
 }
-
-const drawerBackdrop: CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  zIndex: 210,
-  background: "rgba(8, 8, 13, 0.78)",
-  display: "flex",
-  alignItems: "flex-start",
-  justifyContent: "center",
-  padding: "8vh 5vw",
-  backdropFilter: "blur(2px)"
-};
-
-const drawerPanel: CSSProperties = {
-  width: "min(680px, 100%)",
-  maxHeight: "80vh",
-  overflowY: "auto"
-};
 
 const facetActionButton: CSSProperties = {
   fontFamily: FONT_MONO,

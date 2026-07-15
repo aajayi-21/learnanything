@@ -16,7 +16,17 @@ evidence_facets:
   - softmax_normalization
   - next_token_distribution
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  logits_raw_scores:
+    logits_raw_scores: 1.0
+  mentions_unembedding:
+    unembedding_connection: 1.0
+  invalid_probability_reason:
+    probability_constraints: 1.0
+  softmax_valid_distribution:
+    softmax_normalization: 1.0
+  next_token_use:
+    next_token_distribution: 1.0
 prompt: In the source's vocabulary, what are logits, and why is softmax applied 
   to them before sampling a next token?
 expected_answer: Logits are the raw, unnormalized output scores produced after 
@@ -42,6 +52,13 @@ retrieval_demand: 0.45
 transfer_distance: 0.25
 scaffold_level: 0.05
 surface_family: logits_softmax_definition
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - logits_raw_scores
   - unembedding_connection
@@ -55,26 +72,52 @@ grading_rubric:
     - id: logits_raw_scores
       points: 0.8
       description: Defines logits as raw scores or unnormalized outputs.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: mentions_unembedding
       points: 0.8
       description: Connects logits to the final unembedding-matrix 
         multiplication.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: invalid_probability_reason
       points: 0.8
       description: Explains that logits need not be between 0 and 1 or sum to 1.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: softmax_valid_distribution
       points: 0.8
       description: States that softmax converts logits into a valid probability 
         distribution.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: next_token_use
       points: 0.8
       description: Connects the distribution to next-token sampling or 
         prediction.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_logits_are_probabilities
       description: Claims logits already are probabilities that sum to 1 before 
         softmax.
       max_grade: 1
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -87,4 +130,4 @@ provenance:
         output
       quote_hash: sha256:src_logits
 created_at: '2026-05-28T22:11:56Z'
-updated_at: '2026-05-28T22:11:56Z'
+updated_at: '2026-07-15T01:11:19Z'

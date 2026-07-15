@@ -12,7 +12,15 @@ evidence_facets:
 evidence_weights:
   alignment_interpretation: 0.5
   zero_interpretation: 0.5
-criterion_facet_weights: {}
+criterion_facet_weights:
+  ranking_correct:
+    alignment_interpretation: 1.0
+  positive_alignment_explained:
+    alignment_interpretation: 1.0
+  zero_neutral_explained:
+    zero_interpretation: 1.0
+  negative_opposition_explained:
+    alignment_interpretation: 1.0
 prompt: Suppose a query vector has a high positive dot product with key A, a 
   near-zero dot product with key B, and a negative dot product with key C. In 
   plain language, rank the keys by compatibility with the query and explain the 
@@ -44,6 +52,12 @@ retrieval_demand: 0.45
 transfer_distance: 0.35
 scaffold_level: 0.15
 surface_family: qualitative_alignment_ranking
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
 misconception_consistent_answer: C is most compatible because negative dot 
   products are strong, B is least because zero means no score.
 repair_targets:
@@ -57,21 +71,37 @@ grading_rubric:
       points: 1.25
       description: Ranks A highest, B middle/neutral, and C lowest.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: positive_alignment_explained
       points: 1.0
       description: Explains high positive dot product as stronger alignment or 
         compatibility.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: zero_neutral_explained
       points: 0.75
       description: Explains near-zero dot product as weak or neutral directional
         evidence.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: negative_opposition_explained
       points: 1.0
       description: Explains negative dot product as opposition or low 
         compatibility.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_negative_ranked_highest
       description: Ranks the negative dot product as most compatible without a 
@@ -89,4 +119,4 @@ provenance:
         phases.
       quote_hash:
 created_at: '2026-07-13T01:00:12Z'
-updated_at: '2026-07-13T01:00:12Z'
+updated_at: '2026-07-15T01:11:06Z'

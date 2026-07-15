@@ -14,7 +14,16 @@ evidence_weights:
   alignment_interpretation: 0.3333333333333333
   multiply_sum_method: 0.3333333333333333
   zero_interpretation: 0.3333333333333333
-criterion_facet_weights: {}
+criterion_facet_weights:
+  zero_dot_product_correct:
+    zero_interpretation: 1.0
+  multiply_sum_method_clear:
+    multiply_sum_method: 1.0
+  zero_alignment_interpretation:
+    zero_interpretation: 0.5
+    alignment_interpretation: 0.5
+  attention_score_context:
+    alignment_interpretation: 1.0
 prompt: Two embedding directions are x = [3, 1] and y = [1, -3]. Compute x . y. 
   If this dot product appeared as an attention compatibility score before other 
   transformations, what would the score say about alignment?
@@ -41,6 +50,12 @@ retrieval_demand: 0.4
 transfer_distance: 0.3
 scaffold_level: 0.2
 surface_family: zero_dot_product_attention_score
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
 misconception_consistent_answer: A zero dot product means the two vectors are 
   the same because there is no difference between them.
 repair_targets:
@@ -54,20 +69,36 @@ grading_rubric:
       points: 1.25
       description: Correctly computes x . y as 0.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: multiply_sum_method_clear
       points: 0.75
       description: Uses the componentwise multiply-and-sum method.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: zero_alignment_interpretation
       points: 1.25
       description: Interprets zero as neutral/no directional alignment rather 
         than strong similarity.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: attention_score_context
       points: 0.75
       description: Connects the dot product to an attention compatibility score 
         before scaling and softmax.
       tier: transfer
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_zero_means_identical
       description: Claims a zero dot product means the vectors are identical or 
@@ -85,4 +116,4 @@ provenance:
         phases.
       quote_hash:
 created_at: '2026-07-13T01:00:10Z'
-updated_at: '2026-07-13T01:00:10Z'
+updated_at: '2026-07-15T01:11:09Z'

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api/client";
 import type { ClaimCandidateDto, PresentedClaimDto } from "../api/dto";
 import { COLOR, FONT_MONO } from "./term";
@@ -13,6 +13,7 @@ export function ClaimSurface({
   claim,
   sessionId,
   visitId,
+  variant = "default",
   onReceipt,
   onResponded,
   onError
@@ -20,6 +21,7 @@ export function ClaimSurface({
   claim: ClaimCandidateDto;
   sessionId?: string | null;
   visitId?: string | null;
+  variant?: "default" | "detail-panel";
   onReceipt?: (ref: string) => void;
   onResponded?: (payload: Record<string, unknown>) => void;
   onError: (message: string) => void;
@@ -70,49 +72,150 @@ export function ClaimSurface({
   }
 
   const enabled = Boolean(presentation?.affordancesEnabled && !responded);
+  const inDetailPanel = variant === "detail-panel";
   return (
     <div
       ref={root}
-      style={{ border: `1px solid ${COLOR.border}`, borderLeft: `3px solid ${COLOR.amber}`, padding: "12px 14px", background: COLOR.bgElev }}
+      role={inDetailPanel ? "group" : undefined}
+      aria-label={inDetailPanel ? "Scheduler choice feedback" : undefined}
+      style={
+        inDetailPanel
+          ? {
+              border: `1px solid ${COLOR.border}`,
+              borderLeft: `2px solid ${COLOR.amber}`,
+              padding: "10px 12px 11px",
+              background: COLOR.bgInput
+            }
+          : {
+              border: `1px solid ${COLOR.border}`,
+              borderLeft: `3px solid ${COLOR.amber}`,
+              padding: "12px 14px",
+              background: COLOR.bgElev
+            }
+      }
     >
-      <div style={{ color: COLOR.text, lineHeight: 1.55 }}>{claim.claimText}</div>
-      {claim.provenance ? <div style={{ marginTop: 5, color: COLOR.textFaint, fontSize: 11, fontFamily: FONT_MONO }}>{claim.provenance}</div> : null}
+      {inDetailPanel ? (
+        <div
+          style={{
+            color: COLOR.amber,
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            letterSpacing: "0.12em",
+            textTransform: "uppercase",
+            marginBottom: 5
+          }}
+        >
+          selected rationale
+        </div>
+      ) : null}
+      <div style={{ color: COLOR.text, fontSize: inDetailPanel ? 12 : undefined, lineHeight: 1.55 }}>{claim.claimText}</div>
+      {claim.provenance ? (
+        <div
+          style={{
+            marginTop: 5,
+            color: COLOR.textFaint,
+            fontSize: inDetailPanel ? 10 : 11,
+            fontFamily: FONT_MONO,
+            overflowWrap: "anywhere"
+          }}
+        >
+          {inDetailPanel ? `policy · ${claim.provenance}` : claim.provenance}
+        </div>
+      ) : null}
       {claim.receiptRef && onReceipt ? (
-        <button type="button" className="queue-row" style={{ marginTop: 8 }} onClick={() => onReceipt(claim.receiptRef!)}>
+        <button
+          type="button"
+          className={inDetailPanel ? undefined : "queue-row"}
+          style={inDetailPanel ? { ...panelButtonStyle, marginTop: 8 } : { marginTop: 8 }}
+          onClick={() => onReceipt(claim.receiptRef!)}
+        >
           show receipt
         </button>
       ) : null}
       {presentation?.suppressionReason ? (
-        <div style={{ marginTop: 8, color: COLOR.textFaint, fontSize: 11 }}>annotated claim · responses paused ({presentation.suppressionReason.replace(/_/g, " ")})</div>
+        <div
+          style={{
+            marginTop: 8,
+            color: COLOR.textFaint,
+            fontSize: inDetailPanel ? 10 : 11,
+            fontFamily: inDetailPanel ? FONT_MONO : undefined
+          }}
+        >
+          annotated claim · responses paused ({presentation.suppressionReason.replace(/_/g, " ")})
+        </div>
       ) : null}
-      {responded ? <div style={{ marginTop: 8, color: COLOR.textDim, fontSize: 11 }}>response saved locally</div> : null}
+      {responded ? (
+        <div
+          style={{
+            marginTop: 8,
+            color: COLOR.green,
+            fontSize: inDetailPanel ? 10 : 11,
+            fontFamily: inDetailPanel ? FONT_MONO : undefined
+          }}
+        >
+          ✓ response saved locally
+        </div>
+      ) : null}
       {enabled ? (
-        <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
-          <ClaimResponses
-            claim={claim}
-            editing={editing}
-            setEditing={setEditing}
-            interpretation={interpretation}
-            setInterpretation={setInterpretation}
-            respond={respond}
-          />
-          <button type="button" className="queue-row" onClick={() => void dismiss()}>dismiss</button>
+        <div style={{ marginTop: 10 }}>
+          {inDetailPanel ? (
+            <div style={{ marginBottom: 6, color: COLOR.textFaint, fontFamily: FONT_MONO, fontSize: 10 }}>
+              was this queue choice useful?
+            </div>
+          ) : null}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: inDetailPanel ? 5 : 6, alignItems: "center" }}>
+            <ClaimResponses
+              claim={claim}
+              variant={variant}
+              editing={editing}
+              setEditing={setEditing}
+              interpretation={interpretation}
+              setInterpretation={setInterpretation}
+              respond={respond}
+            />
+            <button
+              type="button"
+              className={inDetailPanel ? undefined : "queue-row"}
+              style={inDetailPanel ? panelDismissStyle : undefined}
+              onClick={() => void dismiss()}
+            >
+              dismiss
+            </button>
+          </div>
         </div>
       ) : null}
     </div>
   );
 }
 
-function ClaimResponses({ claim, editing, setEditing, interpretation, setInterpretation, respond }: {
+function ClaimResponses({
+  claim,
+  variant,
+  editing,
+  setEditing,
+  interpretation,
+  setInterpretation,
+  respond
+}: {
   claim: ClaimCandidateDto;
+  variant: "default" | "detail-panel";
   editing: boolean;
   setEditing: (value: boolean) => void;
   interpretation: string;
   setInterpretation: (value: string) => void;
   respond: (payload: Record<string, unknown>) => Promise<void>;
 }) {
+  const inDetailPanel = variant === "detail-panel";
   const button = (label: string, response: string, extra: Record<string, unknown> = {}) => (
-    <button key={response} type="button" className="queue-row" onClick={() => void respond({ response, ...extra })}>{label}</button>
+    <button
+      key={`${response}:${String(extra.reason ?? "")}`}
+      type="button"
+      className={inDetailPanel ? undefined : "queue-row"}
+      style={inDetailPanel ? (response === "useful" ? panelPrimaryButtonStyle : panelButtonStyle) : undefined}
+      onClick={() => void respond({ response, ...extra })}
+    >
+      {label}
+    </button>
   );
   if (claim.claimClass === "estimate" && claim.claimType === "ready_estimate") {
     return <>{button("seems high", "high")}{button("about right", "about_right")}{button("seems low", "low")}{button("not sure", "not_sure")}</>;
@@ -135,3 +238,36 @@ function ClaimResponses({ claim, editing, setEditing, interpretation, setInterpr
   }
   return null;
 }
+
+const panelButtonStyle: CSSProperties = {
+  width: "auto",
+  border: `1px solid ${COLOR.borderStrong}`,
+  background: "transparent",
+  color: COLOR.textDim,
+  padding: "3px 7px",
+  fontFamily: FONT_MONO,
+  fontSize: 11,
+  lineHeight: 1.4,
+  cursor: "pointer",
+  textAlign: "left"
+};
+
+const panelPrimaryButtonStyle: CSSProperties = {
+  ...panelButtonStyle,
+  borderColor: COLOR.amber,
+  background: "#241d12",
+  color: COLOR.amber
+};
+
+const panelDismissStyle: CSSProperties = {
+  width: "auto",
+  marginLeft: "auto",
+  border: "none",
+  background: "transparent",
+  color: COLOR.textFaint,
+  padding: "3px 2px",
+  fontFamily: FONT_MONO,
+  fontSize: 10,
+  lineHeight: 1.4,
+  cursor: "pointer"
+};

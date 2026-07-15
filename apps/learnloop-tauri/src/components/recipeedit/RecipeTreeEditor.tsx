@@ -17,7 +17,7 @@ import type {
   LoBlueprintDto,
   RecipeComponentDto,
 } from "../../api/dto";
-import { BlockBar, COLOR, Dim, Faint, FONT_MONO, Pill, SectionHeader } from "../term";
+import { BlockBar, COLOR, Dim, DisclosureHeader, Faint, FONT_MONO, Pill, SectionHeader, TermSelect } from "../term";
 
 const CAPABILITIES = [
   "retrieval",
@@ -191,15 +191,14 @@ export function RecipeTreeEditor({
   }
 
   return (
-    <div style={{ marginTop: 14 }}>
-      <button type="button" onClick={() => setOpen((v) => !v)} style={toggleBtn}>
-        {open ? "▾" : "▸"} recipe editor
-      </button>
+    <div>
+      <DisclosureHeader open={open} onToggle={() => setOpen((v) => !v)}>
+        Recipe editor
+      </DisclosureHeader>
       {open && (
-        <div style={{ marginTop: 10 }}>
+        <div>
           <div style={caption}>
-            recipes govern readiness and attribution; concept edges only order the curriculum and
-            shape the map.
+            Recipes govern readiness and attribution. Concept edges order the curriculum and shape the map.
           </div>
 
           {!hasBlueprints ? (
@@ -216,7 +215,7 @@ export function RecipeTreeEditor({
                   }}
                   style={{ ...toggleBtn, color: editing ? COLOR.amber : COLOR.amberLink }}
                 >
-                  {editing ? "✕ cancel edits" : "✎ edit"}
+                  {editing ? "× cancel edits" : "edit recipes"}
                 </button>
                 {editing && changedIds.length > 0 ? (
                   <Pill color="amber">
@@ -260,7 +259,7 @@ export function RecipeTreeEditor({
                       borderColor: !rationale.trim() || !changedIds.length ? COLOR.border : COLOR.green,
                     }}
                   >
-                    {filing ? "filing…" : "file as proposal"}
+                    {filing ? "filing…" : "file proposal →"}
                   </button>
                 </div>
               ) : null}
@@ -301,9 +300,10 @@ function BlueprintEditor({
   onMutateRecipe: (recipeIndex: number, fn: (r: EditRecipe) => void) => void;
 }) {
   return (
-    <div style={{ marginBottom: 12, border: `1px solid ${changed ? COLOR.amber : COLOR.border}`, borderRadius: 3, padding: "8px 10px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Dim style={{ fontFamily: FONT_MONO }}>blueprint {bp.id}</Dim>
+    <div style={{ marginBottom: 12, border: `1px solid ${changed ? COLOR.amber : COLOR.border}`, background: COLOR.bgInput }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", fontSize: 11 }}>
+        <Faint>blueprint</Faint>
+        <span style={{ fontFamily: FONT_MONO, color: changed ? COLOR.amber : COLOR.text, overflowWrap: "anywhere" }}>{bp.id}</span>
         <span style={{ flex: 1 }} />
         <Faint>weight</Faint>
         {editing ? (
@@ -360,8 +360,12 @@ function RecipeEditor({
     onMutate((r) => (role === "all_of" ? r.allOf : r.anyOf).push(c));
 
   return (
-    <div style={{ marginLeft: 8, marginTop: 6, paddingLeft: 8, borderLeft: `2px solid ${COLOR.border}` }}>
-      <Faint>{recipe.composition === "conjunctive" ? "AND" : recipe.composition} recipe {recipe.id}</Faint>
+    <div style={{ padding: "8px 10px", borderTop: `1px solid ${COLOR.border}`, borderLeft: `2px solid ${COLOR.borderStrong}` }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontSize: 11 }}>
+        <span style={{ color: COLOR.text }}>{recipe.composition === "conjunctive" ? "AND" : recipe.composition.toUpperCase()}</span>
+        <Faint>recipe</Faint>
+        <span style={{ color: COLOR.textDim, overflowWrap: "anywhere" }}>{recipe.id}</span>
+      </div>
 
       <RoleGroup label="all_of · every component required" empty="no required components">
         {recipe.allOf.map((c, i) => (
@@ -417,8 +421,8 @@ function RoleGroup({ label, empty, children }: { label: string; empty: string; c
   const arr = Array.isArray(children) ? children.flat() : [children];
   const hasContent = arr.some((c) => c);
   return (
-    <div style={{ marginTop: 6 }}>
-      <div style={{ fontSize: 11, color: COLOR.textFaint }}>{label}</div>
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 10, color: COLOR.amber, fontFamily: FONT_MONO, letterSpacing: "0.04em" }}>{label}</div>
       {hasContent ? children : <Faint style={{ fontSize: 11 }}>{empty}</Faint>}
     </div>
   );
@@ -440,19 +444,15 @@ function ComponentRow({
   onModality?: (m: string) => void;
 }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0", flexWrap: "wrap" }}>
-      <Pill color="cyan">{shortFacet(c.facet)}</Pill>
-      <Pill color="purple">{c.capability}</Pill>
+    <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "4px 0", flexWrap: "wrap", fontSize: 11 }}>
+      <span aria-hidden style={{ color: COLOR.cyan }}>●</span>
+      <span style={{ color: COLOR.cyan }}>{shortFacet(c.facet)}</span>
+      <Faint>·</Faint>
+      <span style={{ color: COLOR.text }}>{c.capability}</span>
       {editing && onModality ? (
-        <select value={c.modality} onChange={(e) => onModality(e.target.value)} style={miniSelect}>
-          {MODALITIES.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
+        <TermSelect value={c.modality} options={[...MODALITIES]} onChange={onModality} width={150} style={{ fontSize: 11, padding: "2px 6px" }} />
       ) : (
-        <Faint style={{ fontSize: 11 }}>{c.modality}</Faint>
+        <Pill color="slate" style={{ fontSize: 10 }}>{c.modality}</Pill>
       )}
       {editing && onMove && moveLabel ? (
         <button type="button" onClick={onMove} style={linkBtn} title="move between all_of / any_of">
@@ -461,7 +461,7 @@ function ComponentRow({
       ) : null}
       {editing && onRemove ? (
         <button type="button" onClick={onRemove} style={{ ...linkBtn, color: COLOR.red }} title="remove">
-          ✕
+          ×
         </button>
       ) : null}
     </div>
@@ -530,20 +530,8 @@ function AddComponent({
           </div>
         ) : null}
       </div>
-      <select value={capability} onChange={(e) => setCapability(e.target.value)} style={miniSelect}>
-        {CAPABILITIES.map((cap) => (
-          <option key={cap} value={cap}>
-            {cap}
-          </option>
-        ))}
-      </select>
-      <select value={modality} onChange={(e) => setModality(e.target.value)} style={miniSelect}>
-        {MODALITIES.map((m) => (
-          <option key={m} value={m}>
-            {m}
-          </option>
-        ))}
-      </select>
+      <TermSelect value={capability} options={[...CAPABILITIES]} onChange={setCapability} width={180} style={{ fontSize: 11, padding: "2px 6px" }} />
+      <TermSelect value={modality} options={[...MODALITIES]} onChange={setModality} width={150} style={{ fontSize: 11, padding: "2px 6px" }} />
       <button
         type="button"
         disabled={!ready}
@@ -615,7 +603,7 @@ function BlastRadiusPanel({
       preview.current.bottleneck?.capability !== preview.proposed.bottleneck?.capability);
 
   return (
-    <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 3, padding: "10px 12px", background: COLOR.bgElev, alignSelf: "start" }}>
+    <div style={{ border: `1px solid ${COLOR.border}`, padding: "10px 12px", background: COLOR.bgInput, alignSelf: "start" }}>
       <SectionHeader style={{ marginTop: 0 }}>Blast radius</SectionHeader>
       {error ? (
         <Faint style={{ color: COLOR.textFaint }}>preview unavailable · {error}</Faint>
@@ -704,12 +692,11 @@ function BlastRadiusPanel({
 
 const toggleBtn: CSSProperties = {
   fontFamily: FONT_MONO,
-  fontSize: 12,
+  fontSize: 11,
   background: "transparent",
-  border: `1px solid ${COLOR.border}`,
-  borderRadius: 3,
+  border: `1px solid ${COLOR.borderStrong}`,
   color: COLOR.amberLink,
-  padding: "3px 10px",
+  padding: "4px 9px",
   cursor: "pointer",
 };
 
@@ -723,23 +710,12 @@ const linkBtn: CSSProperties = {
   padding: "0 2px",
 };
 
-const miniSelect: CSSProperties = {
-  fontFamily: FONT_MONO,
-  fontSize: 11,
-  background: COLOR.bgInput,
-  color: COLOR.text,
-  border: `1px solid ${COLOR.border}`,
-  borderRadius: 2,
-  padding: "1px 4px",
-};
-
 const numInput: CSSProperties = {
   fontFamily: FONT_MONO,
   fontSize: 12,
   background: COLOR.bgInput,
   color: COLOR.text,
   border: `1px solid ${COLOR.borderFocus}`,
-  borderRadius: 2,
   padding: "2px 6px",
   outline: "none",
 };
@@ -750,16 +726,17 @@ const rationaleInput: CSSProperties = {
 };
 
 const fileBar: CSSProperties = {
-  marginTop: 10,
+  marginTop: 12,
   display: "flex",
   gap: 8,
   alignItems: "center",
+  paddingTop: 10,
+  borderTop: `1px solid ${COLOR.border}`,
 };
 
 const caption: CSSProperties = {
   fontSize: 11,
   color: COLOR.textFaint,
-  fontStyle: "italic",
   marginBottom: 8,
   lineHeight: 1.5,
 };

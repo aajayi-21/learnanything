@@ -976,6 +976,7 @@ function QueueDetail({
             claim={scheduleChoiceClaim(item, producerVersion)}
             sessionId={sessionId}
             visitId={visitId}
+            variant="detail-panel"
             onError={onError}
           />
         </>

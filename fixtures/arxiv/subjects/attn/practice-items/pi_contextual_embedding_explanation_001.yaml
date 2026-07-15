@@ -16,7 +16,17 @@ evidence_facets:
   - context_incorporation
   - contextual_meaning
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  initial_embedding_lookup:
+    embedding_lookup: 1.0
+  initial_context_free:
+    context_free_start: 1.0
+  blocks_update_vector:
+    transformer_updates: 1.0
+  incorporates_surroundings:
+    context_incorporation: 1.0
+  richer_specific_meaning:
+    contextual_meaning: 1.0
 prompt: Why is a token vector near the end of a transformer not merely the 
   original embedding of that token? Answer using the source's idea of context.
 expected_answer: At the start, the vector is just pulled from the embedding 
@@ -41,6 +51,13 @@ retrieval_demand: 0.45
 transfer_distance: 0.25
 scaffold_level: 0.1
 surface_family: contextual_embedding_explanation
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - embedding_lookup
   - context_free_start
@@ -55,27 +72,53 @@ grading_rubric:
       points: 0.8
       description: States that the initial vector comes from an embedding matrix
         or token embedding lookup.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: initial_context_free
       points: 0.8
       description: Explains that the initial vector only represents the 
         token/word before surrounding context is incorporated.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: blocks_update_vector
       points: 0.8
       description: Mentions that transformer blocks update or transform the 
         vector.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: incorporates_surroundings
       points: 0.8
       description: Mentions that information from surrounding or distant context
         is incorporated.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: richer_specific_meaning
       points: 0.8
       description: Explains that the resulting vector has richer, more specific 
         contextual meaning.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_static_embedding_only
       description: Claims the vector remains the same static word embedding 
         throughout the network.
       max_grade: 2
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -88,4 +131,4 @@ provenance:
         output
       quote_hash: sha256:src_logits
 created_at: '2026-05-28T22:11:52Z'
-updated_at: '2026-05-28T22:11:52Z'
+updated_at: '2026-07-15T01:10:46Z'

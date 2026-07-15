@@ -16,7 +16,18 @@ evidence_weights:
   probability_constraints: 0.25
   softmax_normalization: 0.25
   zero_argmax_limit: 0.25
-criterion_facet_weights: {}
+criterion_facet_weights:
+  gap_amplification:
+    lower_temperature_peakedness: 1.0
+  top_probability_approaches_one:
+    zero_argmax_limit: 0.5
+    probability_constraints: 0.5
+  other_probabilities_approach_zero:
+    zero_argmax_limit: 0.5
+    probability_constraints: 0.5
+  argmax_probability_distinction:
+    zero_argmax_limit: 0.5
+    softmax_normalization: 0.5
 prompt: A model has next-token logits where one token is clearly highest. As 
   temperature approaches 0, what happens to the softmax distribution? Explain 
   why this resembles argmax while still referring to probabilities.
@@ -46,6 +57,12 @@ retrieval_demand: 0.55
 transfer_distance: 0.45
 scaffold_level: 0.1
 surface_family: temperature_zero_argmax_limit
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
 misconception_consistent_answer: At temperature 0, softmax makes every token 
   equally likely because all randomness is removed.
 repair_targets:
@@ -61,20 +78,36 @@ grading_rubric:
       description: Explains that very low temperature amplifies differences 
         between logits.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: top_probability_approaches_one
       points: 1.0
       description: States that the highest-logit token's probability approaches 
         1.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: other_probabilities_approach_zero
       points: 1.0
       description: States that lower-logit token probabilities approach 0.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: argmax_probability_distinction
       points: 1.0
       description: Explains why the limit behaves like argmax while still being 
         framed through softmax probabilities.
       tier: transfer
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_zero_temperature_uniform
       description: Claims temperature approaching 0 makes all token 
@@ -99,4 +132,4 @@ provenance:
         should be high.
       quote_hash:
 created_at: '2026-07-13T01:00:28Z'
-updated_at: '2026-07-13T01:00:28Z'
+updated_at: '2026-07-15T01:11:40Z'

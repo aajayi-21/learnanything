@@ -3,7 +3,8 @@ from __future__ import annotations
 from learnloop.vault.facet_fingerprint import normalized_contract, semantic_fingerprint
 from learnloop.vault.loader import load_vault
 from learnloop.vault.models import EvidenceFacet
-from learnloop.vault.yaml_io import write_yaml
+from learnloop.vault.writer import upsert_facet
+from learnloop.vault.yaml_io import read_yaml, write_yaml
 
 from tests.helpers import NOW_ISO, create_basic_vault
 from learnloop.vault.paths import VaultPaths
@@ -28,6 +29,20 @@ def test_v1_registry_loads_unchanged(tmp_path):
     assert facet.kind is None
     assert facet.claim is None
     assert facet.semantic_fingerprint is not None
+
+
+def test_upsert_facet_promotes_v1_registry_to_v2(tmp_path):
+    paths = create_basic_vault(tmp_path / "vault")
+    _write_facets(paths, [], schema_version=1)
+
+    upsert_facet(
+        paths.root,
+        {"id": "recall", "kind": "definition", "claim": "Recall the SVD factorization."},
+    )
+
+    registry = read_yaml(paths.facets_path)
+    assert registry["schema_version"] == 2
+    assert registry["facets"][0]["id"] == "recall"
 
 
 def test_semantic_fingerprint_deterministic_and_ignores_naming():

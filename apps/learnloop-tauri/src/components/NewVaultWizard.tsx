@@ -211,9 +211,9 @@ export function NewVaultWizard({
   }, [vaultReady, step, bootstrapBatchId]);
 
   const stepValid = useMemo(() => {
-    if (step === 0) return vaultReady; // advancing past step 1 requires a created vault
+    if (step === 0) return vaultReady || path.trim().length > 0;
     return true;
-  }, [step, vaultReady]);
+  }, [step, vaultReady, path]);
 
   const advance = () => {
     if (goalWizardOpen || quickAddOpen) return;

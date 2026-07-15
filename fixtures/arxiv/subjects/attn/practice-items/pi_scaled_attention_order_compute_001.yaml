@@ -18,7 +18,17 @@ evidence_weights:
   scaling: 0.2
   softmax: 0.2
   weighted_sum: 0.2
-criterion_facet_weights: {}
+criterion_facet_weights:
+  dot_products_correct:
+    dot_products: 1.0
+  scaling_correct:
+    scaling: 1.0
+  softmax_next:
+    softmax: 0.5
+    correct_order: 0.5
+  weighted_sum_final:
+    weighted_sum: 0.5
+    correct_order: 0.5
 prompt: For one query q = [1, 1, 0, 0] and two keys k1 = [1, 1, 0, 0], k2 = [1, 
   -1, 0, 0], compute the raw dot products and the scaled scores when d_k = 4. 
   Then name the next two operations in scaled dot-product attention.
@@ -44,6 +54,12 @@ retrieval_demand: 0.45
 transfer_distance: 0.3
 scaffold_level: 0.25
 surface_family: scaled_attention_partial_compute
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
 misconception_consistent_answer: First average the values, then use softmax to 
   decide which key was closest.
 repair_targets:
@@ -60,19 +76,35 @@ grading_rubric:
       points: 1.0
       description: Correctly computes raw dot products as 2 and 0.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: scaling_correct
       points: 1.0
       description: Correctly divides by sqrt(4)=2 to get scaled scores 1 and 0.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: softmax_next
       points: 1.0
       description: Identifies softmax as the next operation after scaling.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: weighted_sum_final
       points: 1.0
       description: Identifies weighted sum of value vectors as the operation 
         after softmax.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_values_before_softmax
       description: Claims value vectors are summed before attention weights are 
@@ -97,4 +129,4 @@ provenance:
       quote: Attention Is All You Need
       quote_hash:
 created_at: '2026-07-13T01:00:09Z'
-updated_at: '2026-07-13T01:00:09Z'
+updated_at: '2026-07-15T01:11:27Z'

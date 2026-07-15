@@ -14,7 +14,13 @@ evidence_facets:
   - doubling_quadruples
   - bottleneck_implication
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  quadratic_scaling:
+    quadratic_scaling: 1.0
+  doubling_quadruples:
+    doubling_quadruples: 1.0
+  bottleneck_implication:
+    bottleneck_implication: 1.0
 prompt: If a self-attention pattern stores one score for every pair of positions
   in a context, what happens to the number of attention scores when the context 
   length doubles, and why does this matter?
@@ -40,6 +46,13 @@ retrieval_demand: 0.34
 transfer_distance: 0.36
 scaffold_level: 0.15
 surface_family: attention_scaling_application
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - quadratic_scaling
   - doubling_quadruples
@@ -52,18 +65,34 @@ grading_rubric:
       points: 1.0
       description: States that score count scales with the square of context 
         length.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: doubling_quadruples
       points: 1.0
       description: Correctly says doubling context length quadruples the number 
         of scores.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: bottleneck_implication
       points: 1.0
       description: Connects this to memory or compute bottlenecks for long 
         contexts.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_linear_scaling
       description: Claims doubling context only doubles attention scores.
       max_grade: 1
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -84,4 +113,4 @@ provenance:
         extremely parallelizable.
       quote_hash: sha256:src_parameter_scaling
 created_at: '2026-05-28T21:34:19Z'
-updated_at: '2026-05-28T21:34:19Z'
+updated_at: '2026-07-15T01:10:41Z'

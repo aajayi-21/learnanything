@@ -14,9 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from learnloop.clock import Clock
+from learnloop.db.repositories import Repository
 from learnloop.services.assessment_contracts import KM_ALGORITHM_VERSION
+from learnloop.services.canonical_projection import project_canonical_facet_state
 from learnloop.vault.loader import load_vault
 from learnloop.vault.models import LoadedVault
+from learnloop.vault.paths import VaultPaths
 
 LEGACY_ALGORITHM_VERSION = "mvp-0.6"
 
@@ -57,7 +60,13 @@ def validate_mvp07_readiness(vault: LoadedVault) -> list[str]:
 
 
 def upgrade_to_mvp07(root: Path, *, clock: Clock | None = None) -> UpgradeResult:
-    """Atomically activate mvp-0.7 for the vault at ``root`` if it is ready."""
+    """Atomically activate mvp-0.7 and project legacy attempts into its state.
+
+    The immutable attempt/grading ledger is shared by both model versions, but
+    mvp-0.7 reads a new canonical facet cache. Build that cache while the config
+    on disk still names mvp-0.6, then expose the new model with the final atomic
+    config rename. If projection fails, the vault remains visibly legacy.
+    """
 
     vault = load_vault(root)
     current = vault.config.algorithms.algorithm_version
@@ -87,6 +96,14 @@ def upgrade_to_mvp07(root: Path, *, clock: Clock | None = None) -> UpgradeResult
             to_version=KM_ALGORITHM_VERSION,
             problems=problems,
         )
+
+    # Use an in-memory version switch to enable the canonical projection before
+    # the durable config flip. Repository construction also applies the additive
+    # schema migrations needed by the projection. The old per-LO state and the
+    # raw attempts remain untouched for frozen mvp-0.6 replay.
+    repository = Repository(VaultPaths(vault.root, vault.config).sqlite_path)
+    vault.config.algorithms.algorithm_version = KM_ALGORITHM_VERSION
+    project_canonical_facet_state(vault, repository, clock=clock)
     _rewrite_algorithm_version(root / "learnloop.toml", current, KM_ALGORITHM_VERSION)
     return UpgradeResult(
         upgraded=True, from_version=current, to_version=KM_ALGORITHM_VERSION

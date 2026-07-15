@@ -24,7 +24,7 @@ import type {
   SchedulerComponents,
   SchedulerExplanationDto
 } from "../api/dto";
-import { BlockBar, COLOR, Dim, Divider, Faint, FONT_MONO, Meta, modePillColor, Pill, SectionHeader, type PillColor } from "./term";
+import { BlockBar, COLOR, Dim, DisclosureHeader, Divider, Faint, FONT_MONO, Meta, modePillColor, Pill, SectionHeader, type PillColor } from "./term";
 import { CapabilityGridView } from "./KnowledgeModel";
 import { RecipeTreeEditor } from "./recipeedit/RecipeTreeEditor";
 import { MarkdownMath } from "../render/MarkdownMath";
@@ -160,13 +160,13 @@ export function InspectorOverlay({
           {pill ? <Pill color={pill.color}>{pill.label}</Pill> : null}
           <span style={{ flex: 1 }} />
           {history.length > 0 ? (
-            <span onClick={back} style={{ color: COLOR.amberLink, fontSize: 12, cursor: "pointer" }}>
-              ← back ({history.length})
-            </span>
+            <button type="button" onClick={back} style={headerActionStyle}>
+              ← back · {history.length}
+            </button>
           ) : null}
-          <span onClick={onClose} style={{ color: COLOR.textDim, cursor: "pointer", fontSize: 13, marginLeft: 6 }}>
-            esc
-          </span>
+          <button type="button" onClick={onClose} style={{ ...headerActionStyle, color: COLOR.textDim, marginLeft: 6 }}>
+            esc ×
+          </button>
         </div>
 
         {/* ── search ── */}
@@ -389,16 +389,27 @@ function PracticeItemBody({ detail, onGo }: { detail: PracticeItemDetail; onGo: 
 
       <SectionHeader>Hints</SectionHeader>
       {detail.hints.length ? (
-        <div style={{ display: 'grid', gap: 6 }}>
-            {detail.hints.map((h, i) =>
-          <div key={i} style={{
-            padding: '8px 10px', fontSize: 12, color: COLOR.textDim,
-            borderLeft: `2px solid ${COLOR.border}`, lineHeight: 1.5
-          }}>
-                <Faint>hint {i + 1}</Faint>{' '}{h}
-              </div>
-          )}
-          </div>
+        <div style={{ display: "grid", border: `1px solid ${COLOR.border}` }}>
+          {detail.hints.map((hint, index) => (
+            <div
+              key={index}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "58px minmax(0, 1fr)",
+                gap: 10,
+                padding: "8px 10px",
+                fontSize: 12,
+                color: COLOR.textDim,
+                background: COLOR.bgInput,
+                borderTop: index > 0 ? `1px solid ${COLOR.border}` : "none",
+                lineHeight: 1.5
+              }}
+            >
+              <span style={{ color: COLOR.amber, fontFamily: FONT_MONO }}>hint {String(index + 1).padStart(2, "0")}</span>
+              <span>{hint}</span>
+            </div>
+          ))}
+        </div>
       ) : (
         <Faint>no hints configured</Faint>
       )}
@@ -502,7 +513,7 @@ function LearningObjectBody({
         </InspectorRow>
       ) : null}
       {childPracticeItemId ? (
-        <InspectorRow label="child practice_item">
+        <InspectorRow label="child_practice_item">
           <IdLink id={childPracticeItemId} onGo={onGo} /> <Faint>· ← to return</Faint>
         </InspectorRow>
       ) : null}
@@ -516,18 +527,11 @@ function LearningObjectBody({
 
       <SectionHeader>Mastery posterior</SectionHeader>
       {detail.mastery ? (
-        <div>
-          <div style={{ fontSize: 24, fontFamily: FONT_MONO, color: masteryColor(detail.mastery.mean) }}>
-            {detail.mastery.mean.toFixed(2)}
-          </div>
-          <div>
-            <Faint>±{Math.sqrt(detail.mastery.variance).toFixed(2)} (logit-space Kalman)</Faint>
-          </div>
-          <div style={{ marginTop: 6, fontSize: 11 }}>
-            <Faint>evidence_count</Faint> <Dim style={{ fontFamily: FONT_MONO }}>{detail.mastery.evidenceCount}</Dim>
-            {"   "}
-            <Faint>last</Faint> <Dim>{relTime(detail.mastery.lastEvidenceAt)}</Dim>
-          </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
+          <Stat label="mean" value={detail.mastery.mean.toFixed(2)} color={masteryColor(detail.mastery.mean)} />
+          <Stat label="uncertainty" value={`±${Math.sqrt(detail.mastery.variance).toFixed(2)}`} />
+          <Stat label="evidence" value={detail.mastery.evidenceCount} />
+          <Stat label="last_evidence" value={relTime(detail.mastery.lastEvidenceAt)} />
         </div>
       ) : (
         <Faint>no evidence yet</Faint>
@@ -564,25 +568,12 @@ function LoCapabilitySection({ loId }: { loId: string }) {
   }, [open, loId, grid]);
 
   return (
-    <div style={{ marginTop: 14 }}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          fontFamily: FONT_MONO,
-          fontSize: 12,
-          background: "transparent",
-          border: `1px solid ${COLOR.border}`,
-          borderRadius: 3,
-          color: COLOR.amberLink,
-          padding: "3px 10px",
-          cursor: "pointer",
-        }}
-      >
-        {open ? "▾" : "▸"} capability grid & recipe tree
-      </button>
+    <div>
+      <DisclosureHeader open={open} onToggle={() => setOpen((v) => !v)}>
+        Capability grid &amp; recipe tree
+      </DisclosureHeader>
       {open && (
-        <div style={{ marginTop: 10 }}>
+        <div>
           {error && <Faint>{error}</Faint>}
           {grid && <CapabilityGridView result={grid} />}
           {!grid && !error && <Faint>loading…</Faint>}
@@ -958,10 +949,10 @@ function SchedulerWhy({ scheduler }: { scheduler: SchedulerExplanationDto }) {
         return (
           <div
             key={row.key}
-            style={{ display: "grid", gridTemplateColumns: "200px 1fr 64px", gap: 12, alignItems: "center", padding: "5px 0" }}
+            style={{ display: "grid", gridTemplateColumns: "180px 1fr 64px", gap: 12, alignItems: "center", padding: "5px 0" }}
           >
             <div style={{ fontSize: 12, color: row.color, fontFamily: FONT_MONO }}>{row.label}</div>
-            <div style={{ height: 18, background: COLOR.bgInput, border: `1px solid ${COLOR.border}`, position: "relative" }}>
+            <div style={{ height: 8, background: COLOR.bgInput, border: `1px solid ${COLOR.border}`, position: "relative" }}>
               <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${pct}%`, background: row.color, opacity: 0.85 }} />
             </div>
             <div style={{ fontSize: 12, color: row.color, textAlign: "right", fontFamily: FONT_MONO }}>{value.toFixed(3)}</div>
@@ -975,13 +966,16 @@ function SchedulerWhy({ scheduler }: { scheduler: SchedulerExplanationDto }) {
             marginTop: 14,
             padding: "10px 12px",
             background: COLOR.bgElev,
-            borderLeft: `3px solid ${COLOR.cyan}`,
+            border: `1px solid ${COLOR.border}`,
+            borderLeft: `2px solid ${COLOR.cyan}`,
             fontSize: 12,
             lineHeight: 1.6,
             color: COLOR.text
           }}
         >
-          <div style={{ color: COLOR.cyan, fontWeight: 600, marginBottom: 3 }}>plain english</div>
+          <div style={{ color: COLOR.cyan, fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>
+            plain english
+          </div>
           {scheduler.plainEnglish.join(" ")}
         </div>
       ) : null}
@@ -1179,6 +1173,16 @@ const headerStyle: CSSProperties = {
   alignItems: "center",
   gap: 10,
   flexShrink: 0
+};
+
+const headerActionStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: COLOR.amberLink,
+  padding: "2px 0",
+  fontFamily: FONT_MONO,
+  fontSize: 11,
+  cursor: "pointer"
 };
 
 const searchInputStyle: CSSProperties = {

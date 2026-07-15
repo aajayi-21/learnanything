@@ -39,7 +39,6 @@ const BEAD_R = 0.52; // radius along each spoke where the anchor bead sits
 const RING_RS = [0.14, 0.28, 0.42, 0.56, 0.7, 0.84, 1];
 const CONTOUR_QS = [0.12, 0.24, 0.36, 0.48, 0.6, 0.72]; // fractions of DEPTH
 const SPOKE_STEPS = 26;
-const MAX_LABELS = 6;
 const EASE = "stroke 0.22s ease, fill 0.22s ease, opacity 0.22s ease, stroke-width 0.22s ease";
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
@@ -279,14 +278,6 @@ export function KnowledgeWellView({
       .sort((a, b) => a.p.depth - b.p.depth);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geometry, cam.yaw, cam.pitch]);
-
-  // Labels: cap clutter at the top-N by evidence mass, plus the selection.
-  const labelSet = useMemo(() => {
-    const ranked = [...states].sort((a, b) => b.point.evidenceMass - a.point.evidenceMass).slice(0, MAX_LABELS);
-    const ids = new Set(ranked.map((s) => s.point.id));
-    if (selected) ids.add(selected);
-    return ids;
-  }, [states, selected]);
 
   // Exact scene summary for the aria-label and the always-visible caption.
   const summary = useMemo(() => {
@@ -543,10 +534,9 @@ export function KnowledgeWellView({
         );
       })}
 
-      {/* Rim labels — capped at top-N by evidence mass plus the selection. */}
+      {/* Rim labels — all facets stay visible; selection only changes emphasis. */}
       {geometry.labels.map((pos, i) => {
         const s = states[i];
-        if (!labelSet.has(s.point.id)) return null;
         const p = proj(pos);
         const isActive = s.point.id === selected;
         const anchor = Math.abs(p.x - CX) < 14 ? "middle" : p.x > CX ? "start" : "end";

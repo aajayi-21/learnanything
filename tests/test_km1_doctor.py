@@ -44,6 +44,13 @@ def test_unregistered_facet_is_warning_on_legacy(tmp_path):
     assert codes.get("evidence_facet:unregistered") == "warning"
 
 
+def test_v2_facet_registry_schema_is_supported(tmp_path):
+    paths = create_basic_vault(tmp_path / "vault")
+    write_facets(paths, [{"id": "recall", "kind": "definition", "claim": "Recall the SVD factorization."}])
+
+    assert "yaml:unsupported_schema_version" not in _codes(paths)
+
+
 def test_facet_missing_claim_is_incomplete_contract_error_on_mvp07(tmp_path):
     paths = create_basic_vault(tmp_path / "vault")
     set_algorithm_version(paths, "mvp-0.7")

@@ -16,7 +16,17 @@ evidence_facets:
   - value_weighting
   - correct_order
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  dot_products:
+    dot_products: 1.0
+  scaling:
+    scaling: 1.0
+  softmax:
+    softmax: 1.0
+  value_weighting:
+    value_weighting: 1.0
+  correct_order:
+    correct_order: 1.0
 prompt: Put the main operations of scaled dot-product attention in order, 
   starting from queries, keys, and values.
 expected_answer: Compute query-key dot products; scale the scores by the square 
@@ -39,6 +49,13 @@ retrieval_demand: 0.55
 transfer_distance: 0.2
 scaffold_level: 0.15
 surface_family: algorithm_steps
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - dot_products
   - scaling
@@ -53,25 +70,52 @@ grading_rubric:
     - id: dot_products
       points: 0.8
       description: Includes dot products between queries and keys.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: scaling
       points: 0.8
       description: Includes scaling by the key-dimension factor.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: softmax
       points: 0.8
       description: Includes softmax normalization.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: value_weighting
       points: 0.8
       description: Includes weighting values to compute outputs.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: correct_order
       points: 0.8
       description: Orders the steps correctly.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_missing_softmax
       description: Omits softmax or any normalization step.
       max_grade: 3
+      misconception_id:
     - id: fatal_wrong_score_target
       description: Scores queries against values instead of keys.
       max_grade: 3
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -84,4 +128,4 @@ provenance:
         setting, quality also drops off with too many heads.
       quote_hash: sha256:head_count_ablation
 created_at: '2026-05-28T21:34:32Z'
-updated_at: '2026-05-28T21:34:32Z'
+updated_at: '2026-07-15T01:11:30Z'

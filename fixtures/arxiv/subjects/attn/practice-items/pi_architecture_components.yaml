@@ -19,7 +19,23 @@ evidence_facets:
   - dimension_consistency
   - stacked_layers
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  encoder_sublayers:
+    encoder_sublayers: 1.0
+  decoder_masked_self_attention:
+    decoder_masked_self_attention: 1.0
+  encoder_decoder_attention:
+    encoder_decoder_attention: 1.0
+  decoder_ffn:
+    decoder_ffn: 1.0
+  residual_connections:
+    residual_connections: 1.0
+  layer_norm:
+    layer_norm: 1.0
+  dimension_consistency:
+    dimension_consistency: 1.0
+  stacked_layers:
+    stacked_layers: 1.0
 prompt: Describe the main sublayers in a Transformer encoder layer and decoder 
   layer. Include which attention mechanisms appear in each and how residual 
   connections and layer normalization are used.
@@ -47,6 +63,13 @@ retrieval_demand: 0.65
 transfer_distance: 0.45
 scaffold_level: 0.1
 surface_family: architecture_component_explanation
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - encoder_sublayers
   - decoder_masked_self_attention
@@ -63,36 +86,78 @@ grading_rubric:
       points: 0.75
       description: Correctly identifies encoder self-attention and feed-forward 
         sublayers.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: decoder_masked_self_attention
       points: 0.75
       description: Correctly identifies masked decoder self-attention.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: encoder_decoder_attention
       points: 0.5
       description: Correctly identifies decoder attention over encoder outputs.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: decoder_ffn
       points: 0.5
       description: Includes the decoder position-wise feed-forward network.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: residual_connections
       points: 0.5
       description: Mentions residual connections around sublayers.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: layer_norm
       points: 0.5
       description: Mentions layer normalization after residual addition.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: dimension_consistency
       points: 0.25
       description: Mentions shared model dimension enabling residual 
         connections.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: stacked_layers
       points: 0.25
       description: Mentions that layers are stacked and repeated.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_no_decoder_cross_attention
       description: Omits encoder-decoder attention from the decoder.
       max_grade: 3
+      misconception_id:
     - id: fatal_encoder_is_recurrent
       description: Describes the Transformer encoder as an RNN or convolutional 
         stack rather than attention/feed-forward layers.
       max_grade: 2
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -105,4 +170,4 @@ provenance:
         setting, quality also drops off with too many heads.
       quote_hash: sha256:head_count_ablation
 created_at: '2026-05-28T21:34:28Z'
-updated_at: '2026-05-28T21:34:28Z'
+updated_at: '2026-07-15T01:10:38Z'

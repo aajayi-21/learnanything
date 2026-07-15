@@ -16,7 +16,17 @@ evidence_facets:
   - cost_reasoning
   - not_just_parallelism
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  subspaces:
+    subspaces: 1.0
+  positions:
+    positions: 1.0
+  averaging_limitation:
+    averaging_limitation: 1.0
+  cost_reasoning:
+    cost_reasoning: 1.0
+  not_just_parallelism:
+    not_just_parallelism: 1.0
 prompt: Why does the Transformer use multi-head attention instead of a single 
   attention head with the full model dimension?
 expected_answer: Multi-head attention lets the model attend jointly to 
@@ -42,6 +52,13 @@ retrieval_demand: 0.5
 transfer_distance: 0.35
 scaffold_level: 0.1
 surface_family: mechanism_rationale
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - subspaces
   - positions
@@ -55,28 +72,55 @@ grading_rubric:
     - id: subspaces
       points: 1.2
       description: Mentions different representation subspaces.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: positions
       points: 0.8
       description: Mentions attending to different positions.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: averaging_limitation
       points: 0.8
       description: Explains that a single head can inhibit distinct attention 
         patterns through averaging.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: cost_reasoning
       points: 0.8
       description: Notes reduced per-head dimensions keep cost similar.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: not_just_parallelism
       points: 0.4
       description: Does not reduce the answer to hardware parallelism alone.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_only_speed
       description: Claims the only purpose of multiple heads is faster 
         computation.
       max_grade: 2
+      misconception_id:
     - id: fatal_independent_models
       description: Describes heads as separate models whose predictions are 
         voted on.
       max_grade: 2
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -89,4 +133,4 @@ provenance:
         setting, quality also drops off with too many heads.
       quote_hash: sha256:head_count_ablation
 created_at: '2026-05-28T21:34:30Z'
-updated_at: '2026-05-28T21:34:30Z'
+updated_at: '2026-07-15T01:11:20Z'

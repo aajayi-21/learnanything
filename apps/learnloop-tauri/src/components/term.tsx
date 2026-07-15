@@ -348,6 +348,52 @@ export function SectionHeader({ children, style = {} }: { children: ReactNode; s
   );
 }
 
+export function DisclosureHeader({
+  open,
+  onToggle,
+  children,
+  style = {}
+}: {
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+  style?: CSSProperties;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      style={{
+        width: "100%",
+        marginTop: 22,
+        marginBottom: open ? 12 : 0,
+        padding: 0,
+        border: "none",
+        background: "transparent",
+        display: "flex",
+        alignItems: "baseline",
+        gap: 8,
+        color: COLOR.amber,
+        fontFamily: FONT_MONO,
+        fontSize: 14,
+        textAlign: "left",
+        cursor: "pointer",
+        ...style
+      }}
+    >
+      <span aria-hidden style={{ color: open ? COLOR.amber : COLOR.textFaint, fontSize: 11, width: 10 }}>
+        {open ? "▾" : "▸"}
+      </span>
+      <span style={{ textDecoration: "underline", textUnderlineOffset: 3 }}>{children}</span>
+      <span style={{ flex: 1 }} />
+      <span style={{ color: COLOR.textFaint, fontSize: 10, fontWeight: 400 }}>
+        {open ? "collapse" : "expand"}
+      </span>
+    </button>
+  );
+}
+
 // Unicode block bar for difficulty / mastery / progress.
 export function BlockBar({
   value,

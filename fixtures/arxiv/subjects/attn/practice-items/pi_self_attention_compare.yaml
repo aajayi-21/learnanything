@@ -19,7 +19,23 @@ evidence_facets:
   - long_range_dependency_link
   - balanced_comparison
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  three_criteria:
+    three_criteria: 1.0
+  self_attention_parallel:
+    self_attention_parallel: 1.0
+  self_attention_path:
+    self_attention_path: 1.0
+  recurrent_sequential:
+    recurrent_sequential: 1.0
+  convolution_path:
+    convolution_path: 1.0
+  complexity_tradeoff:
+    complexity_tradeoff: 1.0
+  long_range_dependency_link:
+    long_range_dependency_link: 1.0
+  balanced_comparison:
+    balanced_comparison: 1.0
 prompt: 'Compare self-attention with recurrent and convolutional layers using the
   paper’s three motivation criteria: computational complexity, parallelization, and
   path length for long-range dependencies.'
@@ -50,6 +66,13 @@ retrieval_demand: 0.7
 transfer_distance: 0.55
 scaffold_level: 0.05
 surface_family: architecture_tradeoff_comparison
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - three_criteria
   - self_attention_parallel
@@ -68,47 +91,90 @@ grading_rubric:
       points: 0.75
       description: 'Names all three comparison criteria: complexity, parallelism,
         and path length.'
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: self_attention_parallel
       points: 0.5
       description: Explains self-attention’s constant sequential operations 
         across positions.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: self_attention_path
       points: 0.5
       description: Explains the short path length benefit for long-range 
         dependencies.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: recurrent_sequential
       points: 0.5
       description: Explains recurrence requires sequential computation by 
         position.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: convolution_path
       points: 0.5
       description: Explains convolution needs multiple layers or dilation to 
         connect distant positions.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: complexity_tradeoff
       points: 0.5
       description: Mentions computational cost conditions or kernel/separable 
         convolution tradeoffs.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: long_range_dependency_link
       points: 0.5
       description: Connects shorter paths to easier learning of long-range 
         dependencies.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: balanced_comparison
       points: 0.25
       description: Avoids claiming self-attention dominates every setting 
         without tradeoffs.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_single_criterion
       description: Only discusses one criterion and ignores the multi-criterion 
         comparison.
       max_grade: 2
+      misconception_id:
     - id: fatal_recurrence_parallel
       description: Claims recurrent layers parallelize across sequence positions
         in the same way as self-attention.
       max_grade: 2
+      misconception_id:
     - id: fatal_no_path_length
       description: Omits path length and long-range dependency reasoning 
         entirely.
       max_grade: 3
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -121,4 +187,4 @@ provenance:
         setting, quality also drops off with too many heads.
       quote_hash: sha256:head_count_ablation
 created_at: '2026-05-28T21:34:33Z'
-updated_at: '2026-05-28T21:34:33Z'
+updated_at: '2026-07-15T01:11:33Z'

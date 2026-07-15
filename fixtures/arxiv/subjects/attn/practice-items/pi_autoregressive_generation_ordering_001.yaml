@@ -15,7 +15,15 @@ evidence_facets:
   - append_step
   - iteration_loop
 evidence_weights: {}
-criterion_facet_weights: {}
+criterion_facet_weights:
+  mentions_distribution:
+    next_token_distribution: 1.0
+  mentions_sampling:
+    sampling_step: 1.0
+  mentions_append:
+    append_step: 1.0
+  mentions_repeat:
+    iteration_loop: 1.0
 prompt: A model has just produced a probability distribution over possible next 
   tokens for a seed text. In one or two sentences, describe how this prediction 
   model can generate a longer passage.
@@ -39,6 +47,13 @@ retrieval_demand: 0.35
 transfer_distance: 0.2
 scaffold_level: 0.15
 surface_family: autoregressive_generation_explanation
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
+misconception_consistent_answer:
 repair_targets:
   - next_token_distribution
   - sampling_step
@@ -52,21 +67,42 @@ grading_rubric:
       points: 1.0
       description: Mentions that the model produces a probability distribution 
         over possible next tokens.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: mentions_sampling
       points: 1.0
       description: Mentions sampling or choosing a token from that distribution.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: mentions_append
       points: 1.0
       description: Mentions appending the selected token to the existing text.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: mentions_repeat
       points: 1.0
       description: Mentions repeating the prediction process using the updated 
         text.
+      tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_training_loop_confusion
       description: Describes retraining or changing model weights at each 
         generated token rather than inference-time prediction and sampling.
       max_grade: 1
+      misconception_id:
 provenance:
   origin: canonical_extract
   source_refs:
@@ -79,4 +115,4 @@ provenance:
         output
       quote_hash: sha256:src_logits
 created_at: '2026-05-28T22:11:57Z'
-updated_at: '2026-05-28T22:11:57Z'
+updated_at: '2026-07-15T01:10:42Z'

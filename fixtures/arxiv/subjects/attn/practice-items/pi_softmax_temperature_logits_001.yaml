@@ -16,7 +16,15 @@ evidence_weights:
   next_token_distribution: 0.25
   probability_constraints: 0.25
   softmax_normalization: 0.25
-criterion_facet_weights: {}
+criterion_facet_weights:
+  logits_raw_scores:
+    logits_raw_scores: 1.0
+  softmax_nonnegative_probabilities:
+    softmax_normalization: 1.0
+  probabilities_sum_one:
+    probability_constraints: 1.0
+  next_token_distribution_use:
+    next_token_distribution: 1.0
 prompt: A language model produces logits for possible next tokens before 
   sampling. What are logits, and what does softmax change about them so they can
   be used as a next-token distribution?
@@ -44,6 +52,12 @@ retrieval_demand: 0.4
 transfer_distance: 0.15
 scaffold_level: 0.2
 surface_family: logits_to_softmax_distribution
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
 misconception_consistent_answer: Logits are the percentages for each next token,
   and softmax just picks the biggest one.
 repair_targets:
@@ -59,20 +73,36 @@ grading_rubric:
       description: Defines logits as raw unnormalized scores for candidate next 
         tokens.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: softmax_nonnegative_probabilities
       points: 1.0
       description: Explains that softmax converts scores into nonnegative 
         probabilities.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: probabilities_sum_one
       points: 1.0
       description: States that the resulting probabilities sum to 1.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: next_token_distribution_use
       points: 0.75
       description: Connects the probabilities to next-token sampling or 
         selection.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_logits_already_probabilities
       description: Claims logits are already normalized probabilities before 
@@ -96,4 +126,4 @@ provenance:
       quote: temperature controls the distribution output from softmax
       quote_hash:
 created_at: '2026-07-13T01:00:16Z'
-updated_at: '2026-07-13T01:00:16Z'
+updated_at: '2026-07-15T01:11:38Z'

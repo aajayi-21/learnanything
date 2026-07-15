@@ -227,8 +227,11 @@ def _check_layout(paths: VaultPaths, issues: list[HealthIssue]) -> None:
 
 
 def _check_schema_versions(paths: VaultPaths, issues: list[HealthIssue]) -> None:
-    for file_path in [paths.concepts_path, paths.relations_path, paths.error_types_path, paths.facets_path]:
+    for file_path in [paths.concepts_path, paths.relations_path, paths.error_types_path]:
         _check_yaml_schema(file_path, issues)
+    # The canonical facet registry has a v2 semantic-contract format; legacy
+    # v1 registries remain readable during migration.
+    _check_yaml_schema(paths.facets_path, issues, supported={1, 2})
     # goals.yaml v1 (concept_anchors) still loads via the legacy converter.
     _check_yaml_schema(paths.goals_path, issues, supported={1, 2})
     for file_path in sorted((paths.root / "subjects").glob("*/concept-graph.yaml")):

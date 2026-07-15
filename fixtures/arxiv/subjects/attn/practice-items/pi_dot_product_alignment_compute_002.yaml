@@ -11,14 +11,20 @@ evidence_facets:
   - dot_product_ac
   - multiply_sum_method
   - alignment_interpretation
-  - zero_interpretation
 evidence_weights:
-  alignment_interpretation: 0.2
-  dot_product_ab: 0.2
-  dot_product_ac: 0.2
-  multiply_sum_method: 0.2
-  zero_interpretation: 0.2
-criterion_facet_weights: {}
+  alignment_interpretation: 0.25
+  dot_product_ab: 0.25
+  dot_product_ac: 0.25
+  multiply_sum_method: 0.25
+criterion_facet_weights:
+  dot_product_ab_correct:
+    dot_product_ab: 1.0
+  dot_product_ac_correct:
+    dot_product_ac: 1.0
+  multiply_sum_method_shown:
+    multiply_sum_method: 1.0
+  alignment_interpretation_correct:
+    alignment_interpretation: 1.0
 prompt: Compute a . b and a . c for a = [2, -1], b = [4, 2], and c = [-1, 3]. 
   Which vector is more aligned with a, and what does the sign of the other dot 
   product suggest?
@@ -45,6 +51,12 @@ retrieval_demand: 0.35
 transfer_distance: 0.25
 scaffold_level: 0.2
 surface_family: 2d_dot_product_alignment
+evidence_fingerprint:
+  source_family:
+  shared_stimulus_id:
+  representation:
+  solution_recipe_family:
+  answer_structure:
 misconception_consistent_answer: c is more aligned because |-5| is close to 6 
   and negative only means strong relationship.
 repair_targets:
@@ -60,20 +72,36 @@ grading_rubric:
       points: 1.0
       description: Correctly computes a . b as 6.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: dot_product_ac_correct
       points: 1.0
       description: Correctly computes a . c as -5.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: multiply_sum_method_shown
       points: 0.75
       description: Shows or describes multiplying corresponding components and 
         summing.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
     - id: alignment_interpretation_correct
       points: 1.25
       description: Identifies b as more aligned and interprets the negative dot 
         product as opposition or poor alignment.
       tier: core
+      targets: []
+      depends_on: []
+      correlation_group:
+      recipe_ids: []
   fatal_errors:
     - id: fatal_chooses_smaller_dot_product_as_more_aligned
       description: Chooses c as more aligned because its dot product has larger 
@@ -91,4 +119,4 @@ provenance:
         phases.
       quote_hash:
 created_at: '2026-07-13T01:00:07Z'
-updated_at: '2026-07-13T01:00:07Z'
+updated_at: '2026-07-15T01:11:07Z'

@@ -169,18 +169,27 @@ export function SyllabusColumn({
             <li
               key={id}
               draggable
-              onDragStart={() => setDragIndex(index)}
+              onDragStart={(e) => {
+                window.getSelection()?.removeAllRanges();
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", id);
+                setDragIndex(index);
+                setOverIndex(index);
+              }}
               onDragEnd={() => {
                 setDragIndex(null);
                 setOverIndex(null);
               }}
               onDragOver={(e) => {
                 e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
                 if (overIndex !== index) setOverIndex(index);
               }}
               onDrop={(e) => {
                 e.preventDefault();
-                if (dragIndex !== null && dragIndex !== index) onDrop(ordered[dragIndex], dragIndex, index);
+                const movedId = e.dataTransfer.getData("text/plain") || (dragIndex === null ? "" : ordered[dragIndex]);
+                const fromIndex = ordered.indexOf(movedId);
+                if (dragIndex !== null && fromIndex >= 0 && fromIndex !== index) onDrop(movedId, fromIndex, index);
                 setDragIndex(null);
                 setOverIndex(null);
               }}
@@ -189,15 +198,21 @@ export function SyllabusColumn({
                 alignItems: "center",
                 gap: 8,
                 padding: "4px 12px",
-                cursor: "grab",
+                cursor: dragIndex === index ? "grabbing" : "grab",
                 borderTop: isOver ? `2px solid ${COLOR.amber}` : "2px solid transparent",
                 background: dragIndex === index ? COLOR.bgElev : "transparent",
-                opacity: dragIndex === index ? 0.6 : 1
+                opacity: dragIndex === index ? 0.6 : 1,
+                userSelect: "none",
+                WebkitUserSelect: "none"
               }}
             >
-              <span style={{ color: COLOR.textFaint, width: 20, textAlign: "right" }}>{index + 1}</span>
-              <span style={{ color: COLOR.textFaint }}>⣿</span>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span draggable={false} style={{ color: COLOR.textFaint, width: 20, textAlign: "right" }}>
+                {index + 1}
+              </span>
+              <span draggable={false} style={{ color: COLOR.textFaint }}>
+                ⣿
+              </span>
+              <span draggable={false} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {concept.title || concept.id}
               </span>
             </li>

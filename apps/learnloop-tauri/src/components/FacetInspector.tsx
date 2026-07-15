@@ -23,6 +23,7 @@ import type {
 } from "../api/dto";
 import { EntityLink } from "./ui";
 import { COLOR, Faint, FONT_MONO, Meta, Pill, SectionHeader } from "./term";
+import { FacetEvidenceReceipt } from "./KnowledgeModel";
 
 const LOCK_GLYPH = "\u{1F512}"; // 🔒
 
@@ -230,6 +231,9 @@ function FacetBody({
       ) : (
         <Faint style={{ display: "block", marginTop: 6 }}>no capability evidence yet</Faint>
       )}
+      <div style={{ marginTop: 12, borderTop: `1px solid ${COLOR.border}`, paddingTop: 10 }}>
+        <FacetEvidenceReceipt facetId={facetId} />
+      </div>
 
       {/* (e) shared with */}
       {sharedWith.length > 0 ? (

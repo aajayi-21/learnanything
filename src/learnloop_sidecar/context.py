@@ -9,6 +9,7 @@ from learnloop.ai.runtime import check_ai_runtime
 from learnloop.codex.runtime import check_codex_runtime
 from learnloop.db.migrate import applied_versions, discover_migrations
 from learnloop.db.repositories import Repository
+from learnloop.services.canonical_projection import project_canonical_facet_state
 from learnloop.services.facet_diagnostics import mastery_diagnostic_view
 from learnloop.services.mastery import display_mastery
 from learnloop.services.startup import run_startup_maintenance
@@ -45,6 +46,12 @@ class SidecarContext:
             poll_interval_seconds=runner_config.poll_interval_seconds,
         )
         sync_vault_state(self.vault, self.repository)
+        # Canonical facet state is a deterministic cache over the immutable
+        # attempt ledger. Re-project on app load so vaults activated by the old
+        # mvp-0.7 upgrader (which only flipped the config field) self-heal and
+        # immediately show their historical attempts in the knowledge field.
+        # This is a no-op for legacy vaults and idempotent for current ones.
+        project_canonical_facet_state(self.vault, self.repository)
         # Startup maintenance probes the Codex runtime, which (for the HTTP provider)
         # can launch the server and block up to startup_timeout_seconds. Skip it on
         # refreshes that only need fresh vault/DB state, not a runtime health pass.
