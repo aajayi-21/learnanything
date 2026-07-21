@@ -503,6 +503,34 @@ def depth_edges_list(
     }))
 
 
+@depth_app.command("backfill-rungs")
+def depth_backfill_rungs(
+    subject: Annotated[str | None, typer.Option("--subject", help="Limit to one subject id.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Report classifications without writing.")] = False,
+    vault: Annotated[Path | None, typer.Option("--vault")] = None,
+) -> None:
+    """LLM-classify legacy items into capability + task_features (deterministic
+    validators admit each entry) and stamp the vault YAML in place. Annotation
+    only — content, rubrics, evidence, and scheduling state are untouched."""
+
+    from learnloop.services.rung_backfill import RungBackfillError, backfill_item_rungs
+
+    vault_root = _root(vault)
+    loaded = load_vault(vault_root)
+    runtime = check_codex_runtime(vault_root, loaded.config.codex)
+    client = make_codex_client(loaded.config.codex, vault_root) if runtime.ready else None
+    if client is None:
+        typer.echo(runtime.message or "Codex runtime is unavailable.", err=True)
+        raise typer.Exit(code=1)
+    repo = _repository(vault_root)
+    try:
+        report = backfill_item_rungs(vault_root, repo, client, subject=subject, dry_run=dry_run)
+    except RungBackfillError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(_dump({"version": 1, "dry_run": dry_run, **report}))
+
+
 @depth_app.command("edges-confirm")
 def depth_edges_confirm(
     commitment_id: Annotated[str, typer.Argument(help="Commitment id.")],

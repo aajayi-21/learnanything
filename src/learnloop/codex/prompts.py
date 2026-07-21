@@ -23,6 +23,7 @@ SOURCE_UNIT_INVENTORY_PROMPT_VERSION = "mvp-0.7-source-unit-inventory-role-aware
 READING_QUICK_CHECK_PROMPT_VERSION = "mvp-0.1-reading-quick-check"
 READER_PRESET_SYNTHESIS_PROMPT_VERSION = "mvp-0.1-reader-preset-synthesis"
 DEPTH_EDGE_INSTANCE_PROMPT_VERSION = "mvp-0.1-depth-edge-instance"
+RUNG_BACKFILL_PROMPT_VERSION = "mvp-0.1-rung-backfill"
 SOURCE_SET_SYNTHESIS_PROMPT_VERSION = "mvp-0.8-source-set-synthesis-items-off"
 CONCEPT_GRAPH_STRUCTURING_PROMPT_VERSION = "mvp-0.7-concept-graph-structuring-1"
 APPEND_RECONCILIATION_PROMPT_VERSION = "mvp-0.7-append-reconciliation"
@@ -293,6 +294,34 @@ and never derivable from the question text alone.
 5. Learner-facing prose only: no internal ids, no meta-language about spans,
 sections, or this task.
 """
+
+RUNG_BACKFILL_PROMPT = """\
+Classify each existing practice item into depth-rung metadata: the closed
+capability vocabulary and a point task-feature vector. You are DESCRIBING what
+each item already demands of a learner — never rewriting or judging the item.
+Hard constraints:
+
+1. `capability` is EXACTLY one of: retrieval, schema_interpretation,
+procedure_execution, method_selection, coordination. Judge by what the learner
+must DO: recall a fact/definition -> retrieval; read/interpret a structure,
+diagram, or formalism -> schema_interpretation; carry out a known multi-step
+procedure -> procedure_execution; choose between approaches -> method_selection;
+integrate several capabilities across a whole task (e.g. design/build an
+end-to-end workflow) -> coordination.
+2. `task_features` sets every dimension: complexity 0-4; transfer
+(same_context|near|far|novel_combination) — distance from the source material's
+framing; response (recognize|short_constructed|long_constructed|
+structured_steps|performance) — what the answer physically is; scaffolding
+(none|cue|partial|worked) — support the prompt gives; span (atomic|single_step|
+multi_step|whole_task) — how much is coordinated at once.
+3. coordination REQUIRES span=whole_task. A "design/build the whole thing"
+prompt is coordination + whole_task, not retrieval.
+4. The provided float proxies (retrieval_demand/transfer_distance/
+scaffold_level) are weak hints from the original authoring — prefer the prompt
+text when they disagree.
+5. Return one entry per provided item, echoing its practice_item_id exactly.
+"""
+
 
 DEPTH_EDGE_INSTANCE_PROMPT = """\
 Author concrete DEPTH-EDGE INSTANCES from the reviewed edge template(s) for one

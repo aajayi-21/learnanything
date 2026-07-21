@@ -29,6 +29,19 @@ hint_policy:
 retrieval_demand: 0.2
 transfer_distance: 0.35
 scaffold_level: 0.35
+capability: procedure_execution
+task_features:
+  complexity: 2
+  transfer: near
+  representation:
+    - symbolic
+    - verbal
+  response: structured_steps
+  scaffolding: partial
+  span: multi_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: causal_attention_trace
 evidence_fingerprint:
   source_family: transformer_attention_lecture
@@ -104,4 +117,4 @@ provenance:
       source_id: src_01KY18Z8B6CXZ8VFMQF374VKTD
       span_hash:
 created_at: '2026-07-21T05:07:22Z'
-updated_at: '2026-07-21T05:07:22Z'
+updated_at: '2026-07-21T18:14:55Z'

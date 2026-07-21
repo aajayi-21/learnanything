@@ -457,6 +457,7 @@ canonical_ingest_retry = "codex_medium"
 authoring = "codex_medium"
 tutor_qa = "codex_low"
 teach_back = "codex_low"
+rung_variant = "codex_low"
 
 [ai.providers.codex]
 type = "codex_sdk"
@@ -1372,6 +1373,9 @@ class AIRoutingConfig(BaseModel):
     # Teach-back naive-student questions + transcript grading. Empty = follow
     # ai.active_provider (same fallback chain as tutor_qa).
     teach_back: str | None = None
+    # Learner-requested easier/harder variant authoring (services/rung_variants):
+    # a small, gate-checked task — defaults to the low-effort profile.
+    rung_variant: str | None = None
 
 
 class AIConfig(BaseModel):
@@ -1396,6 +1400,7 @@ DEFAULT_CODEX_TASK_ROUTES = {
     "authoring": CODEX_MEDIUM_PROVIDER,
     "tutor_qa": CODEX_LOW_PROVIDER,
     "teach_back": CODEX_LOW_PROVIDER,
+    "rung_variant": CODEX_LOW_PROVIDER,
 }
 
 

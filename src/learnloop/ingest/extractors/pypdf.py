@@ -11,10 +11,56 @@ import io
 from typing import Any
 
 from learnloop.ingest.block_roles import classify_block_role
-from learnloop.ingest.extractors.base import ExtractionContext, single_unit_from_blocks
+from learnloop.ingest.extractors.base import (
+    ExtractionContext,
+    single_unit_from_blocks,
+    units_from_toc_entries,
+)
 from learnloop.ingest.ir import IR_SCHEMA_VERSION, DocumentBlock, DocumentIR, block_content_hash
 
 EXTRACTOR_NAME = "pypdf"
+
+
+def read_embedded_outline(raw_bytes: bytes) -> list[dict[str, Any]]:
+    """Flatten a PDF's embedded outline (bookmarks) into ToC-shaped entries.
+
+    Many PDFs carry an author-curated section tree in their document outline —
+    exact titles with resolvable destination pages. Returns
+    ``[{"title", "heading_level", "page_id"}, ...]`` with levels from nesting
+    depth, ordered as authored. Best-effort: any failure (no outline, encrypted,
+    unresolvable destinations) returns ``[]`` and extraction proceeds without it.
+    """
+
+    try:
+        import pypdf
+
+        reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+        if reader.is_encrypted:
+            reader.decrypt("")
+        outline = reader.outline
+    except Exception:
+        return []
+
+    entries: list[dict[str, Any]] = []
+
+    def walk(items: Any, level: int) -> None:
+        for item in items or []:
+            if isinstance(item, list):
+                walk(item, level + 1)
+                continue
+            title = str(getattr(item, "title", "") or "").strip()
+            try:
+                page = reader.get_destination_page_number(item)
+            except Exception:
+                page = None
+            if title and page is not None and page >= 0:
+                entries.append({"title": title, "heading_level": level, "page_id": int(page)})
+
+    try:
+        walk(outline, 1)
+    except Exception:  # pragma: no cover - malformed outline trees
+        return []
+    return entries
 
 
 class PyPdfExtractionError(ValueError):
@@ -24,13 +70,19 @@ class PyPdfExtractionError(ValueError):
 class PyPdfDocumentExtractor:
     name = EXTRACTOR_NAME
 
+    # IR-mapping version, mixed into version() (and thus the extraction request
+    # hash) so mapping changes never silently reuse cached extractions. 2: units
+    # derive from the PDF's embedded outline when one exists.
+    IR_MAP_VERSION = 2
+
     def version(self) -> str:
         try:
             from importlib.metadata import version
 
-            return version("pypdf")
+            package = version("pypdf")
         except Exception:  # pragma: no cover - best effort
-            return "unknown"
+            package = "unknown"
+        return f"{package}+map{self.IR_MAP_VERSION}"
 
     def model_versions(self) -> dict[str, str]:
         return {}
@@ -96,13 +148,24 @@ class PyPdfDocumentExtractor:
             )
 
         title = _pdf_title(raw_bytes)
-        unit = single_unit_from_blocks(blocks, label=title or "Document")
+        outline = read_embedded_outline(raw_bytes)
+        if outline:
+            # drop_empty: an outline covers the whole book while a page-sliced
+            # import extracts only part of it.
+            units = units_from_toc_entries(
+                outline, blocks, document_title=title,
+                locator_scheme="pdf_outline", drop_empty=True,
+            )
+        else:
+            units = []
+        if not units:
+            units = [single_unit_from_blocks(blocks, label=title or "Document")]
         return DocumentIR(
             ir_schema_version=IR_SCHEMA_VERSION,
             extractor=EXTRACTOR_NAME,
             extractor_version=self.version(),
             blocks=blocks,
-            units=[unit],
+            units=units,
         )
 
 

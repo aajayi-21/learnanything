@@ -782,6 +782,113 @@ def test_forced_marker_engine_does_not_fall_back(tmp_path, monkeypatch):
         default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "marker"}}))
 
 
+def test_pdf_extractor_for_honors_engine_choice(monkeypatch):
+    """engine="pypdf" forces the fallback even with marker installed; "marker"
+    raises typed when unavailable; the engine key never leaks into marker
+    options; auto keeps the availability-based default."""
+
+    import learnloop.ingest.extractors as extractors
+
+    monkeypatch.setattr(extractors, "marker_available", lambda: True)
+    assert extractors.pdf_extractor_for({"engine": "pypdf"}).name == "pypdf"
+    marker = extractors.pdf_extractor_for({"engine": "marker", "force_ocr": True})
+    assert marker.name == "marker"
+    assert "engine" not in marker._config and marker._config["force_ocr"] is True
+    assert extractors.pdf_extractor_for().name == "marker"
+
+    monkeypatch.setattr(extractors, "marker_available", lambda: False)
+    assert extractors.pdf_extractor_for().name == "pypdf"
+    with pytest.raises(extractors.MarkerUnavailableError):
+        extractors.pdf_extractor_for({"engine": "marker"})
+
+
+def test_forced_pypdf_engine_skips_marker(tmp_path, monkeypatch):
+    """A payload engine="pypdf" never routes through marker, even when marker
+    is available (the canonical-ingest fallback choice)."""
+
+    import learnloop.ingest.extractors as extractors
+    from learnloop.services.ingest_runner import default_extract
+
+    class ExplodingMarker:
+        name = "marker"
+
+        def __init__(self, *, config=None):
+            raise AssertionError("marker must not be constructed for engine=pypdf")
+
+    class FakePyPdf:
+        name = "pypdf"
+
+        def extract(self, raw_bytes, context):
+            block = DocumentBlock.build(span_id="s1", block_type="Text", text="Native text.", ordinal=1)
+            unit = DocumentUnit(unit_id="u1", label="Doc", ordinal=1, semantic_hash="sha256:x", span_ids=["s1"])
+            return DocumentIR(extractor="pypdf", extractor_version="1", blocks=[block], units=[unit])
+
+    monkeypatch.setattr(extractors, "marker_available", lambda: True)
+    monkeypatch.setattr(extractors, "MarkerDocumentExtractor", ExplodingMarker)
+    monkeypatch.setattr(extractors, "PyPdfDocumentExtractor", FakePyPdf)
+
+    ir = default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "pypdf"}}))
+    assert ir.extractor == "pypdf"
+    assert not ir.health.flags  # a chosen fallback is not a degraded extraction
+
+
+def test_forced_marker_unavailable_is_a_typed_error(tmp_path, monkeypatch):
+    import learnloop.ingest.extractors as extractors
+    from learnloop.services.ingest_runner import default_extract
+
+    monkeypatch.setattr(extractors, "marker_available", lambda: False)
+    with pytest.raises(IngestRunnerError) as excinfo:
+        default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "marker"}}))
+    assert excinfo.value.code == "pdf_extractor_unavailable"
+
+
+def test_vault_pdf_engine_governs_import_when_payload_is_silent(tmp_path, monkeypatch):
+    """[ingest.pdf] engine="pypdf" in vault config finally reaches the durable
+    import path; an explicit payload engine still wins."""
+
+    import types
+
+    import learnloop.ingest.extractors as extractors
+    import learnloop.vault.loader as vault_loader
+    from learnloop.services.ingest_runner import default_extraction_identity
+
+    fake_vault = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            ingest=types.SimpleNamespace(pdf=types.SimpleNamespace(engine="pypdf"))
+        )
+    )
+    monkeypatch.setattr(vault_loader, "load_vault", lambda root: fake_vault)
+    monkeypatch.setattr(extractors, "marker_available", lambda: True)
+
+    identity = default_extraction_identity(_fetched_pdf(), "pdf", _bare_ctx(tmp_path))
+    assert identity["extractor"] == "pypdf"
+    assert identity["config"]["engine"] == "pypdf"
+
+    identity = default_extraction_identity(
+        _fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "marker"}})
+    )
+    assert identity["extractor"] == "marker"
+
+
+def test_auto_engine_stays_out_of_extraction_identity(tmp_path, monkeypatch):
+    """A vault-configured "auto" must not enter the identity config: writing it
+    would change every extraction request hash and re-extract unchanged PDFs."""
+
+    import types
+
+    import learnloop.vault.loader as vault_loader
+    from learnloop.services.ingest_runner import default_extraction_identity
+
+    fake_vault = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            ingest=types.SimpleNamespace(pdf=types.SimpleNamespace(engine="auto"))
+        )
+    )
+    monkeypatch.setattr(vault_loader, "load_vault", lambda root: fake_vault)
+    identity = default_extraction_identity(_fetched_pdf(), "pdf", _bare_ctx(tmp_path))
+    assert "engine" not in identity["config"]
+
+
 def test_marker_and_pypdf_both_failing_is_a_typed_error(tmp_path, monkeypatch):
     import learnloop.ingest.extractors as extractors
     from learnloop.services.ingest_runner import default_extract

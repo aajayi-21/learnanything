@@ -121,10 +121,17 @@ def request_rung_variant_rpc(ctx: SidecarContext, params: RequestRungVariantInpu
 
 @method("get_rung_variant_status", RungVariantStatusInput)
 def get_rung_variant_status(ctx: SidecarContext, params: RungVariantStatusInput) -> dict[str, Any]:
-    _vault, repository = ctx.require_vault()
+    vault, repository = ctx.require_vault()
     row = repository.rung_variant_request(params.request_id)
     if row is None:
         raise SidecarError("request_not_found", f"Unknown rung variant request {params.request_id!r}.")
+    # The applying-jobs reload normally rides the ingest batch-polling RPCs,
+    # which this status poll bypasses. Reload here when the applied variant is
+    # not yet in the loaded vault, so the queue/requested-floor see it without
+    # requiring the learner to visit the ingest screen.
+    created = row.get("created_practice_item_id")
+    if row["status"] == "applied" and created and created not in vault.practice_items:
+        ctx.reload(maintenance=False)
     return versioned({"request": _variant_request_payload(row)})
 
 

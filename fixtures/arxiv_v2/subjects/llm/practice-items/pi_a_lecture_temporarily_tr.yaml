@@ -27,6 +27,18 @@ hint_policy:
 retrieval_demand: 0.3
 transfer_distance: 0.2
 scaffold_level: 0.2
+capability: schema_interpretation
+task_features:
+  complexity: 1
+  transfer: near
+  representation:
+    - verbal
+  response: short_constructed
+  scaffolding: cue
+  span: single_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: token-definition
 evidence_fingerprint:
   source_family: lecture-inventory
@@ -86,4 +98,4 @@ provenance:
       source_id: src_01KY18ZKS8ARP6W2DF4249ABTE
       span_hash:
 created_at: '2026-07-21T05:07:17Z'
-updated_at: '2026-07-21T05:07:17Z'
+updated_at: '2026-07-21T18:14:45Z'

@@ -517,6 +517,23 @@ def test_import_snapshots_pdf_page_selection_into_payload(tmp_path):
     assert job["payload"]["page_selection"] == [9, 10, 11]
 
 
+def test_import_snapshots_pdf_engine_choice_into_payload(tmp_path):
+    """An explicit marker/pypdf choice rides the import payload; "auto" (or
+    None) stays implicit so unchanged sources keep their extraction identity."""
+
+    from learnloop_sidecar.ingest_jobs import DurableIngestJobs
+
+    repo = _repo(tmp_path)
+    jobs = DurableIngestJobs()
+    jobs.bind(repo, tmp_path, clock=_CLOCK, background=False)
+
+    forced = jobs.enqueue_import([str(tmp_path / "scan.pdf")], pdf_engine="pypdf")
+    assert repo.ingest_jobs_for_batch(forced)[0]["payload"]["pdf_config"] == {"engine": "pypdf"}
+
+    auto = jobs.enqueue_import([str(tmp_path / "scan.pdf")], pdf_engine="auto")
+    assert "pdf_config" not in repo.ingest_jobs_for_batch(auto)[0]["payload"]
+
+
 def test_multi_source_import_assigns_page_selection_per_source(tmp_path):
     from learnloop_sidecar.ingest_jobs import DurableIngestJobs
 

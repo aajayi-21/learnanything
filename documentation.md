@@ -1,8 +1,8 @@
 # LearnLoop user and algorithm guide
 
-> Implementation snapshot: 2026-07-21 (working tree, including changes not yet committed). This guide describes the behavior present in the current codebase. It distinguishes supported behavior from legacy compatibility paths and work that is still in progress.
+> Implementation snapshot: 2026-07-21 This guide describes the behavior present in the current codebase. It distinguishes supported behavior from legacy compatibility paths and work that is still in progress.
 
-LearnLoop is a local-first adaptive learning system. A learner supplies trustworthy source material, LearnLoop turns it into a reviewable study map and practice bank, and each answer updates several deliberately separate models:
+LearnLoop is an adaptive learning system. A learner supplies trustworthy source material, LearnLoop turns it into a reviewable study map and practice bank, and each answer updates several deliberately separate models:
 
 - what the learner is likely able to do now;
 - what they have directly demonstrated without help;
@@ -633,6 +633,16 @@ A representative multi-role collection makes the separation concrete. The textbo
 
 ## 8. The canonical knowledge model (mvp-0.7 / mvp-0.8)
 
+Both versions read and write the same canonical shared-facet state described in this section; neither falls back to the retired legacy per-LO facet bridge. What `mvp-0.8` adds is the **authority-propagation projection**: instead of projecting belief directly from graded attempts, it reads the authoritative measurement-event substrate — administrations, calibrated interpretations, and appended adjudications — and applies robust composition with reliability discounts on top of it.
+
+The practical consequences:
+
+- **Reinterpretation without rewriting.** When a later adjudication changes the leading actionable conclusion for an old observation, `mvp-0.8` appends a `measurement_reinterpretation` event and rebuilds downstream state. The immutable decision-time interpretation rows are untouched; history is append-only.
+- **Receipts for activation.** Activating the projection records a `derived_state_rebuilds` receipt naming what was replayed and rebuilt. On a projection failure the last-good named projection stays readable.
+- **An inspectable delta.** Upgrading a vault from `mvp-0.7` computes an explicit reinterpretation delta over the projected facet cells (positive/negative mass, direct negatives, certification credit), so "what did the new projection change about my state" is an answerable question, not a diff you have to trust.
+
+`mvp-0.7` remains readable as a byte-identical compatibility projection for vaults that have not upgraded. Everything below — facets, capabilities, blueprints, criteria, depth rungs — is common to both.
+
 ### 8.1 Facets are canonical claims
 
 A facet is the smallest claim LearnLoop intends to assess and repair independently. The vault-level `facets.yaml` schema stores more than a label:
@@ -707,11 +717,103 @@ For legacy items without explicit targets, the mode-to-capability compiler suppl
 
 Depth is a learner-authorized program, not a difficulty scalar.
 
-A *waypoint* is one closed cell of a difficulty trajectory: a capability plus task features (complexity, transfer, response, scaffolding, span). A *depth rung* is the generation-time unit — a waypoint plus per-dimension target/max bounds. Practice generation targets a rung and calibrates item difficulty *within* it; the rung is orthogonal to the IRT difficulty in section 11.3. The built-in default trajectory runs recognize → recall → interpret → execute → select method, deliberately stopping before novel combination, whole-task, and coordination work.
+A *waypoint* is one closed cell of a difficulty trajectory: one capability plus a point in task-feature space (complexity, transfer, response, scaffolding, and span). A *depth rung* is the generation-time unit — a waypoint plus per-dimension target/max bounds. The rung constrains what kind of task may be generated; deterministic gates prevent a generated item that uses the wrong capability or exceeds a bound from being auto-applied.
 
-Deeper regions past the built-in trajectory require an explicit *depth edge*: owner-curated reusable edge templates plus LLM-authored edge instances that must pass deterministic gates before being pinned into a learner-reviewed depth envelope. Nothing climbs past the envelope on its own; the golden path's depth invitation (section 17) is the confirmed way one reviewed edge activates.
+Practice generation also calibrates numeric item difficulty *within* the selected rung. The two controls are orthogonal: the rung says what operation and task regime the learner is being asked to handle, while the IRT difficulty in section 11.3 estimates how challenging one item is inside that regime. FSRS memory difficulty remains a third, item-specific quantity (section 12).
 
-The learner can also re-rung from below: requesting an easier or harder sibling of an item mints a same-LO variant one waypoint away. The request itself is honest evidence about the learner (section 11.1) and is recorded durably whether or not generation succeeds.
+#### The five built-in depth rungs
+
+The default trajectory is ordered from easiest to deepest:
+
+| Rung | Capability | Complexity | Transfer | Response | Scaffolding | Span |
+|---|---|---:|---|---|---|---|
+| `recognize` | `retrieval` | 0 | same context | recognition | cue | atomic |
+| `recall` | `retrieval` | 1 | same context | short constructed | none | atomic |
+| `interpret` | `schema_interpretation` | 2 | near | long constructed | none | single step |
+| `execute` | `procedure_execution` | 2 | near | structured steps | none | multi-step |
+| `select_method` | `method_selection` | 3 | far | short constructed | none | single step |
+
+`recognize` and `recall` therefore exercise the same capability but under meaningfully different response and assistance contracts. Recognition is not a sixth capability and recall evidence does not become method-selection evidence merely because both tasks concern the same facet.
+
+The built-in trajectory deliberately stops before `novel_combination`, `whole_task`, and `coordination` work. Coordination is reserved for directly observable integration failures and requires a whole-task contract. Deeper regions use reviewed commitment milestones rather than silently extending this table.
+
+#### How the default rung is selected
+
+When no reviewed commitment milestone supplies the next rung, generation uses the LO's displayed EKF calibration and its evidence count. The current defaults are:
+
+| Learner state | Selected rung |
+|---|---|
+| No usable signal, or mastery below 0.35 | `recognize` |
+| Mastery at least 0.35 but below 0.60 | `recall` |
+| Mastery at least 0.60 with fewer than 5 observations | `interpret` |
+| Mastery at least 0.60 with at least 5 observations | `execute` |
+| Mastery at least 0.75 with at least 10 observations | `select_method` |
+
+The thresholds are selection heuristics, not achievement claims. The mastery value here is the LO's prediction-only calibration state (section 11.3), not Demonstrated credit and not the blueprint Ready projection. A learner claim may seed the value when no performance state exists, but the evidence-count conditions prevent a strong self-report from jumping directly to execution or method selection. If a commitment has a valid reviewed next milestone, its task contract takes precedence over these defaults; a malformed projection fails closed to the default trajectory and records the fallback.
+
+#### How rungs connect facets, capabilities, and evidence
+
+The relationship is:
+
+```
+canonical facets (what must be known)
+        +
+capability (what operation must be performed)
+        +
+depth rung (task context, transfer, response, scaffold, span)
+        ↓
+rung-targeted item with frozen rubric criteria
+        ↓
+attempt observations in exact facet × capability cells
+        ↓
+facet belief + LO calibration + certification ledger + FSRS memory
+        ↓
+Ready / Demonstrated projections and the next scheduling decision
+```
+
+The flat `evidence_facets` list on an LO contributes the semantic content to cover during authoring; as section 8.3 explains, it is a derived search/compatibility view rather than a mastery source. The rung contributes the cognitive operation and task regime. Frozen rubric criteria join the two by naming exact facet-capability targets. Consequently:
+
+- a rung is not evidence by itself — only an administered and graded observation can update learner state;
+- retrieval evidence cannot certify `procedure_execution` or `method_selection`;
+- strong component observations cannot certify `coordination` without direct whole-task evidence;
+- shared canonical-facet belief can support prediction across LOs, while Demonstrated credit stays capability-specific; and
+- rung-targeted generation can improve coverage of a blueprint component, but completing a rung does not by itself make the entire LO Ready or mastered.
+
+Ready is still computed by projecting facet-capability probabilities through blueprint recipes (section 11.5). Demonstrated still requires bounded, fresh, unassisted observations in the exact cells tested (section 11.6). The rung decides what to ask next; those models decide what the resulting observation means.
+
+#### Easier and harder variants
+
+The learner can request a same-LO sibling one adjacent waypoint away:
+
+```
+recognize ↔ recall ↔ interpret ↔ execute ↔ select_method
+```
+
+The source item's stamped capability/task features are preferred when locating it on the trajectory. Legacy items fall back to their practice-mode capability and authored retrieval/transfer/scaffold values, then to the LO-state selector above.
+
+A variant request is itself honest but weak evidence, persisted even if later generation fails:
+
+- an easier request writes an LO-scoped claim at 0.25 and a self-graded `self_report` soft failure with score fraction 0.25;
+- a harder request writes an LO-scoped claim at 0.70 and a self-graded `self_report` success with score fraction 1.0; and
+- both claims use pseudo-count 2, while the attempt uses the ordinary `self_report` evidence mass of 0.30.
+
+The request then authors a sibling at the target rung, reusing the LO's semantic facets and enforcing the target capability/task-feature bounds. Easier than `recognize` is refused. An item already beyond the default trajectory can step down to `select_method`; harder than `select_method` requires a reviewed depth envelope.
+
+#### Commitments, presets, and depth edges
+
+The four coarse commitment presets are not additional rungs:
+
+`keep_in_touch | remember_key_ideas | work_fluently | master_tasks_like_these`
+
+They capture learner intent when a commitment is created. For example, Reader actions such as “test me later” use `keep_in_touch`, while “help me remember,” “connect it,” “keep developing,” and learner-authored Reader Q&A use `remember_key_ideas`; Golden Path exemplar commitments normally use `master_tasks_like_these`. A preset creates an understandable starting policy/envelope, but the immutable versioned policy and envelope — not the label — are authoritative.
+
+Depth policies are `hold_at_target`, `suggest_next`, or `auto_within_envelope`. Deeper regions require an explicit *depth edge*: an owner-curated reusable edge template plus a concrete edge instance that passes deterministic gates before it can be pinned into the learner-reviewed envelope. The successor contract uses the same capability and task-feature vocabulary as the built-in rungs, so custom milestones can express coordination, whole-task span, novel combination, tool conditions, or other reviewed changes without pretending those are a sixth fixed level.
+
+Nothing crosses an envelope on its own. An eligible transition needs predecessor exit evidence, an admitted activity path, a fresh proof route, acceptable burden, and a positive robust value. One decision can commit at most one edge before the system replans. The Golden Path depth invitation (section 17) is the current learner-facing accept/decline path for one reviewed edge.
+
+#### Do not confuse depth rungs with the Golden Path pattern ladder
+
+Golden Path also uses the word *rung* for a separate remediation sequence. Depth rungs describe the capability and task regime of generated work. Pattern-ladder rungs describe which teaching or repair activity should happen after triage. A pattern-ladder stage can use a depth-targeted item, but advancing that teaching sequence is not equivalent to demonstrating a deeper capability. Section 17.2 enumerates the pattern ladder and its evidence rules.
 
 ## 9. What happens when an attempt is submitted
 
@@ -1353,6 +1455,22 @@ Every stage answers four questions on screen: why now, what kind of activity thi
 
 **Instruction and practice: the pattern ladder.** The committed triage reason maps to an entry rung — the nearest useful one, not always the bottom. The learner does each rung's activity with their materials (anchor practice flows through the Today queue), then logs the outcome honestly: pass, failed, or gave up, plus how much scaffold was used. The run advances only on this evidence; no rung mints unassisted certification, and repeated failures on a rung flag the run for review instead of letting it climb.
 
+The pattern ladder contains nine named stages across seven ordinals. Stages sharing an ordinal are alternative activity patterns rather than additional depth levels:
+
+| Ordinal | Stage or alternatives | Purpose and evidence behavior |
+|---:|---|---|
+| 0 | `explanation` | Instructional; records the transition into teaching, not performance evidence. |
+| 1 | `example_study` or `example_comparison` | Instructional acquisition or discrimination work. |
+| 2 | `example_completion` | Instructional; records how much scaffold was used. |
+| 3 | `setup_only` or `move_spotting` | Instructional repair for choosing or recognizing the next move. |
+| 4 | `independent_repair` | Cold practice on the repaired capability; updates practice scheduling but does not certify. |
+| 5 | `whole_task_integration` | Cold practice for coordination/integration failures; still not the held-out assessment. |
+| 6 | `delayed_independent_practice` | A delayed cold check before the run becomes ready to assess. |
+
+Triage chooses the nearest useful entry: memory lapse, missing knowledge, or false belief enters at explanation; a schema/conceptual hole or task-interpretation problem enters at example comparison; procedure failure enters at example completion; method-selection failure enters at setup/move spotting; and coordination failure enters at whole-task integration. A learner who already demonstrated the capability can skip instruction and enter at independent repair. A surface/grading fault or unresolved ambiguity opens no ladder rung until the fault is resolved or diagnosis is reopened.
+
+Instructional stages never apply FSRS review, open a lapse, or mint unassisted certification. Practice stages can update the practice schedule, but every pattern-ladder stage still has `mints certification = false`; the reserved cold assessment is the certifying administration. Three failures on distinct surfaces at the same rung flag the run for review instead of generating an infinite stream of near-clones. Passing `example_completion` with substantial scaffolding records that assistance rather than disguising it as independence, and the final independent-practice stage carries a delayed due time.
+
 **Rotating practice.** Alongside the ladder, a practice pool is seeded from the anchor exemplars. Candidates stay inert until the owner admits each surface and marks the pool reviewed; an assessment-reserved surface is refused at admission. Served surfaces carry honest freshness labels — a familiar surface is visibly reduced-evidence and is never reported fresh. From the anchor list the learner can also mint an easier or harder same-LO sibling one depth waypoint away; it lands in the ordinary queue and also informs the learner model.
 
 **Cold assessment.** Opening the assessment administers the reserved unseen sibling. The flow enforces coldness mechanically: the learner writes an answer first, then locks it — only after locking is the expected answer revealed — then self-grades against the rubric and submits. Submission burns the surface: a used assessment can never return as pristine assessment, and the result card shows the burn and eligibility state explicitly alongside pass/fail, claim language, calibration status, and the evidence interval. Practice and assessment use separate purpose-typed families throughout.
@@ -1420,7 +1538,7 @@ Entity provenance links a concept/facet/LO/PI to exact extraction spans and immu
 
 ### 19.4 Assessment provenance
 
-Every new `mvp-0.7` criterion observation carries stable lineage to the assessment-contract version and grading revision. Regrading retires/replaces the derived interpretation through the same projection fold. A projection is a cache over evidence, never a new evidence source.
+Every new criterion observation carries stable lineage to the assessment-contract version and grading revision. Regrading retires/replaces the derived interpretation through the same projection fold. Under `mvp-0.8`, a reinterpretation additionally appends a `measurement_reinterpretation` event and leaves the decision-time interpretation rows untouched (section 8). A projection is a cache over evidence, never a new evidence source.
 
 ## 20. Default parameter summary
 
@@ -1436,6 +1554,9 @@ These are current defaults, not universal truths. They are versioned/configurabl
 | EKF drift / variance cap | 0.01 per day / 4.0 |
 | IRT discrimination / difficulty scale | 1.0 / 2.5 |
 | IRT empirical item difficulty | disabled |
+| Built-in depth trajectory | `recognize → recall → interpret → execute → select_method` |
+| Depth-rung mastery bands | below 0.35 recognize; 0.35–0.60 recall; at least 0.60 interpret/execute |
+| Deeper default-rung evidence gates | execute at 5 observations; select method at 10 observations and mastery at least 0.75 |
 | Blueprint slip / unknown MC guess | 0.05 / 0.25 |
 | Facet prediction backbone count | 4 observations, capped by actual LO evidence |
 | Repeated surface inference discount | 0.25 |
@@ -1459,27 +1580,7 @@ These are current defaults, not universal truths. They are versioned/configurabl
 | Starting-level claim levels | 0.15 / 0.35 / 0.55 / 0.75, pseudo-count 1 |
 | Rung-variant claim levels | easier 0.25, harder 0.70, pseudo-count 2; self-report attempt at 0.30 mass |
 
-## 21. Deprecated or misleading older descriptions
-
-The following descriptions from earlier MVP documentation should no longer guide new use:
-
-- “Current algorithm is `mvp-0.2`.” New vaults are `mvp-0.8`.
-- “Initialize at `mvp-0.6`, then upgrade immediately.” That was an unintended transitional behavior. Fresh initialization now writes `mvp-0.8`.
-- “A PDF is not an MVP source.” PDFs, including local files, are supported and normalized into Document IR.
-- “Markdown is the canonical extraction intermediate.” It is now a display/export format over IR.
-- “A canonical source is just a subject note.” The v2 source library tracks artifact, revision, extraction, units, source sets, and immutable manifests. The note path remains for compatibility.
-- “A probe is a fixed number of ordinary questions controlled by `lo_probe_state`.” New probes are bounded episodes with locked hypotheses, committed presentations, executable likelihoods, qualifying observations, EIG, block feedback, and explicit learner control.
-- “Coverage bonuses are EIG.” Only response-conditioned entropy reduction is EIG; coverage and other utilities remain separate.
-- “Any answer can advance a probe.” Only a valid selected diagnostic observation with an approved grading source advances its budget and stopping rule.
-- “Facet belief is private to one LO.” Under `mvp-0.7` the parent belief is canonical and shared across every LO/subject that references the facet.
-- “An LO mastery scalar is the knowledge model.” The scalar EKF is prediction-only calibration; blueprints, canonical facet belief, capability evidence, FSRS, and diagnostic hypotheses are distinct.
-- “A graph edge propagates mastery.” Semantic graph edges do not create evidence.
-- “A failed composite task lowers all prerequisites.” Criterion dependencies and unresolved-cause factors prevent blanket damage.
-- “Hints merely change a score.” Hints and substantive tutor questions affect reliability, FSRS caps, and certification.
-- “Tutor questions write mastery.” They add bounded read-side uncertainty and interaction telemetry, never a direct mastery decrease.
-- “Errors and Doctor are desktop tabs.” Neither exists as a navigation tab anymore. The Review surface opens as an overlay from the command palette with `diff` (`review` prints the due queue), the Repair surface opens from feedback or a Review hypothesis, and `learnloop doctor` remains the doctor surface.
-
-## 22. Practical interpretation
+## 21. Practical interpretation
 
 When LearnLoop serves an item, read the decision as:
 

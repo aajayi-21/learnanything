@@ -31,6 +31,19 @@ hint_policy:
 retrieval_demand: 0.3
 transfer_distance: 0.5
 scaffold_level: 0.2
+capability: schema_interpretation
+task_features:
+  complexity: 3
+  transfer: far
+  representation:
+    - symbolic
+    - verbal
+  response: structured_steps
+  scaffolding: cue
+  span: multi_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: latent_attention_path_trace
 evidence_fingerprint:
   source_family: mla_architecture_explanation
@@ -110,4 +123,4 @@ provenance:
       source_id: src_01KY18Z9R17R1FK738QV2ANKJJ
       span_hash:
 created_at: '2026-07-21T05:07:24Z'
-updated_at: '2026-07-21T05:07:24Z'
+updated_at: '2026-07-21T18:14:59Z'

@@ -30,6 +30,18 @@ hint_policy:
 retrieval_demand: 0.3
 transfer_distance: 0.4
 scaffold_level: 0.2
+capability: schema_interpretation
+task_features:
+  complexity: 2
+  transfer: near
+  representation:
+    - verbal
+  response: long_constructed
+  scaffolding: cue
+  span: multi_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: theorem_claim_audit
 evidence_fingerprint:
   source_family: primary_textbook_universal_approximation
@@ -132,4 +144,4 @@ provenance:
       source_id: src_01KY1B5YQFV1NNM7CHPGFV6PHT
       span_hash:
 created_at: '2026-07-21T05:07:34Z'
-updated_at: '2026-07-21T05:07:34Z'
+updated_at: '2026-07-21T18:14:53Z'

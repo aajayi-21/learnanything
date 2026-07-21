@@ -126,6 +126,7 @@ class DurableIngestJobs:
         source: str,
         subject_id: str,
         mode: Literal["canonical", "exam"],
+        pdf_engine: str | None = None,
     ) -> dict[str, Any]:
         runner = self._require_runner()
         with self._lock:
@@ -143,6 +144,10 @@ class DurableIngestJobs:
             import_payload: dict[str, Any] = {"source": source, "subject_id": subject_id}
             if mode == "exam":
                 import_payload["reader_enabled"] = False
+            if pdf_engine in ("marker", "pypdf"):
+                # An explicit engine choice is part of the extraction identity;
+                # "auto" stays implicit so unchanged sources keep their cache.
+                import_payload["pdf_config"] = {"engine": pdf_engine}
             batch_id = runner.enqueue_batch(
                 "legacy_ingest",
                 [
@@ -205,6 +210,7 @@ class DurableIngestJobs:
         page_selection: list[int] | None = None,
         page_selections: dict[str, list[int]] | None = None,
         reader_disabled_sources: set[str] | frozenset[str] | None = None,
+        pdf_engine: str | None = None,
         priority: int = 0,
     ) -> str:
         """Enqueue an Import (or Import & inventory) batch (§6.1). One import job
@@ -225,6 +231,9 @@ class DurableIngestJobs:
                 payload["page_selection"] = source_pages
             if reader_disabled_sources and source in reader_disabled_sources:
                 payload["reader_enabled"] = False
+            if pdf_engine in ("marker", "pypdf"):
+                # See start(): explicit engines join the extraction identity.
+                payload["pdf_config"] = {"engine": pdf_engine}
             if estimate is not None:
                 payload["estimate"] = estimate
             specs.append(JobSpec("import", payload))

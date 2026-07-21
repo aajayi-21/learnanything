@@ -228,6 +228,40 @@ export function TodayScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.sessionId]);
 
+  // Background-applied content (rung variants, reader-driven practice
+  // expansion, synthesis) lands via durable batches, not user actions on this
+  // screen. Poll the batch list — the RPC itself also triggers the sidecar's
+  // vault reload — and refetch the queue when a batch newly completes, so a
+  // freshly minted item pops into the queue without re-opening the screen.
+  const seenBatchStatusRef = useRef<Map<string, string> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { batches } = await api.listIngestBatches(8);
+        if (cancelled) return;
+        const previous = seenBatchStatusRef.current;
+        const next = new Map(batches.map((batch) => [batch.id, batch.status] as const));
+        if (previous !== null) {
+          const newlyCompleted = batches.some(
+            (batch) => batch.status === "completed" && previous.get(batch.id) !== "completed"
+          );
+          if (newlyCompleted) void refreshQueue({ force: true });
+        }
+        seenBatchStatusRef.current = next;
+      } catch {
+        /* transient poll failure — try again next tick */
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), 7000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     onPaletteEntities?.({
       inspectIds: unique(items.flatMap((item) => [item.practiceItemId, item.learningObjectId])),

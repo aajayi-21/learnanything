@@ -787,6 +787,18 @@ _CONFIG_RULES: list[_ConfigRule] = [
     # Evidence-mass decision leaves.
     _ConfigRule(_suffix(".evidence_mass", ".surface_exposure"), "decision", "evidence_mass",
                 "attempt-type evidence-mass / surface-exposure anchor (eligibility & mass)."),
+    # Re-rung request evidence package (services/rung_variants): the self-report
+    # grade fractions and claim levels ARE the evidence a request writes.
+    _ConfigRule(_exact(
+        "rung_variants.easier_score_fraction", "rung_variants.harder_score_fraction",
+        "rung_variants.easier_claim_level", "rung_variants.harder_claim_level",
+        "rung_variants.self_grade_confidence",
+    ), "decision", "evidence_mass",
+        "rung-variant request evidence: deterministic self-report grade / claim level."),
+    _ConfigRule(_exact("rung_variants.claim_pseudo_count"), "decision", "prior",
+                "rung-variant claim prior pseudo-count (posterior weight)."),
+    _ConfigRule(_exact("rung_variants.max_pending_per_item"), "structural", "operational",
+                "per-item request lock cap; no measurement authority."),
     _ConfigRule(_prefix("evidence.item_coverage"), "decision", "prior",
                 "practice-mode coverage prior (surface exposure fraction)."),
     _ConfigRule(_prefix("evidence.blueprints."), "decision", "likelihood",

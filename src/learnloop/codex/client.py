@@ -33,6 +33,8 @@ from learnloop.codex.prompts import (
     PROMOTION_ANALYSIS_PROMPT_VERSION,
     DEPTH_EDGE_INSTANCE_PROMPT,
     DEPTH_EDGE_INSTANCE_PROMPT_VERSION,
+    RUNG_BACKFILL_PROMPT,
+    RUNG_BACKFILL_PROMPT_VERSION,
     READER_PRESET_SYNTHESIS_PROMPT,
     READER_PRESET_SYNTHESIS_PROMPT_VERSION,
     READING_QUICK_CHECK_PROMPT,
@@ -58,6 +60,7 @@ from learnloop.codex.schemas import (
     ProbeInstanceSurfaces,
     PromotionAnalysis,
     DepthEdgeInstanceBatch,
+    RungBackfillClassification,
     ReaderPresetSynthesis,
     ReadingQuickCheck,
     AppendReconciliation,
@@ -358,6 +361,20 @@ class ReadingQuickCheckContext:
 
     extraction_id: str
     section: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RungBackfillContext:
+    """Bounded input for legacy-item rung classification (depth backfill).
+
+    ``items`` are {practice_item_id, practice_mode, prompt_excerpt,
+    expected_answer_excerpt, retrieval_demand, transfer_distance,
+    scaffold_level}. Item text is untrusted source-derived material — the
+    prompt instructs the model to treat embedded directives as inert.
+    """
+
+    items: list[dict] = field(default_factory=list)
+    task_feature_schema: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -820,6 +837,21 @@ class SdkCodexClient:
             purpose="reading_quick_check",
         )
         return ReadingQuickCheck.model_validate_json(text)
+
+    def run_rung_backfill(self, context: RungBackfillContext) -> RungBackfillClassification:
+        """Classify legacy items into rung metadata (depth backfill).
+
+        Deliberately NOT on the ``CodexClient`` Protocol — the backfill service
+        discovers it via ``getattr(client, "run_rung_backfill", None)``. Output
+        is candidate-only; deterministic validators admit or skip each entry.
+        """
+
+        text = self._run_structured(
+            _rung_backfill_prompt(context),
+            _codex_output_schema(RungBackfillClassification),
+            purpose="rung_backfill",
+        )
+        return RungBackfillClassification.model_validate_json(text)
 
     def run_depth_edge_instances(self, context: DepthEdgeInstanceContext) -> DepthEdgeInstanceBatch:
         """Author depth-edge instances from reviewed templates (spec v2 depth).
@@ -1431,6 +1463,19 @@ def _reading_quick_check_prompt(context: ReadingQuickCheckContext) -> str:
         READING_QUICK_CHECK_PROMPT_VERSION,
         {
             "task": READING_QUICK_CHECK_PROMPT,
+            "context": asdict(context),
+        },
+    )
+
+
+def _rung_backfill_prompt(context: RungBackfillContext) -> str:
+    """Legacy-item rung classification prompt (depth backfill)."""
+
+    return _json_prompt(
+        "learnloop rung backfill",
+        RUNG_BACKFILL_PROMPT_VERSION,
+        {
+            "task": RUNG_BACKFILL_PROMPT,
             "context": asdict(context),
         },
     )

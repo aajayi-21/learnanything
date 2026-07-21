@@ -1120,10 +1120,20 @@ function SchedulerWhy({ scheduler }: { scheduler: SchedulerExplanationDto }) {
         <span>
           <Faint>selected_mode</Faint> <Dim style={{ fontFamily: FONT_MONO }}>{scheduler.selectedMode}</Dim>
         </span>
-        <span>
-          <Faint>expected_information_gain</Faint>{" "}
-          <Dim style={{ fontFamily: FONT_MONO }}>{scheduler.expectedInformationGain.toFixed(3)}</Dim>
+        <span title="diagnostic expected information gain: entropy reduction over a locked hypothesis set — only defined while a diagnostic probe episode is in progress">
+          <Faint>diagnostic_eig</Faint>{" "}
+          {scheduler.expectedInformationGain > 0 ? (
+            <Dim style={{ fontFamily: FONT_MONO }}>{scheduler.expectedInformationGain.toFixed(3)}</Dim>
+          ) : (
+            <Faint style={{ fontFamily: FONT_MONO }}>— (no active diagnostic)</Faint>
+          )}
         </span>
+        {comps.practiceInformation != null ? (
+          <span title="display only, never a selection input: Fisher information of one ordinary attempt about this LO's mastery latent (a²·p·(1−p) × evidence mass). Peaks when the item sits on your boundary; near-zero far above or below your level.">
+            <Faint>practice_information (display only)</Faint>{" "}
+            <Dim style={{ fontFamily: FONT_MONO }}>{comps.practiceInformation.toFixed(3)}</Dim>
+          </span>
+        ) : null}
       </div>
     </div>
   );

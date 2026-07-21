@@ -32,6 +32,19 @@ hint_policy:
 retrieval_demand: 0.3
 transfer_distance: 0.35
 scaffold_level: 0.2
+capability: procedure_execution
+task_features:
+  complexity: 3
+  transfer: near
+  representation:
+    - code
+    - verbal
+  response: structured_steps
+  scaffolding: cue
+  span: multi_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: training-loop-reconstruction
 evidence_fingerprint:
   source_family: small-network stochastic training notebook
@@ -106,4 +119,4 @@ provenance:
       source_id: src_01KY1B5YQFV1NNM7CHPGFV6PHT
       span_hash:
 created_at: '2026-07-21T05:07:38Z'
-updated_at: '2026-07-21T05:07:38Z'
+updated_at: '2026-07-21T18:14:58Z'

@@ -1808,6 +1808,21 @@ export function ReaderScreen({ onError }: { onError: (message: string) => void }
                     placeholder="Write the answer in your own words…"
                     style={{ fontFamily: FONT_MONO, fontSize: 12, background: COLOR.bgInput, border: `1px solid ${COLOR.border}`, color: COLOR.text, padding: 8, minHeight: 72, resize: "vertical" }}
                   />
+                  {authoredQuestion.trim() || authoredAnswer.trim() ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, borderTop: `1px solid ${COLOR.border}`, paddingTop: 6 }}>
+                      <Faint style={{ fontSize: 10 }}>PREVIEW</Faint>
+                      {authoredQuestion.trim() ? (
+                        <div className="markdown" style={{ fontFamily: FONT_MONO, fontSize: 12, color: COLOR.text }}>
+                          <MarkdownMath value={authoredQuestion} />
+                        </div>
+                      ) : null}
+                      {authoredAnswer.trim() ? (
+                        <div className="markdown" style={{ fontFamily: FONT_MONO, fontSize: 12, color: COLOR.textDim }}>
+                          <MarkdownMath value={authoredAnswer} />
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {authoredCardId ? (
                     <>
                       <Faint style={{ fontSize: 11, color: COLOR.green }}>✓ Saved in your exact words. It will return as personal practice.</Faint>
@@ -2159,7 +2174,9 @@ export function ReaderScreen({ onError }: { onError: (message: string) => void }
               {(history[activeSpan] ?? []).map((exchange, i) => (
                 <Card key={i} status="running" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <Faint style={{ fontSize: 10 }}>YOU ASKED</Faint>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: COLOR.textDim }}>{exchange.question}</span>
+                  <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: COLOR.textDim }}>
+                    <MarkdownMath value={exchange.question} />
+                  </div>
                   <Pill color="cyan">{exchange.answer.answerMode}</Pill>
                   <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: COLOR.text }}>
                     <MarkdownMath value={exchange.answer.answerMd} />

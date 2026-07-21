@@ -365,6 +365,19 @@ class ReadingQuickCheck(BaseModel):
     span_ids: list[str] = Field(default_factory=list)
 
 
+class RungBackfillItem(BaseModel):
+    """One legacy item's rung classification (candidate-only; deterministic
+    validators admit or skip each entry)."""
+
+    practice_item_id: str = ""
+    capability: str = ""
+    task_features: TaskFeaturesPayload | None = None
+
+
+class RungBackfillClassification(BaseModel):
+    items: list[RungBackfillItem] = Field(default_factory=list)
+
+
 class DepthEdgeInstancePayload(BaseModel):
     """One LLM-authored depth-edge instance (candidate-only; spec v2 §depth).
 

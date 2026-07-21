@@ -2826,6 +2826,46 @@ class Repository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def rung_variant_batch_dead(self, batch_id: str | None) -> bool:
+        """True when a request's generation batch can no longer complete it:
+        the batch id is unset/unknown or every rung_variant job in it is
+        terminal without the service having updated the request row (job
+        crashed, was cancelled, or predates a restart)."""
+
+        if not batch_id:
+            return True
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT status FROM ingest_jobs WHERE batch_id = ? AND job_type = 'rung_variant'",
+                (batch_id,),
+            ).fetchall()
+        if not rows:
+            return True
+        return all(row["status"] in ("failed", "cancelled", "completed") for row in rows)
+
+    def rung_variant_pending_source_ids(self) -> set[str]:
+        """Source items with a LIVE non-terminal variant request — the
+        scheduler's pending-variant hold: never re-serve the exact card the
+        learner just asked to step away from while its variant is still being
+        authored. Requests whose generation batch is dead (job failed/cancelled
+        without the service updating the row) do NOT hold — a crashed job must
+        never hide a card indefinitely."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT r.source_practice_item_id
+                FROM rung_variant_requests r
+                WHERE r.status IN ('pending', 'generating')
+                  AND EXISTS (
+                    SELECT 1 FROM ingest_jobs j
+                    WHERE j.batch_id = r.batch_id AND j.job_type = 'rung_variant'
+                      AND j.status NOT IN ('failed', 'cancelled', 'completed')
+                  )
+                """
+            ).fetchall()
+        return {row["source_practice_item_id"] for row in rows}
+
     def pending_gap_need_for_facets(self, facet_ids: Iterable[str]) -> dict[str, Any] | None:
         """A pending tutor-gap need already targeting any of ``facet_ids``.
 

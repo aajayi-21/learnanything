@@ -291,6 +291,10 @@ export interface SchedulerComponents {
   goalFrontier?: number;
   recentError: number;
   probeEig: number;
+  /** Display-only: Fisher information of one ordinary attempt about the LO
+   * mastery latent (a²·p·(1−p) × default evidence mass). Never a priority
+   * input — practice selection optimizes learning, not measurement. */
+  practiceInformation?: number;
   negativeSurpriseFollowup?: number;
   interventionFollowup?: number;
 }
@@ -1289,10 +1293,14 @@ export interface IngestJobsSnapshot {
   jobs: IngestJobDto[];
 }
 
+export type PdfEngine = "auto" | "marker" | "pypdf";
+
 export interface StartIngestInput {
   source: string;
   subjectId: string;
   mode: IngestMode;
+  /** PDF extraction engine; "auto" defers to the vault's [ingest.pdf] config. */
+  pdfEngine?: PdfEngine;
 }
 
 // ── Durable ingest workflows (source-ingestion v2 §6.2) ──────────────────
@@ -1406,6 +1414,8 @@ export interface StartImportBatchInput {
   pageRanges?: Array<{ source: string; pages: string }>;
   /** Sources opted OUT of the reader loop at ingest setup (e.g. practice exams). */
   readerDisabledSources?: string[];
+  /** PDF extraction engine; "auto" defers to the vault's [ingest.pdf] config. */
+  pdfEngine?: PdfEngine;
   estimate?: Record<string, unknown> | null;
 }
 

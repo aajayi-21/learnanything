@@ -32,6 +32,19 @@ hint_policy:
 retrieval_demand: 0.3
 transfer_distance: 0.6
 scaffold_level: 0.25
+capability: procedure_execution
+task_features:
+  complexity: 3
+  transfer: far
+  representation:
+    - symbolic
+    - verbal
+  response: structured_steps
+  scaffolding: partial
+  span: multi_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: symbolic neural-network derivative
 evidence_fingerprint:
   source_family: calculus backpropagation derivation
@@ -126,4 +139,4 @@ provenance:
       source_id: src_01KY18ZF2K09K83A9D0E2CKAEH
       span_hash:
 created_at: '2026-07-21T05:07:19Z'
-updated_at: '2026-07-21T05:07:19Z'
+updated_at: '2026-07-21T18:14:45Z'

@@ -32,6 +32,19 @@ hint_policy:
 retrieval_demand: 0.35
 transfer_distance: 0.75
 scaffold_level: 0.1
+capability: procedure_execution
+task_features:
+  complexity: 3
+  transfer: far
+  representation:
+    - symbolic
+    - verbal
+  response: structured_steps
+  scaffolding: cue
+  span: multi_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: architecture_scaling
 evidence_fingerprint:
   source_family: expanded_multiclass_model
@@ -140,4 +153,4 @@ provenance:
       source_id: src_01KY1B5YQFV1NNM7CHPGFV6PHT
       span_hash:
 created_at: '2026-07-21T05:07:29Z'
-updated_at: '2026-07-21T05:07:29Z'
+updated_at: '2026-07-21T18:14:43Z'

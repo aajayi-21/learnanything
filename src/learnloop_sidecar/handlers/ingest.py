@@ -34,6 +34,9 @@ class StartIngestInput(ParamsModel):
     source: str
     subject_id: str
     mode: Literal["canonical", "exam"] = "canonical"
+    # PDF extraction engine: marker-pdf (structured Markdown, math, OCR) or the
+    # pypdf native-text fallback. "auto" defers to the vault's [ingest.pdf].
+    pdf_engine: Literal["auto", "marker", "pypdf"] = "auto"
 
 
 class IngestJobInput(ParamsModel):
@@ -65,6 +68,9 @@ class StartImportBatchInput(ParamsModel):
     # Sources the learner opted OUT of the reader loop at ingest setup (e.g.
     # practice exams). Everything else defaults to reader-enabled.
     reader_disabled_sources: list[str] = []
+    # PDF extraction engine for this batch: marker-pdf or the pypdf fallback.
+    # "auto" defers to the vault's [ingest.pdf] configuration.
+    pdf_engine: Literal["auto", "marker", "pypdf"] = "auto"
 
 
 class IngestBatchInput(ParamsModel):
@@ -112,7 +118,9 @@ def start_ingest(ctx: SidecarContext, params: StartIngestInput) -> dict[str, Any
     except UnsupportedSourceError as exc:
         raise SidecarError("unsupported_source", str(exc)) from exc
     try:
-        job = ctx.ingest_jobs.start(vault.root, source, params.subject_id, params.mode)
+        job = ctx.ingest_jobs.start(
+            vault.root, source, params.subject_id, params.mode, pdf_engine=params.pdf_engine
+        )
     except ActiveIngestJobError as exc:
         raise SidecarError(
             "ingest_in_progress",
@@ -206,6 +214,7 @@ def start_import_batch(ctx: SidecarContext, params: StartImportBatchInput) -> di
         page_selection=page_selection,
         page_selections=page_selections,
         reader_disabled_sources=reader_disabled,
+        pdf_engine=params.pdf_engine,
     )
     return versioned(ctx.ingest_jobs.get_batch(batch_id))
 

@@ -134,6 +134,7 @@ class RunnerServices:
     inventory_client_factory: Callable[["JobContext"], Any] | None = None
     synthesis_client_factory: Callable[["JobContext"], Any] | None = None
     quick_check_client_factory: Callable[["JobContext"], Any] | None = None
+    rung_variant_client_factory: Callable[["JobContext"], Any] | None = None
 
     def fetch_bytes(self, source: str, category: str, ctx: "JobContext") -> FetchedBytes:
         return (self.fetch or default_fetch)(source, category, ctx)
@@ -159,6 +160,9 @@ class RunnerServices:
         # Reader quick checks ride the codex-only resolver: the task method is
         # getattr-discovered on the SDK client, exactly like unit inventory.
         return (self.quick_check_client_factory or default_inventory_client)(ctx)
+
+    def rung_variant_client(self, ctx: "JobContext") -> Any:
+        return (self.rung_variant_client_factory or default_rung_variant_client)(ctx)
 
 
 @dataclass
@@ -300,13 +304,37 @@ def _fetch_metadata(source: str, category: str) -> tuple[str | None, tuple[str, 
     return video_title, (author,) if author else ()
 
 
+def _pdf_payload_config(ctx: JobContext) -> dict[str, Any]:
+    """The effective PDF extraction config for one import job.
+
+    The job payload's ``pdf_config`` wins key-by-key (a per-ingest engine choice
+    or a repair's page/OCR options); the vault's ``[ingest.pdf]`` engine fills in
+    when the payload doesn't pin one, so a configured ``engine = "pypdf"`` (or
+    "marker") finally governs the durable import path too."""
+
+    config = dict(ctx.payload.get("pdf_config") or {})
+    if not config.get("engine"):
+        from learnloop.vault.loader import load_vault
+
+        try:
+            engine = load_vault(ctx.vault_root).config.ingest.pdf.engine
+        except FileNotFoundError:
+            engine = "auto"
+        # "auto" stays implicit: writing it into the config would change every
+        # extraction request hash and needlessly re-extract unchanged sources.
+        if engine != "auto":
+            config["engine"] = engine
+    return config
+
+
 def default_extract(fetched: FetchedBytes, category: str, ctx: JobContext) -> Any:
     """Produce Document IR from fetched bytes using the M1 extractor providers.
 
-    PDFs go through the least-expensive available PDF extractor; everything else
-    gets honest trivial IR from its decoded text (§2.3)."""
+    PDFs go through the engine the payload/vault config selects (marker, the
+    pypdf fallback, or auto); everything else gets honest trivial IR from its
+    decoded text (§2.3)."""
 
-    from learnloop.ingest.extractors import markdown_to_ir, pdf_extractor_for
+    from learnloop.ingest.extractors import MarkerUnavailableError, markdown_to_ir, pdf_extractor_for
     from learnloop.ingest.extractors.base import ExtractionContext
 
     is_pdf = (
@@ -315,8 +343,13 @@ def default_extract(fetched: FetchedBytes, category: str, ctx: JobContext) -> An
         or fetched.raw_bytes[:5] == b"%PDF-"
     )
     if is_pdf:
-        pdf_config = dict(ctx.payload.get("pdf_config") or {})
-        extractor = pdf_extractor_for(pdf_config)
+        pdf_config = _pdf_payload_config(ctx)
+        try:
+            extractor = pdf_extractor_for(pdf_config)
+        except MarkerUnavailableError as exc:
+            raise IngestRunnerError(
+                str(exc), code="pdf_extractor_unavailable", retryable=True
+            ) from exc
         pages = _normalize_pages(ctx.payload.get("page_selection") or pdf_config.get("page_range")) or None
         context = ExtractionContext(
             revision_id=str(ctx.job.get("_revision_id") or "rev"),
@@ -383,16 +416,21 @@ def default_extraction_identity(
 ) -> Mapping[str, Any]:
     """Describe the chosen extractor before running it, making cache hits cheap."""
 
-    from learnloop.ingest.extractors import pdf_extractor_for
+    from learnloop.ingest.extractors import MarkerUnavailableError, pdf_extractor_for
 
     is_pdf = (
         category == "pdf"
         or (fetched.content_type or "").lower().startswith("application/pdf")
         or fetched.raw_bytes[:5] == b"%PDF-"
     )
-    config = dict(ctx.payload.get("pdf_config") or {})
+    config = _pdf_payload_config(ctx)
     if is_pdf:
-        extractor = pdf_extractor_for(config)
+        try:
+            extractor = pdf_extractor_for(config)
+        except MarkerUnavailableError as exc:
+            raise IngestRunnerError(
+                str(exc), code="pdf_extractor_unavailable", retryable=True
+            ) from exc
         return {
             "extractor": extractor.name,
             "extractor_version": extractor.version(),
@@ -547,6 +585,20 @@ def default_synthesis_client(ctx: JobContext) -> Any:
     synthesis follows the routed medium-effort profile and its fallback.
     """
 
+    return _routed_task_client(ctx, "canonical_ingest")
+
+
+def default_rung_variant_client(ctx: JobContext) -> Any:
+    """Resolve the rung_variant route (default: the fast low-effort profile).
+
+    A learner-requested variant is a small, instruction-constrained authoring
+    task whose output the deterministic rung gate checks — it does not need the
+    judgment-heavy synthesis profile, and the learner is actively waiting."""
+
+    return _routed_task_client(ctx, "rung_variant")
+
+
+def _routed_task_client(ctx: JobContext, task: str) -> Any:
     from learnloop.ai.client import make_ai_provider_client
     from learnloop.ai.routing import fallback_provider_for, provider_for_task
     from learnloop.ai.runtime import check_ai_runtime
@@ -555,7 +607,7 @@ def default_synthesis_client(ctx: JobContext) -> Any:
     from learnloop.vault.loader import load_vault
 
     vault = load_vault(ctx.vault_root)
-    selection = provider_for_task(vault.config, "canonical_ingest")
+    selection = provider_for_task(vault.config, task)
 
     def ready_client(provider_name: str):
         if provider_name == "codex":
@@ -1387,7 +1439,7 @@ def handle_rung_variant(ctx: JobContext) -> dict[str, Any]:
     if not request_id:
         raise IngestRunnerError("rung_variant job requires a 'request_id'.")
     ctx.report("generation", message="Authoring the requested variant")
-    client = ctx.services.synthesis_client(ctx)
+    client = ctx.services.rung_variant_client(ctx)
     try:
         return generate_rung_variant(ctx.vault_root, client, request_id=request_id, clock=ctx.clock)
     except RungVariantError as exc:

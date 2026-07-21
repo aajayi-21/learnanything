@@ -58,6 +58,11 @@ DIRECTIONS = ("easier", "harder")
 
 CLAIM_SOURCE = "rung_variant_request"
 
+# Items whose stamped capability has no default-trajectory waypoint (e.g.
+# coordination/whole_task) sit BEYOND the trajectory: easier steps down to the
+# deepest default waypoint; harder requires a reviewed depth envelope.
+BEYOND_TRAJECTORY = "beyond_default_trajectory"
+
 
 # ---------------------------------------------------------------------------
 # Waypoint resolution
@@ -76,6 +81,10 @@ def resolve_item_waypoint(vault: LoadedVault, repository: Repository, item: Prac
     slugs = trajectory_slugs()
 
     if item.capability and isinstance(item.task_features, dict) and item.task_features:
+        trajectory_capabilities = {waypoint_rung(repository, slug).capability for slug in slugs}
+        if item.capability not in trajectory_capabilities:
+            # e.g. coordination/whole_task — deeper than every default waypoint.
+            return BEYOND_TRAJECTORY
         best_slug, best_score = None, -1
         for slug in slugs:
             rung = waypoint_rung(repository, slug)
@@ -147,8 +156,19 @@ def request_rung_variant(
         raise RungVariantError("item_not_active", f"Practice item {practice_item_id} is {item.status}.")
 
     config = vault.config.rung_variants
-    pending = repository.pending_rung_variant_requests(practice_item_id)
-    if len(pending) >= config.max_pending_per_item:
+    # Reconcile stale requests first: a job that crashed / was cancelled before
+    # the service updated the row would otherwise wedge the per-item lock and
+    # the scheduler's pending-variant hold forever.
+    live_pending = []
+    for row in repository.pending_rung_variant_requests(practice_item_id):
+        if repository.rung_variant_batch_dead(row.get("batch_id")):
+            repository.update_rung_variant_request(
+                row["id"], status="failed",
+                failure_reason="generation job died before completing", clock=clock,
+            )
+            continue
+        live_pending.append(row)
+    if len(live_pending) >= config.max_pending_per_item:
         raise RungVariantError(
             "variant_pending",
             "A variant for this item is already being authored — try again once it lands.",
@@ -255,7 +275,15 @@ def _target_rung(
     source_slug: str,
     direction: str,
 ) -> RungTarget:
-    target_slug = adjacent_slug(source_slug, direction)
+    if source_slug == BEYOND_TRAJECTORY:
+        # Beyond-trajectory item (e.g. coordination/whole_task): easier steps
+        # down onto the trajectory's deepest waypoint; harder needs an envelope
+        # (fall through to the commitment path below via target_slug=None).
+        if direction == "easier":
+            return waypoint_rung(repository, trajectory_slugs()[-1])
+        target_slug = None
+    else:
+        target_slug = adjacent_slug(source_slug, direction)
     if target_slug is not None:
         return waypoint_rung(repository, target_slug)
     if direction == "easier":
@@ -417,13 +445,35 @@ def generate_rung_variant(
         )
         return patch_id, rung_gate
 
-    patch_id, rung_gate = _run(None)
-    if rung_gate.violations and vault.config.rung_variants.retry_on_rung_violation:
-        corrective = (
-            "PREVIOUS ATTEMPT REJECTED by the deterministic rung gate. Fix these violations exactly: "
-            + "; ".join(rung_gate.violations)
+    from pydantic import ValidationError
+
+    try:
+        try:
+            patch_id, rung_gate = _run(None)
+        except (ValidationError, ValueError) as exc:
+            # Fast/low-effort models occasionally emit schema-invalid proposals
+            # (e.g. a forbidden `target` on a create). One corrective retry with
+            # the validator's message; a second failure is terminal.
+            corrective = (
+                "PREVIOUS ATTEMPT REJECTED: the output failed schema validation. "
+                f"Fix exactly this and emit a valid proposal: {exc}"
+            )
+            patch_id, rung_gate = _run(corrective)
+        else:
+            if rung_gate.violations and vault.config.rung_variants.retry_on_rung_violation:
+                corrective = (
+                    "PREVIOUS ATTEMPT REJECTED by the deterministic rung gate. Fix these violations exactly: "
+                    + "; ".join(rung_gate.violations)
+                )
+                patch_id, rung_gate = _run(corrective)
+    except Exception as exc:
+        # The service owns the request row's terminal status: a job that dies
+        # must never leave the row wedged in `generating` (which would hold the
+        # source item out of the queue and block re-requests).
+        repository.update_rung_variant_request(
+            request_id, status="failed", failure_reason=str(exc)[:500], clock=clock
         )
-        patch_id, rung_gate = _run(corrective)
+        raise
 
     created = _created_item_row(repository, patch_id)
     if created is None:

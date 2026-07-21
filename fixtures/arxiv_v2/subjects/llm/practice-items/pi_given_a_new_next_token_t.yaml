@@ -30,6 +30,20 @@ hint_policy:
 retrieval_demand: 0.25
 transfer_distance: 0.45
 scaffold_level: 0.25
+capability: procedure_execution
+task_features:
+  complexity: 3
+  transfer: near
+  representation:
+    - symbolic
+    - verbal
+  response: structured_steps
+  scaffolding: partial
+  span: multi_step
+  tools:
+    - closed_book
+    - calculator
+task_feature_schema: p1_launch@1
 surface_family: token_loss_table
 evidence_fingerprint:
   source_family: language_model_token_table
@@ -132,4 +146,4 @@ provenance:
       source_id: src_01KY1B5YQFV1NNM7CHPGFV6PHT
       span_hash:
 created_at: '2026-07-21T05:07:30Z'
-updated_at: '2026-07-21T05:07:30Z'
+updated_at: '2026-07-21T18:14:56Z'

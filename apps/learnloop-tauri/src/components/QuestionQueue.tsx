@@ -108,7 +108,7 @@ export function QuestionQueuePanel({ onError }: { onError: (message: string) => 
                   color: COLOR.text
                 }}
               >
-                {row.questionMd}
+                {expanded ? <MarkdownMath value={row.questionMd} /> : row.questionMd}
               </span>
               <Faint style={{ fontSize: 10, flexShrink: 0 }}>{row.createdAt.slice(0, 10)}</Faint>
             </div>

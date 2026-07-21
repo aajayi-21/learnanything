@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../api/client";
-import type { AcquisitionPreviewItem, CommandError, IngestJobDto, IngestJobPhase, IngestMode, SourceLibraryCard, StartingLevel } from "../api/dto";
-import { COLOR, Dim, Faint, FONT_MONO, KeyBar, Pill, SectionHeader, type PillColor } from "../components/term";
+import type { AcquisitionPreviewItem, CommandError, IngestJobDto, IngestJobPhase, IngestMode, PdfEngine, SourceLibraryCard, StartingLevel } from "../api/dto";
+import { COLOR, Dim, Faint, FONT_MONO, KeyBar, Pill, SectionHeader, TermSelect, type PillColor } from "../components/term";
 import { STARTING_LEVELS } from "../components/StudyMapBriefWizard";
 import { IngestActivityStack } from "../components/IngestActivity";
 import { SourceLibrarySidebar } from "../components/SourceLibrarySidebar";
@@ -556,6 +556,7 @@ function IngestHome({
   const [stagedReaderOff, setStagedReaderOff] = useState<Record<string, boolean>>({});
   const [previews, setPreviews] = useState<Record<string, AcquisitionPreviewItem>>({});
   const [pageSelection, setPageSelection] = useState("");
+  const [pdfEngine, setPdfEngine] = useState<PdfEngine>("auto");
   const inputRef = useRef<HTMLInputElement>(null);
   const activityRef = useRef<HTMLDivElement>(null);
   const runningRef = useRef(false);
@@ -813,7 +814,8 @@ function IngestHome({
         pageRanges: entries
           .filter((entry): entry is { source: string; pages: string } => Boolean(entry.pages?.trim()))
           .map((entry) => ({ source: entry.source, pages: entry.pages })),
-        readerDisabledSources: entries.map((entry) => entry.source).filter((src) => stagedReaderOff[src])
+        readerDisabledSources: entries.map((entry) => entry.source).filter((src) => stagedReaderOff[src]),
+        pdfEngine
       });
       setSource("");
       setStaged([]);
@@ -836,7 +838,7 @@ function IngestHome({
     setJob(null);
     onJobIdChange(null);
     try {
-      const started = await api.startIngest({ source: src, subjectId: subject, mode: "exam" });
+      const started = await api.startIngest({ source: src, subjectId: subject, mode: "exam", pdfEngine });
       setJob(started);
       onJobIdChange(started.id);
     } catch (e) {
@@ -1130,6 +1132,27 @@ function IngestHome({
                   This range belongs to the current source. Staging captures it independently for that PDF.
                 </Faint>
               ) : null}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+                <Faint style={{ fontSize: 11 }}>pdf engine</Faint>
+                <TermSelect
+                  value={pdfEngine}
+                  options={[
+                    { value: "auto", label: "auto (vault default)" },
+                    { value: "marker", label: "marker — structured, math, OCR" },
+                    { value: "pypdf", label: "pypdf — fast native text" }
+                  ]}
+                  onChange={(value) => setPdfEngine(value as PdfEngine)}
+                  disabled={running || importing}
+                  width={250}
+                />
+                {pdfEngine !== "auto" && (
+                  <Faint style={{ fontSize: 10 }}>
+                    {pdfEngine === "marker"
+                      ? "slow (model inference); fails if marker-pdf is not installed"
+                      : "no OCR, tables, or math — scanned PDFs will fail"}
+                  </Faint>
+                )}
+              </div>
             </div>
           ) : null}
 

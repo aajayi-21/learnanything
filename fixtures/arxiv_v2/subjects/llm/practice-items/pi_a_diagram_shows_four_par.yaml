@@ -28,6 +28,19 @@ hint_policy:
 retrieval_demand: 0.35
 transfer_distance: 0.25
 scaffold_level: 0.3
+capability: schema_interpretation
+task_features:
+  complexity: 2
+  transfer: near
+  representation:
+    - diagram
+    - verbal
+  response: long_constructed
+  scaffolding: partial
+  span: multi_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: attention_architecture_diagram
 evidence_fingerprint:
   source_family: transformer_architecture_lecture
@@ -76,4 +89,4 @@ provenance:
       source_id: src_01KY18Z8B6CXZ8VFMQF374VKTD
       span_hash:
 created_at: '2026-07-21T05:07:25Z'
-updated_at: '2026-07-21T05:07:25Z'
+updated_at: '2026-07-21T18:14:44Z'

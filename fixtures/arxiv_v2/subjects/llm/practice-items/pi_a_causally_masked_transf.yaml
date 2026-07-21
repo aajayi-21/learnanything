@@ -31,6 +31,19 @@ hint_policy:
 retrieval_demand: 0.35
 transfer_distance: 0.45
 scaffold_level: 0.2
+capability: schema_interpretation
+task_features:
+  complexity: 2
+  transfer: near
+  representation:
+    - symbolic
+    - verbal
+  response: structured_steps
+  scaffolding: cue
+  span: multi_step
+  tools:
+    - closed_book
+task_feature_schema: p1_launch@1
 surface_family: incremental decoding trace
 evidence_fingerprint:
   source_family: Transformer KV-cache lecture
@@ -125,4 +138,4 @@ provenance:
       source_id: src_01KY18ZDD36HXZKRYART7AZ0XZ
       span_hash:
 created_at: '2026-07-21T05:07:20Z'
-updated_at: '2026-07-21T05:07:20Z'
+updated_at: '2026-07-21T18:14:42Z'
