@@ -37,9 +37,24 @@ from learnloop.ingest.ir import (
 
 EXTRACTOR_NAME = "marker"
 
+# Marker loads its CUDA models before PdfProvider asks pdftext to extract native
+# PDF text.  pdftext's default ProcessPoolExecutor uses ``fork`` on Linux, so
+# its workers inherit an already-initialized CUDA/PyTorch process and can hang
+# forever waiting on inherited locks.  Keep that CPU-only pre-pass in-process;
+# Marker/Surya's model inference remains GPU-batched.  Advanced callers may
+# explicitly override this through marker_options when they run in a process
+# topology where spawning pdftext workers is known to be safe.
+_SAFE_PDFTEXT_WORKERS = 1
+
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 _VERBATIM_TYPES = {"equation", "equationnumber", "math", "inlinemath", "table", "tablegroup", "code", "codeblock"}
+
+
+def _marker_runtime_options(config: dict[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {"output_format": "chunks", **config}
+    options.setdefault("pdftext_workers", _SAFE_PDFTEXT_WORKERS)
+    return options
 
 
 class MarkerUnavailableError(RuntimeError):
@@ -104,9 +119,29 @@ def _section_path(section_hierarchy: dict | None) -> list[str]:
     return [str(section_hierarchy[level]).strip() for level in ordered_levels if str(section_hierarchy[level]).strip()]
 
 
+_MATH_TAG_RE = re.compile(r"<math\b([^>]*)>(.*?)</math>", re.IGNORECASE | re.DOTALL)
+_MATH_DISPLAY_BLOCK_RE = re.compile(r"""display\s*=\s*["']block["']""", re.IGNORECASE)
+
+
+def _math_to_delimited(html: str) -> str:
+    """Marker encodes math as ``<math display='inline|block'>LaTeX</math>``. Rewrite to
+    $/$$ delimiters BEFORE tag stripping — stripping the tag bare leaves undelimited
+    LaTeX that no downstream renderer can recognize as math."""
+
+    def _sub(match: re.Match[str]) -> str:
+        body = match.group(2).strip()
+        if not body:
+            return " "
+        if _MATH_DISPLAY_BLOCK_RE.search(match.group(1) or ""):
+            return f"$${body}$$"
+        return f"${body}$"
+
+    return _MATH_TAG_RE.sub(_sub, html)
+
+
 def _block_text(block_type: str, html: str) -> str:
     normalized_type = (block_type or "").replace(" ", "").lower()
-    unescaped = _unescape(_TAG_RE.sub(" ", html or ""))
+    unescaped = _unescape(_TAG_RE.sub(" ", _math_to_delimited(html or "")))
     if normalized_type in _VERBATIM_TYPES:
         return unescaped.strip()
     return _WS_RE.sub(" ", unescaped).strip()
@@ -356,11 +391,16 @@ class MarkerDocumentExtractor:
 
     name = EXTRACTOR_NAME
 
+    # Our chunk→IR mapping is part of the extraction contract: bumping this
+    # changes extraction_request_hash so cached runs from an older mapping
+    # (e.g. pre-math-delimiter _block_text) are not silently reused.
+    CHUNK_MAP_VERSION = 2
+
     def __init__(self, *, config: dict[str, Any] | None = None) -> None:
         self._config = dict(config or {})
 
     def version(self) -> str:
-        return marker_package_version()
+        return f"{marker_package_version()}+map{self.CHUNK_MAP_VERSION}"
 
     def model_versions(self) -> dict[str, str]:
         # Best-effort; surya model weights carry no stable programmatic version.
@@ -395,7 +435,9 @@ class MarkerDocumentExtractor:
         from marker.converters.pdf import PdfConverter
         from marker.models import create_model_dict
 
-        options: dict[str, Any] = {"output_format": "chunks", **self._config}
+        options = _marker_runtime_options(self._config)
+        if context.page_selection is not None:
+            options["page_range"] = ",".join(str(page) for page in context.page_selection)
         torch_device = options.pop("torch_device", None)
         if torch_device:
             os.environ["TORCH_DEVICE"] = str(torch_device)

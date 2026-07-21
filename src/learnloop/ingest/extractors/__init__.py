@@ -17,7 +17,7 @@ from learnloop.ingest.extractors.marker import (
     marker_available,
     marker_package_version,
 )
-from learnloop.ingest.extractors.normalizers import captions_to_ir, markdown_to_ir
+from learnloop.ingest.extractors.normalizers import captions_to_ir, markdown_to_ir, transcript_to_ir
 from learnloop.ingest.extractors.pypdf import PyPdfDocumentExtractor, PyPdfExtractionError
 
 __all__ = [
@@ -33,6 +33,7 @@ __all__ = [
     "marker_available",
     "marker_package_version",
     "single_unit_from_blocks",
+    "transcript_to_ir",
 ]
 
 

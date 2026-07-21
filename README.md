@@ -38,7 +38,9 @@ The core loop is:
 6. Let new evidence update future scheduling.
 
 For a detailed description of the learner model and current behavior, read the
-[user and algorithm guide](documentation.md).
+[user and algorithm guide](documentation.md). Its
+[feature lookup](documentation.md#feature-lookup) maps the main desktop and CLI
+workflows to the sections that explain them.
 
 ## Quick start: desktop app
 
@@ -56,8 +58,20 @@ On Debian or Ubuntu, Tauri currently requires:
 ```bash
 sudo apt update
 sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 ```
+
+On Arch Linux, install the matching GStreamer runtime plugins for embedded
+audio and video playback:
+
+```bash
+sudo pacman -Syu --needed gst-plugins-base gst-plugins-good
+```
+
+`gst-plugins-good` provides `autoaudiosink`, which WebKitGTK requires when the
+Reader plays embedded video. If it is missing, the WebKit web process can exit
+when playback starts.
 
 ### Run from a checkout
 
@@ -104,7 +118,7 @@ Useful shortcuts in the desktop app:
 | Shortcut | Action |
 |---|---|
 | `Ctrl/Cmd+P` or `:` | Open the command palette |
-| `Alt+1` … `Alt+8` | Switch among the first eight tabs |
+| `Alt+1` … `Alt+9`, `Alt+0` | Switch among the ten tabs |
 | `Esc` | Close the current overlay or return to the queue |
 | `j` / `k` | Move through list-oriented screens |
 
@@ -177,10 +191,15 @@ Provider profiles and per-workflow routing live in the vault's `learnloop.toml`:
 active_provider = "codex"
 
 [ai.routing]
-grading = "codex"
-canonical_ingest = "codex"
-authoring = "codex"
+grading = "codex_low"
+canonical_ingest = "codex_medium"
+authoring = "codex_medium"
+tutor_qa = "codex_low"
+teach_back = "codex_low"
 ```
+
+Both derived Codex profiles use `gpt-5.6-sol`. Canonical ingestion and authoring
+use medium reasoning; interactive grading, Tutor Ask, and teach-back use low.
 
 Secrets and machine-specific values should not be committed to a vault. LearnLoop
 loads them in this order:
@@ -265,6 +284,10 @@ bundling is currently disabled in `tauri.conf.json`.
 For sidecar diagnostics, set `LEARNLOOP_SIDECAR_LOG_LEVEL=DEBUG` (or
 `LEARNLOOP_SIDECAR_DEBUG=1`). Use `LEARNLOOP_SIDECAR_DEBUG_LOG` to send logs to a
 specific file.
+
+To enable the desktop webview's native zoom hotkeys for debugging, launch the
+Tauri app with `LEARNLOOP_TAURI_DEBUG_ZOOM=1`. Use `Ctrl+=`, `Ctrl+-`, and
+`Ctrl+0` to zoom in, zoom out, and reset the zoom level.
 
 ## Further reading
 

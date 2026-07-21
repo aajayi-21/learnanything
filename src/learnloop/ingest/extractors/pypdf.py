@@ -43,12 +43,33 @@ class PyPdfDocumentExtractor:
 
         try:
             reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
-            page_texts = [(page.extract_text() or "").strip() for page in reader.pages]
+            if reader.is_encrypted:
+                # Many "encrypted" PDFs only restrict printing/copying and open
+                # with an empty user password; a real password requirement stays
+                # a typed, user-actionable refusal.
+                try:
+                    decrypted = reader.decrypt("")
+                except Exception as exc:
+                    raise PyPdfExtractionError(
+                        "PDF is password-protected; provide a decrypted copy"
+                    ) from exc
+                if not decrypted:
+                    raise PyPdfExtractionError(
+                        "PDF is password-protected; provide a decrypted copy"
+                    )
+            selected = list(context.page_selection) if context.page_selection is not None else list(range(len(reader.pages)))
+            if any(page < 0 or page >= len(reader.pages) for page in selected):
+                raise PyPdfExtractionError(
+                    f"requested PDF page range exceeds the document's {len(reader.pages)} pages"
+                )
+            page_texts = [(page_index, (reader.pages[page_index].extract_text() or "").strip()) for page_index in selected]
+        except PyPdfExtractionError:
+            raise
         except Exception as exc:
             raise PyPdfExtractionError(f"failed to read PDF source: {exc}") from exc
 
         blocks: list[DocumentBlock] = []
-        for page_index, text in enumerate(page_texts):
+        for page_index, text in page_texts:
             if not text:
                 continue
             ordinal = len(blocks) + 1

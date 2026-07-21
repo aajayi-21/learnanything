@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import time
 
 import pytest
 
@@ -10,6 +11,7 @@ from learnloop.db.repositories import Repository
 from learnloop.ingest.ir import DocumentBlock, DocumentIR, DocumentUnit, ExtractionHealth, PageHealth
 from learnloop.services.ingest_runner import (
     IngestRunner,
+    IngestRunnerError,
     JobContext,
     JobSpec,
     RunnerServices,
@@ -67,6 +69,56 @@ def test_queue_survives_restart(tmp_path):
     assert all(job["status"] == "completed" for job in reopened.repo.ingest_jobs_for_batch(batch_id))
 
 
+def test_delete_finished_ingest_batches_removes_queue_history_only(tmp_path):
+    runner = _runner(tmp_path, handlers={"fake": _ok_handler({})})
+    finished_batch = runner.enqueue_batch(
+        "import",
+        [JobSpec("fake"), JobSpec("fake", depends_on=(0,))],
+    )
+    runner.drain()
+    active_batch = runner.enqueue_batch("import", [JobSpec("fake")])
+
+    deleted = runner.repo.delete_finished_ingest_batches([finished_batch])
+
+    assert deleted == {"batches": 1, "jobs": 2, "dependencies": 1}
+    assert runner.repo.get_ingest_batch(finished_batch) is None
+    assert runner.repo.ingest_jobs_for_batch(finished_batch) == []
+    assert runner.repo.get_ingest_batch(active_batch)["status"] == "queued"
+    with pytest.raises(ValueError, match="active ingest batches"):
+        runner.repo.delete_finished_ingest_batches([active_batch])
+
+
+def test_long_running_handler_emits_periodic_heartbeats(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    calls: list[str] = []
+    original = repo.heartbeat_ingest_job
+
+    def record_heartbeat(job_id, **kwargs):
+        calls.append(job_id)
+        return original(job_id, **kwargs)
+
+    monkeypatch.setattr(repo, "heartbeat_ingest_job", record_heartbeat)
+
+    def slow_handler(ctx: JobContext) -> dict:
+        time.sleep(0.06)
+        return {"ok": True}
+
+    runner = IngestRunner(
+        repo,
+        vault_root=tmp_path,
+        worker_id="heartbeat-worker",
+        clock=_clock(),
+        handlers={"slow": slow_handler},
+        heartbeat_interval_seconds=0.01,
+    )
+    batch_id = runner.enqueue_batch("import", [JobSpec("slow")])
+    runner.drain()
+
+    job = repo.ingest_jobs_for_batch(batch_id)[0]
+    assert job["status"] == "completed"
+    assert calls.count(job["id"]) >= 2
+
+
 def test_lease_expiry_marks_interrupted(tmp_path):
     runner = _runner(tmp_path, handlers={"fake": _ok_handler({})}, clock=_clock())
     batch_id = runner.enqueue_batch("import", [JobSpec("fake")])
@@ -106,6 +158,36 @@ def test_dependency_failure_blocks_downstream(tmp_path):
     assert jobs[2]["status"] == "blocked"  # transitively blocked
     assert calls == {}  # neither downstream job ran
     assert runner.repo.get_ingest_batch(batch_id)["status"] == "failed"
+
+
+def test_actionable_failure_details_are_persisted_for_activity_ui(tmp_path):
+    def rejected(_ctx: JobContext) -> dict:
+        raise IngestRunnerError(
+            "Candidate failed validation.",
+            code="synthesis_gate_failed",
+            details={
+                "stage": "synthesis",
+                "completed_dependencies_preserved": True,
+                "diagnostics": [
+                    {
+                        "gate": "criterion_target",
+                        "severity": "hard_fail",
+                        "message": "unknown capability",
+                    }
+                ],
+            },
+            retryable=True,
+        )
+
+    runner = _runner(tmp_path, handlers={"fake": rejected})
+    batch_id = runner.enqueue_batch("import", [JobSpec("fake")])
+    runner.drain()
+
+    error = runner.repo.ingest_jobs_for_batch(batch_id)[0]["error"]
+    assert error["code"] == "synthesis_gate_failed"
+    assert error["retryable"] is True
+    assert error["details"]["completed_dependencies_preserved"] is True
+    assert error["details"]["diagnostics"][0]["gate"] == "criterion_target"
 
 
 def test_waiting_for_input_holds_no_lease(tmp_path):
@@ -631,3 +713,176 @@ def test_youtube_import_without_metadata_falls_back_to_url(tmp_path):
     # Transcript unit keeps the neutral default label when no title is known.
     ir = runner.repo.load_document_ir(job["result"]["extraction_id"])
     assert ir.units[0].label == "Transcript"
+
+
+# --------------------------------------------------------------------------
+# Robustness: PDF fallback, page validation, batch timestamp hygiene,
+# stale synthesis-run finalization
+# --------------------------------------------------------------------------
+
+
+def _fetched_pdf(raw: bytes = b"%PDF-1.4 fake"):
+    from learnloop.services.ingest_runner import FetchedBytes
+
+    return FetchedBytes(
+        raw_bytes=raw, content_type="application/pdf",
+        original_uri="file:///book.pdf", retrieved_at="2026-07-13T12:00:00Z",
+    )
+
+
+def _bare_ctx(tmp_path: Path, payload: dict | None = None) -> JobContext:
+    return JobContext(
+        repo=_repo(tmp_path), vault_root=tmp_path,
+        job={"id": "j1", "batch_id": "b1", "payload": payload or {}},
+        clock=_clock(), worker_id="w1",
+    )
+
+
+def test_marker_runtime_failure_falls_back_to_pypdf(tmp_path, monkeypatch):
+    """Marker dying mid-conversion degrades to native-text extraction with a
+    health flag instead of failing the whole import (§2.9)."""
+
+    import learnloop.ingest.extractors as extractors
+    from learnloop.services.ingest_runner import default_extract
+
+    class FailingMarker:
+        name = "marker"
+
+        def extract(self, raw_bytes, context):
+            raise RuntimeError("CUDA device lost")
+
+    class FakePyPdf:
+        name = "pypdf"
+
+        def extract(self, raw_bytes, context):
+            block = DocumentBlock.build(span_id="s1", block_type="Text", text="Native text.", ordinal=1)
+            unit = DocumentUnit(unit_id="u1", label="Doc", ordinal=1, semantic_hash="sha256:x", span_ids=["s1"])
+            return DocumentIR(extractor="pypdf", extractor_version="1", blocks=[block], units=[unit])
+
+    monkeypatch.setattr(extractors, "pdf_extractor_for", lambda config=None: FailingMarker())
+    monkeypatch.setattr(extractors, "PyPdfDocumentExtractor", FakePyPdf)
+
+    ir = default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path))
+    assert ir.extractor == "pypdf"
+    assert "marker_failed_pypdf_fallback" in ir.health.flags
+
+
+def test_forced_marker_engine_does_not_fall_back(tmp_path, monkeypatch):
+    import learnloop.ingest.extractors as extractors
+    from learnloop.services.ingest_runner import default_extract
+
+    class FailingMarker:
+        name = "marker"
+
+        def extract(self, raw_bytes, context):
+            raise RuntimeError("CUDA device lost")
+
+    monkeypatch.setattr(extractors, "pdf_extractor_for", lambda config=None: FailingMarker())
+    with pytest.raises(RuntimeError, match="CUDA device lost"):
+        default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "marker"}}))
+
+
+def test_marker_and_pypdf_both_failing_is_a_typed_error(tmp_path, monkeypatch):
+    import learnloop.ingest.extractors as extractors
+    from learnloop.services.ingest_runner import default_extract
+
+    class FailingMarker:
+        name = "marker"
+
+        def extract(self, raw_bytes, context):
+            raise RuntimeError("CUDA device lost")
+
+    class FailingPyPdf:
+        name = "pypdf"
+
+        def extract(self, raw_bytes, context):
+            raise ValueError("no extractable text")
+
+    monkeypatch.setattr(extractors, "pdf_extractor_for", lambda config=None: FailingMarker())
+    monkeypatch.setattr(extractors, "PyPdfDocumentExtractor", FailingPyPdf)
+    with pytest.raises(IngestRunnerError) as excinfo:
+        default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path))
+    assert excinfo.value.code == "pdf_extraction_failed"
+    assert "CUDA device lost" in str(excinfo.value)
+    assert "no extractable text" in str(excinfo.value)
+
+
+def _two_page_pdf_bytes() -> bytes:
+    import io
+
+    import pypdf
+
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.add_blank_page(width=72, height=72)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def test_out_of_range_page_selection_is_refused_with_page_count(tmp_path):
+    from learnloop.services.ingest_runner import _validate_page_selection
+
+    raw = _two_page_pdf_bytes()
+    _validate_page_selection(raw, [0, 1])  # in range: no error
+    with pytest.raises(IngestRunnerError) as excinfo:
+        _validate_page_selection(raw, [0, 41])
+    assert excinfo.value.code == "invalid_page_range"
+    assert excinfo.value.details["page_count"] == 2
+    assert excinfo.value.details["requested_max"] == 42
+    assert "2 page(s)" in str(excinfo.value)
+
+
+def test_page_validation_is_best_effort_on_unreadable_pdfs(tmp_path):
+    from learnloop.services.ingest_runner import _validate_page_selection
+
+    _validate_page_selection(b"%PDF-not really", [999])  # silently proceeds
+
+
+def test_resume_clears_stale_batch_finished_at(tmp_path):
+    def fail(ctx: JobContext) -> dict:
+        raise IngestRunnerError("boom", code="synthetic")
+
+    runner = _runner(tmp_path, handlers={"import": fail})
+    batch_id = runner.enqueue_batch("import", [JobSpec("import", {"source": "x.pdf"})])
+    runner.drain()
+    failed = runner.repo.get_ingest_batch(batch_id)
+    assert failed["status"] == "failed"
+    assert failed["finished_at"] is not None
+
+    runner.resume_batch(batch_id)
+    resumed = runner.repo.get_ingest_batch(batch_id)
+    assert resumed["status"] == "queued"
+    assert resumed["finished_at"] is None
+
+
+def test_startup_finalizes_abandoned_synthesis_runs(tmp_path):
+    """Recovery marks stale created/running synthesis rows failed — but never
+    while a synthesis job holds a live lease."""
+
+    from learnloop.services.synthesis_manifests import build_manifest, persist_manifest
+
+    from tests.helpers import create_basic_vault
+    from learnloop.vault.loader import load_vault
+
+    paths = create_basic_vault(tmp_path / "vault")
+    repo = Repository(paths.sqlite_path)
+    vault = load_vault(paths.root)
+    manifest_id = persist_manifest(repo, build_manifest(vault, source_set_id="ss1"))
+    stale = repo.insert_synthesis_run(manifest_id=manifest_id, mode="bootstrap", clock=_clock(-100_000))
+
+    runner = IngestRunner(repo, vault_root=paths.root, worker_id="w1", clock=_clock())
+    runner.recover_stale_leases()
+    assert repo.synthesis_run(stale)["status"] == "failed"
+
+    # With a live-leased synthesis job, finalization is skipped entirely.
+    fresh_stale = repo.insert_synthesis_run(manifest_id=manifest_id, mode="bootstrap", clock=_clock(-100_000))
+    batch_id = runner.enqueue_batch(
+        "bootstrap_synthesis", [JobSpec("bootstrap_synthesis", {"source_set_id": "ss1"})]
+    )
+    job = repo.claim_next_ingest_job(
+        worker_id="w2", now_iso="2026-07-13T12:00:00Z", lease_cutoff_iso="2026-07-13T11:58:00Z"
+    )
+    assert job is not None and job["batch_id"] == batch_id
+    runner.recover_stale_leases()
+    assert repo.synthesis_run(fresh_stale)["status"] == "created"

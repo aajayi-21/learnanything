@@ -79,6 +79,38 @@ def test_marker_image_keys_coerced_to_string_asset_ids():
     assert ir.blocks[0].asset_ids == ["/page/0/Figure/9"]
 
 
+def _text_of(html, *, block_type="Text"):
+    ir = chunk_output_to_ir(
+        blocks=[{"id": "b1", "block_type": block_type, "html": html, "page": 0, "bbox": None, "polygon": None, "section_hierarchy": None, "images": None}],
+        metadata={},
+        extractor_version="test",
+    )
+    return ir.blocks[0].text
+
+
+def test_marker_inline_math_becomes_dollar_delimited():
+    # Regression: tag stripping used to leave bare LaTeX (`A \cup B`) that no
+    # renderer can recognize as math (probability_v2 audit, 2026-07-21).
+    text = _text_of("<p>the union <math display='inline'>A \\cup B</math> is the event</p>")
+    assert text == "the union $A \\cup B$ is the event"
+
+
+def test_marker_block_math_becomes_display_delimited():
+    text = _text_of('<math display="block">Av = \\lambda v</math>', block_type="Equation")
+    assert text == "$$Av = \\lambda v$$"
+
+
+def test_marker_math_entities_unescaped_inside_delimiters():
+    text = _text_of("<p><math display='inline'>a &lt; b &amp; c</math></p>")
+    assert text == "$a < b & c$"
+
+
+def test_marker_bare_and_empty_math_tags():
+    # No display attribute → inline; empty math bodies must not emit "$$".
+    assert _text_of("<p>x <math>y</math> z</p>") == "x $y$ z"
+    assert _text_of("<p>x <math display='inline'> </math> z</p>") == "x z"
+
+
 def test_marker_block_page_derived_from_block_id():
     # Real-source regression: marker emitted internal page ids (108, 358, ...)
     # in FlatBlockOutput.page on a pypdf-sliced PDF while block ids kept the
