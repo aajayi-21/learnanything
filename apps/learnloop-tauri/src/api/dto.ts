@@ -105,6 +105,43 @@ export interface TranscriptionKeyResult {
   settingsEnvPath: string;
 }
 
+export interface AnimationRuntimeDto {
+  enabled: boolean;
+  manimAvailable: boolean;
+  manimVersion: string | null;
+  manimReason: string | null;
+  provider: string;
+  model: string | null;
+  timeoutSeconds: number;
+}
+
+export interface ConceptAnimationDto {
+  animationId: string;
+  conceptId: string;
+  learningObjectId: string | null;
+  status: string;
+  title: string | null;
+  narrationMd: string | null;
+  videoFileName: string | null;
+  durationSeconds: number | null;
+  provider: string | null;
+  model: string | null;
+  failureStage: string | null;
+  failureReason: string | null;
+  createdAt?: string;
+  completedAt?: string | null;
+  // Failure-only debug payload.
+  sceneCode?: string | null;
+  renderStderr?: string | null;
+}
+
+export interface RequestConceptAnimationResult {
+  animationId: string;
+  conceptId: string;
+  status: string;
+  batchId: string;
+}
+
 export interface UseCaseChoiceInput {
   provider: string;
   openrouterModel?: string | null;
