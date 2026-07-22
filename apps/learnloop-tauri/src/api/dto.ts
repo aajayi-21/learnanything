@@ -72,11 +72,37 @@ export interface OpenrouterKeyStateDto {
   settingsEnvPath: string;
 }
 
+export interface KeyStateDto {
+  keyPresent: boolean;
+  keyHint: string | null;
+}
+
+export interface SettingsIngestDto {
+  nativeMultimodal: boolean;
+  transcriptionModel: string;
+  transcriptionBaseUrl: string;
+  transcriptionKey: KeyStateDto;
+}
+
 export interface SettingsDto {
   version: number;
   ai: SettingsAiDto;
   openrouter: OpenrouterKeyStateDto;
+  ingest: SettingsIngestDto;
   health?: RuntimeHealth;
+}
+
+export interface UpdateIngestSettingsInput {
+  nativeMultimodal?: boolean;
+  transcriptionModel?: string;
+  transcriptionBaseUrl?: string;
+}
+
+export interface TranscriptionKeyResult {
+  keyPresent: boolean;
+  keyHint: string | null;
+  envName: string;
+  settingsEnvPath: string;
 }
 
 export interface UseCaseChoiceInput {

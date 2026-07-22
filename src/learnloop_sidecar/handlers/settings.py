@@ -82,6 +82,12 @@ def _settings_payload(ctx: SidecarContext) -> dict[str, Any]:
             **_key_state(OPENROUTER_KEY_ENV),
             "settings_env_path": str(global_settings_path()),
         },
+        "ingest": {
+            "native_multimodal": config.ingest.native.enabled,
+            "transcription_model": config.ingest.audio.transcription_model,
+            "transcription_base_url": config.ingest.audio.transcription_base_url,
+            "transcription_key": _key_state(config.ingest.audio.transcription_api_key_env),
+        },
     }
 
 
@@ -176,6 +182,69 @@ def update_ai_settings(ctx: SidecarContext, params: UpdateAiSettingsParams) -> d
         vault, repository, grading_override=ctx.grading_provider_override
     )
     return versioned(payload)
+
+
+class UpdateIngestSettingsParams(ParamsModel):
+    native_multimodal: bool | None = None
+    transcription_model: str | None = None
+    transcription_base_url: str | None = None
+
+
+@method("update_ingest_settings", UpdateIngestSettingsParams)
+def update_ingest_settings(ctx: SidecarContext, params: UpdateIngestSettingsParams) -> dict[str, Any]:
+    vault, _repository = ctx.require_vault()
+    updates: dict[tuple[str, ...], Any] = {}
+    if params.native_multimodal is not None:
+        updates[("ingest", "native", "enabled")] = params.native_multimodal
+    if params.transcription_model is not None:
+        model = params.transcription_model.strip()
+        if not model:
+            raise SidecarError("invalid_model", "Transcription model must not be empty.")
+        updates[("ingest", "audio", "transcription_model")] = model
+    if params.transcription_base_url is not None:
+        base_url = params.transcription_base_url.strip()
+        if not base_url.lower().startswith(("http://", "https://")):
+            raise SidecarError("invalid_base_url", "Transcription base URL must be http(s).")
+        updates[("ingest", "audio", "transcription_base_url")] = base_url
+    if updates:
+        try:
+            apply_config_updates(vault.root / "learnloop.toml", updates)
+        except SettingsStoreError as exc:
+            raise SidecarError(exc.code, str(exc))
+        ctx.reload(maintenance=False)
+    return versioned(_settings_payload(ctx))
+
+
+class SetTranscriptionApiKeyParams(ParamsModel):
+    api_key: str
+
+
+@method("set_transcription_api_key", SetTranscriptionApiKeyParams)
+def set_transcription_api_key(ctx: SidecarContext, params: SetTranscriptionApiKeyParams) -> dict[str, Any]:
+    """Save the [ingest.audio] endpoint's API key — same machinery and rules as
+    the OpenRouter key (global settings.env + direct os.environ write)."""
+
+    vault, _repository = ctx.require_vault()
+    env_name = vault.config.ingest.audio.transcription_api_key_env
+    value = params.api_key.strip()
+    if len(value) > 512 or any(ord(ch) < 32 for ch in value):
+        raise SidecarError("invalid_api_key", "API key contains control characters or is too long.")
+    path = global_settings_path()
+    try:
+        upsert_env_var(path, env_name, value or None)
+    except SettingsStoreError as exc:
+        raise SidecarError(exc.code, str(exc))
+    if value:
+        os.environ[env_name] = value
+    else:
+        os.environ.pop(env_name, None)
+    return versioned(
+        {
+            **_key_state(env_name),
+            "env_name": env_name,
+            "settings_env_path": str(path),
+        }
+    )
 
 
 class SetOpenrouterApiKeyParams(ParamsModel):

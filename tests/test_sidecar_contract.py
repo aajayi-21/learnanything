@@ -2592,3 +2592,57 @@ def test_set_openrouter_api_key_empty_removes_and_rejects_control_chars(tmp_path
 
     rejected = _settings_rpc(vault_root, ("set_openrouter_api_key", {"apiKey": "bad\x00key"}))[0]
     assert rejected["error"]["data"]["code"] == "invalid_api_key"
+
+
+def test_update_ingest_settings_toggles_native_and_transcription(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEARNLOOP_CONFIG_DIR", str(tmp_path / "global"))
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+
+    result = _settings_rpc(
+        vault_root,
+        (
+            "update_ingest_settings",
+            {
+                "nativeMultimodal": True,
+                "transcriptionModel": "gpt-4o-transcribe",
+                "transcriptionBaseUrl": "https://api.groq.com/openai/v1",
+            },
+        ),
+    )[0]["result"]
+
+    assert result["ingest"]["nativeMultimodal"] is True
+    assert result["ingest"]["transcriptionModel"] == "gpt-4o-transcribe"
+    from learnloop.config import load_config
+
+    config = load_config(vault_root / "learnloop.toml")
+    assert config.ingest.native.enabled is True
+    assert config.ingest.audio.transcription_model == "gpt-4o-transcribe"
+    assert config.ingest.audio.transcription_base_url == "https://api.groq.com/openai/v1"
+
+    bad = _settings_rpc(vault_root, ("update_ingest_settings", {"transcriptionBaseUrl": "ftp://x"}))[0]
+    assert bad["error"]["data"]["code"] == "invalid_base_url"
+
+
+def test_set_transcription_api_key_writes_env_and_get_settings_reflects_it(tmp_path, monkeypatch):
+    global_dir = tmp_path / "global"
+    monkeypatch.setenv("LEARNLOOP_CONFIG_DIR", str(global_dir))
+    monkeypatch.setenv("LEARNLOOP_TRANSCRIPTION_API_KEY", "stale-value")
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+
+    result = _settings_rpc(vault_root, ("set_transcription_api_key", {"apiKey": "tr-key-9876"}))[0]["result"]
+
+    assert result["keyPresent"] is True
+    assert result["keyHint"] == "9876"
+    assert result["envName"] == "LEARNLOOP_TRANSCRIPTION_API_KEY"
+    assert (
+        (global_dir / "settings.env").read_text(encoding="utf-8")
+        == "LEARNLOOP_TRANSCRIPTION_API_KEY=tr-key-9876\n"
+    )
+    import os as _os
+
+    assert _os.environ["LEARNLOOP_TRANSCRIPTION_API_KEY"] == "tr-key-9876"
+
+    settings = _settings_rpc(vault_root, ("get_settings", {}))[0]["result"]
+    assert settings["ingest"]["transcriptionKey"]["keyPresent"] is True
