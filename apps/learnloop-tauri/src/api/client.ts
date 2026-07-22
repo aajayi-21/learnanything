@@ -32,7 +32,9 @@ import type {
   GradingProviderResult,
   OpenrouterKeyResult,
   SettingsDto,
+  TranscriptionKeyResult,
   UpdateAiSettingsInput,
+  UpdateIngestSettingsInput,
   InspectorEntity,
   KnowledgeMapHistory,
   KnowledgeMapSnapshot,
@@ -466,6 +468,10 @@ export const api = {
     call<SettingsDto>("update_ai_settings", { input }),
   setOpenrouterApiKey: (apiKey: string) =>
     call<OpenrouterKeyResult>("set_openrouter_api_key", { apiKey }),
+  updateIngestSettings: (input: UpdateIngestSettingsInput) =>
+    call<SettingsDto>("update_ingest_settings", { input }),
+  setTranscriptionApiKey: (apiKey: string) =>
+    call<TranscriptionKeyResult>("set_transcription_api_key", { apiKey }),
   askTutorQuestion: (input: AskTutorQuestionInput) =>
     call<TutorAnswerDto>("ask_tutor_question", { input }),
   previewTutorOpening: (input: { practiceItemId: string; sessionId?: string }) =>

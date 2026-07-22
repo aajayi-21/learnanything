@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { RuntimeHealth, SettingsDto, UseCaseChoiceInput } from "../api/dto";
-import { COLOR, FONT_MONO, TermSelect } from "../components/term";
+import { COLOR, FONT_MONO, TermCheckbox, TermSelect } from "../components/term";
 import { SectionHeader } from "../components/ui";
 
 // UI metadata for the backend's use-case -> [ai.routing] expansion
@@ -51,6 +51,9 @@ export function SettingsScreen({
   const [drafts, setDrafts] = useState<Record<string, UseCaseDraft>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [keyDraft, setKeyDraft] = useState("");
+  const [transcriptionKeyDraft, setTranscriptionKeyDraft] = useState("");
+  const [transcriptionModelDraft, setTranscriptionModelDraft] = useState<string | null>(null);
+  const [transcriptionUrlDraft, setTranscriptionUrlDraft] = useState<string | null>(null);
   const [palette, setPalette] = useState(() => localStorage.getItem(PALETTE_STORAGE_KEY) ?? "");
 
   const acceptSettings = useCallback((next: SettingsDto) => {
@@ -308,6 +311,123 @@ export function SettingsScreen({
             clear
           </button>
         ) : null}
+      </div>
+
+      <SectionHeader>Ingestion</SectionHeader>
+      <div style={rowStyle}>
+        <span style={labelStyle}>
+          native multimodal
+          <div style={hintStyle}>
+            send audio/PDF media to the routed chat model when it declares the modality
+          </div>
+        </span>
+        <TermCheckbox
+          checked={settings.ingest.nativeMultimodal}
+          label={settings.ingest.nativeMultimodal ? "enabled" : "disabled"}
+          disabled={busy !== null}
+          onChange={(next) => {
+            setBusy("ingest");
+            api
+              .updateIngestSettings({ nativeMultimodal: next })
+              .then((result) => {
+                acceptSettings(result);
+                onToast(`native multimodal → ${next ? "on" : "off"}`);
+              })
+              .catch((error) => onError((error as Error).message))
+              .finally(() => setBusy(null));
+          }}
+        />
+      </div>
+      <div style={rowStyle}>
+        <span style={labelStyle}>
+          transcription
+          <div style={hintStyle}>OpenAI-compatible /audio/transcriptions endpoint</div>
+        </span>
+        <input
+          style={{ ...inputStyle, width: 170 }}
+          placeholder="model, e.g. whisper-1"
+          value={transcriptionModelDraft ?? settings.ingest.transcriptionModel}
+          onChange={(event) => setTranscriptionModelDraft(event.target.value)}
+        />
+        <input
+          style={{ ...inputStyle, flex: 1, minWidth: 160 }}
+          placeholder="base URL"
+          value={transcriptionUrlDraft ?? settings.ingest.transcriptionBaseUrl}
+          onChange={(event) => setTranscriptionUrlDraft(event.target.value)}
+        />
+        <button
+          type="button"
+          style={buttonStyle(
+            busy === null &&
+              ((transcriptionModelDraft !== null && transcriptionModelDraft !== settings.ingest.transcriptionModel) ||
+                (transcriptionUrlDraft !== null && transcriptionUrlDraft !== settings.ingest.transcriptionBaseUrl))
+          )}
+          disabled={busy !== null}
+          onClick={() => {
+            setBusy("transcription");
+            api
+              .updateIngestSettings({
+                ...(transcriptionModelDraft !== null ? { transcriptionModel: transcriptionModelDraft } : {}),
+                ...(transcriptionUrlDraft !== null ? { transcriptionBaseUrl: transcriptionUrlDraft } : {})
+              })
+              .then((result) => {
+                acceptSettings(result);
+                setTranscriptionModelDraft(null);
+                setTranscriptionUrlDraft(null);
+                onToast("transcription settings saved");
+              })
+              .catch((error) => onError((error as Error).message))
+              .finally(() => setBusy(null));
+          }}
+        >
+          {busy === "transcription" ? "…" : "apply"}
+        </button>
+      </div>
+      <div style={{ ...rowStyle, borderBottom: "none" }}>
+        <span style={labelStyle}>
+          transcription key
+          <div style={hintStyle}>
+            {settings.ingest.transcriptionKey.keyPresent
+              ? `saved${settings.ingest.transcriptionKey.keyHint ? ` · ends in ····${settings.ingest.transcriptionKey.keyHint}` : ""}`
+              : "not set"}
+          </div>
+        </span>
+        <input
+          type="password"
+          style={{ ...inputStyle, flex: 1 }}
+          placeholder="endpoint API key"
+          value={transcriptionKeyDraft}
+          onChange={(event) => setTranscriptionKeyDraft(event.target.value)}
+        />
+        <button
+          type="button"
+          style={buttonStyle(transcriptionKeyDraft.trim().length > 0 && busy === null)}
+          disabled={transcriptionKeyDraft.trim().length === 0 || busy !== null}
+          onClick={() => {
+            setBusy("transcription-key");
+            api
+              .setTranscriptionApiKey(transcriptionKeyDraft.trim())
+              .then((result) => {
+                setSettings((current) =>
+                  current
+                    ? {
+                        ...current,
+                        ingest: {
+                          ...current.ingest,
+                          transcriptionKey: { keyPresent: result.keyPresent, keyHint: result.keyHint }
+                        }
+                      }
+                    : current
+                );
+                setTranscriptionKeyDraft("");
+                onToast("transcription key saved");
+              })
+              .catch((error) => onError((error as Error).message))
+              .finally(() => setBusy(null));
+          }}
+        >
+          {busy === "transcription-key" ? "…" : "save"}
+        </button>
       </div>
 
       <SectionHeader>Appearance</SectionHeader>

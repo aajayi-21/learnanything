@@ -188,6 +188,8 @@ fn main() {
             get_settings,
             update_ai_settings,
             set_openrouter_api_key,
+            update_ingest_settings,
+            set_transcription_api_key,
             ask_tutor_question,
             preview_tutor_opening,
             rate_tutor_answer,
