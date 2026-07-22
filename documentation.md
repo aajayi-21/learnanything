@@ -251,6 +251,27 @@ response_format = "json_object"          # or "json_schema" on supporting models
 
 API keys are never written to `learnloop.toml`; the profile names an environment variable, and the key is read from the shell environment, the vault-local `.env`, or `~/.config/learnloop/settings.env` (in that precedence order). Switch every AI task to a provider with `LEARNLOOP_AI_PROVIDER=openrouter`, set `active_provider = "openrouter"` in `[ai]`, or mix providers per task via `[ai.routing]` — `canonical_ingest` also covers unit inventory, study-map synthesis, and append reconciliation, so a vault can, for example, keep Codex for synthesis while OpenRouter grades practice. Most CLI commands accept `--ai-provider <name>` for a one-off override.
 
+### The Settings tab
+
+The `ai:<provider>` chip at the far right of the tab bar (or Alt+S) opens the Settings screen, which persists everything above without hand-editing TOML:
+
+- **AI models** — the active provider plus per-use-case rows (grading, ingest/synthesis, tutor, animation). Picking OpenRouter for a use case takes any model slug and materializes a dedicated `[ai.providers.openrouter_<usecase>]` profile, so different tasks can run different OpenRouter models. Grading also offers manual (self-grade) mode.
+- **OpenRouter API key** — saved (masked) to the machine-global `settings.env`, never the committed vault config, and applied to the running process immediately.
+- **Ingestion** — the native-multimodal toggle, the transcription endpoint model/base URL, and its API key.
+- **Appearance** — color palettes: the default terminal look, dracula, gruvbox, nord, and catppuccin-mocha. The choice is per-machine (localStorage) and applies instantly.
+
+### Audio sources
+
+Local audio files (`.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, `.aac`) ingest like any other source (Ingest tab, Quick add, or drag-drop). By default the file is transcribed by the OpenAI-compatible `/audio/transcriptions` endpoint configured under `[ingest.audio]` (OpenAI whisper, Groq, or a local faster-whisper server; the key comes from the env var it names). The transcript keeps per-segment timestamps, so outline units, reader locators, and provenance work exactly as they do for YouTube captions. Audio always leaves the machine, so the import consent card lists it before anything uploads.
+
+### Native multimodal ingestion
+
+With `[ingest.native] enabled = true` and the routed provider's profile declaring `input_modalities` (e.g. `["audio", "pdf"]` on an OpenRouter profile), media is ingested by the chat model itself instead of the local pipeline: audio is sent as `input_audio` content parts and returns a timestamped transcript; PDFs (set `engine = "native"` under `[ingest.pdf]`) are sent as file parts and return Markdown. Off by default; when the native route can't run, audio falls back to the transcription endpoint and native PDFs fail with a typed error rather than silently switching providers.
+
+### Explainer animations
+
+Each concept's inspector has an "Explainer animation" section. Generating one sends the concept description to the `[ai.routing] animation` model, which writes a Manim Community Edition scene; the code is validated against an import/builtin allowlist and rendered locally by manim (`pip install "learnloop[animation]"`), then plays inline. Every generation requires an explicit consent click because AI-written code executes on your machine — the validation and the sandboxed subprocess (temp directory, timeout, minimal environment) are hardening, not a guarantee. Failed generations keep the scene code and renderer output for debugging, and one automatic repair round-trip is attempted. Configuration lives under `[animation]` (quality, timeout, LaTeX availability, kill-switch).
+
 The command palette opens with Ctrl/Cmd+P or `:`. Useful commands include `today`, `ask`, `review`, `why <practice-item-id>`, `show <id>`, `attempt <practice-item-id>`, `calibrate [goal-id]`, and `doctor`. Alt+1 through Alt+8 switches the first eight navigation tabs.
 
 ## 4. The mental model
