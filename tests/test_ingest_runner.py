@@ -1140,3 +1140,125 @@ def test_audio_import_end_to_end_and_cache_reuse(tmp_path, monkeypatch):
     second = runner.enqueue_batch("import", [JobSpec("import", {"source": source})])
     runner.drain()
     assert runner.repo.ingest_jobs_for_batch(second)[0]["result"]["reused_extraction"] is True
+
+
+# --------------------------------------------------------------------------
+# Native-multimodal audio route ([ingest.native])
+# --------------------------------------------------------------------------
+
+
+def _native_audio_vault(tmp_path, monkeypatch, *, input_modalities=("audio",)):
+    from learnloop.services.settings_store import apply_config_updates
+    from tests.helpers import create_basic_vault
+
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    apply_config_updates(
+        vault_root / "learnloop.toml",
+        {
+            ("ingest", "native", "enabled"): True,
+            ("ai", "routing", "canonical_ingest"): "openrouter",
+            ("ai", "providers", "openrouter", "input_modalities"): list(input_modalities),
+        },
+    )
+    monkeypatch.delenv("LEARNLOOP_AI_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-secret")
+    return vault_root
+
+
+def _media_transcript_json():
+    import json as _json
+
+    return _json.dumps(
+        {
+            "segments": [
+                {"start_seconds": 0.0, "end_seconds": 5.0, "speaker": None, "text": "native transcript"}
+            ],
+            "language": "en",
+        }
+    )
+
+
+def test_native_audio_route_transcribes_via_chat_provider(tmp_path, monkeypatch):
+    from learnloop.services.ingest_runner import (
+        FetchedBytes,
+        default_extract,
+        default_extraction_identity,
+    )
+    from tests.openai_fakes import install_fake_openai
+
+    vault_root = _native_audio_vault(tmp_path, monkeypatch)
+    fake = install_fake_openai(monkeypatch, _media_transcript_json())
+    fetched = FetchedBytes(
+        raw_bytes=b"\x00chat-audio",
+        content_type="audio/mpeg",
+        original_uri=str(tmp_path / "lecture.mp3"),
+        retrieved_at="2026-07-22T00:00:00Z",
+    )
+
+    identity = default_extraction_identity(fetched, "audio", _extract_ctx(vault_root))
+    ir = default_extract(fetched, "audio", _extract_ctx(vault_root))
+
+    # Lock-step: identity and extraction agree on the native route.
+    assert identity["extractor"] == "audio_native"
+    assert identity["model_versions"] == {"chat_model": "deepseek/deepseek-chat"}
+    assert identity["config"] == {"provider": "openrouter"}
+    assert ir.extractor == "audio_native"
+    assert "native transcript" in ir.blocks[0].text
+    parts = fake.instances[0].requests[0]["messages"][1]["content"]
+    assert parts[1]["type"] == "input_audio"
+    assert parts[1]["input_audio"]["format"] == "mp3"
+
+
+def test_native_audio_disabled_or_modality_absent_uses_endpoint(tmp_path, monkeypatch):
+    from learnloop.services.ingest_runner import FetchedBytes, default_extraction_identity
+
+    # Modality not declared on the routed profile -> endpoint route.
+    vault_root = _native_audio_vault(tmp_path, monkeypatch, input_modalities=())
+    fetched = FetchedBytes(
+        raw_bytes=b"\x00x",
+        content_type="audio/mpeg",
+        original_uri="talk.mp3",
+        retrieved_at="2026-07-22T00:00:00Z",
+    )
+
+    identity = default_extraction_identity(fetched, "audio", _extract_ctx(vault_root))
+    assert identity["extractor"] == "audio_transcript"
+
+
+def test_native_audio_unsupported_container_falls_back_to_endpoint(tmp_path, monkeypatch):
+    from learnloop.services.ingest_runner import FetchedBytes, default_extraction_identity
+
+    vault_root = _native_audio_vault(tmp_path, monkeypatch)
+    fetched = FetchedBytes(
+        raw_bytes=b"\x00x",
+        content_type="audio/flac",
+        original_uri="talk.flac",  # not a chat input_audio format
+        retrieved_at="2026-07-22T00:00:00Z",
+    )
+
+    identity = default_extraction_identity(fetched, "audio", _extract_ctx(vault_root))
+    assert identity["extractor"] == "audio_transcript"
+
+
+def test_native_audio_failure_is_typed_and_never_switches_routes(tmp_path, monkeypatch):
+    from learnloop.services.ingest_runner import FetchedBytes, IngestRunnerError, default_extract
+    from tests.openai_fakes import install_fake_openai
+
+    vault_root = _native_audio_vault(tmp_path, monkeypatch)
+    fake = install_fake_openai(monkeypatch, RuntimeError("model refused the audio"))
+    fetched = FetchedBytes(
+        raw_bytes=b"\x00x",
+        content_type="audio/mpeg",
+        original_uri="talk.mp3",
+        retrieved_at="2026-07-22T00:00:00Z",
+    )
+
+    with pytest.raises(IngestRunnerError) as excinfo:
+        default_extract(fetched, "audio", _extract_ctx(vault_root))
+
+    assert excinfo.value.code == "native_audio_failed"
+    assert excinfo.value.retryable is True
+    # Exactly one chat call — no silent fallback to the transcription endpoint.
+    assert len(fake.instances[0].requests) == 1
+    assert not fake.instances[0].transcription_requests
