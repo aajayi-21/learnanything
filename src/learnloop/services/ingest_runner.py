@@ -424,9 +424,21 @@ def default_extraction_identity(
     from learnloop.ingest.extractors import MarkerUnavailableError, pdf_extractor_for
 
     if category == "audio":
-        # Identity carries the transcription model + endpoint so re-pointing
-        # either forces a fresh transcription (cache key changes). Keys named
-        # api_key* are stripped by hashing._sanitized_config.
+        # Lock-step with _extract_audio: the same pure route decision picks
+        # native vs endpoint transcription, and the identity carries the model
+        # + provider/endpoint so re-pointing either forces a fresh
+        # transcription. Keys named api_key* are stripped by
+        # hashing._sanitized_config.
+        from learnloop.ai.multimodal import chat_audio_format
+
+        route = _native_media_route(ctx, "audio")
+        if route is not None and chat_audio_format(_audio_filename(fetched)) is not None:
+            return {
+                "extractor": "audio_native",
+                "extractor_version": "1",
+                "model_versions": {"chat_model": route.model or ""},
+                "config": {"provider": route.provider_name},
+            }
         audio_config = _audio_ingest_config(ctx)
         return {
             "extractor": "audio_transcript",
@@ -487,6 +499,64 @@ def _audio_ingest_config(ctx: JobContext):
         return AudioIngestConfig()
 
 
+@dataclass(frozen=True)
+class NativeMediaRoute:
+    """A resolved native-multimodal route: which chat provider ingests media."""
+
+    provider_name: str
+    model: str | None
+    max_audio_mb: int
+
+
+def _native_media_route(ctx: JobContext, modality: str) -> NativeMediaRoute | None:
+    """PURE config decision: is native multimodal active for this modality?
+
+    Shared by default_extract and default_extraction_identity so the cache
+    identity and the actual extraction can never disagree. Requires
+    [ingest.native] enabled + the per-modality flag, a canonical_ingest route
+    resolving to an OpenAI-compatible chat provider, and the modality declared
+    in that profile's input_modalities."""
+
+    from learnloop.ai.multimodal import supports_input_modality
+    from learnloop.ai.routing import provider_for_task
+    from learnloop.vault.loader import load_vault
+
+    try:
+        config = load_vault(ctx.vault_root).config
+    except FileNotFoundError:
+        return None
+    native = config.ingest.native
+    if not native.enabled or not bool(getattr(native, modality, False)):
+        return None
+    selection = provider_for_task(config, "canonical_ingest")
+    profile = config.ai.providers.get(selection.provider_name)
+    if profile is None or profile.type.lower() not in {"openai_chat", "openrouter"}:
+        return None
+    if not supports_input_modality(profile, modality):
+        return None
+    return NativeMediaRoute(
+        provider_name=selection.provider_name,
+        model=profile.model,
+        max_audio_mb=native.max_audio_mb,
+    )
+
+
+def _native_media_client(ctx: JobContext, route: NativeMediaRoute) -> Any:
+    from learnloop.ai.client import make_ai_provider_client
+    from learnloop.ai.runtime import check_ai_runtime
+    from learnloop.vault.loader import load_vault
+
+    config = load_vault(ctx.vault_root).config
+    runtime = check_ai_runtime(ctx.vault_root, config, provider_name=route.provider_name)
+    if not runtime.ready:
+        raise IngestRunnerError(
+            runtime.message or f"AI provider {route.provider_name!r} is {runtime.status}.",
+            code="native_media_unavailable",
+            retryable=True,
+        )
+    return make_ai_provider_client(config, ctx.vault_root, provider_name=route.provider_name)
+
+
 def _audio_filename(fetched: FetchedBytes) -> str:
     from urllib.parse import urlparse
 
@@ -500,16 +570,25 @@ def _audio_filename(fetched: FetchedBytes) -> str:
 def _extract_audio(fetched: FetchedBytes, ctx: JobContext) -> Any:
     """Audio → timestamped transcript → the same time_range IR captions use.
 
-    Both failure modes are retryable typed errors: transcription is always an
-    external call, so the durable queue owns retry semantics — no partial IR
-    ever persists."""
+    Native-multimodal route first (when configured and the container is a chat
+    input_audio format); otherwise the [ingest.audio] transcription endpoint.
+    All failure modes are retryable typed errors: audio is always an external
+    call, so the durable queue owns retry semantics — no partial IR ever
+    persists, and a mid-run provider failure never silently switches routes
+    (different cost/consent surface)."""
 
+    from learnloop.ai.multimodal import chat_audio_format
     from learnloop.ingest.extractors import transcript_to_ir
     from learnloop.ingest.transcription import (
         TranscriptionFailed,
         TranscriptionUnavailable,
         transcribe_audio,
     )
+
+    route = _native_media_route(ctx, "audio")
+    chat_format = chat_audio_format(_audio_filename(fetched))
+    if route is not None and chat_format is not None:
+        return _extract_audio_native(fetched, ctx, route, chat_format)
 
     config = _audio_ingest_config(ctx)
     size_mb = len(fetched.raw_bytes) / (1024 * 1024)
@@ -531,6 +610,56 @@ def _extract_audio(fetched: FetchedBytes, ctx: JobContext) -> Any:
         result.cues,
         title=ctx.payload.get("title"),
         extractor_name="audio_transcript",
+        extractor_version="1",
+    )
+
+
+def _extract_audio_native(
+    fetched: FetchedBytes, ctx: JobContext, route: NativeMediaRoute, chat_format: str
+) -> Any:
+    from learnloop.ai.multimodal import MediaTranscriptionContext
+    from learnloop.codex.client import CodexUnavailable
+    from learnloop.ingest.extractors import transcript_to_ir
+    from learnloop.ingest.transcripts import TranscriptCue
+
+    size_mb = len(fetched.raw_bytes) / (1024 * 1024)
+    if size_mb > route.max_audio_mb:
+        raise IngestRunnerError(
+            f"Audio file is {size_mb:.1f} MB; [ingest.native] max_audio_mb is {route.max_audio_mb}.",
+            code="audio_too_large",
+            retryable=True,
+        )
+    client = _native_media_client(ctx, route)
+    try:
+        transcript = client.run_media_transcription(
+            MediaTranscriptionContext(
+                media_bytes=fetched.raw_bytes,
+                media_format=chat_format,
+                title=ctx.payload.get("title") or fetched.title,
+            )
+        )
+    except CodexUnavailable as exc:
+        raise IngestRunnerError(str(exc), code="native_audio_failed", retryable=True) from exc
+    cues = [
+        TranscriptCue(
+            start=segment.start_seconds,
+            end=segment.end_seconds,
+            text=segment.text.strip(),
+            speaker=segment.speaker,
+        )
+        for segment in transcript.segments
+        if segment.text.strip()
+    ]
+    if not cues:
+        raise IngestRunnerError(
+            f"{route.provider_name} returned no transcript segments",
+            code="native_audio_failed",
+            retryable=True,
+        )
+    return transcript_to_ir(
+        cues,
+        title=ctx.payload.get("title"),
+        extractor_name="audio_native",
         extractor_version="1",
     )
 
