@@ -678,6 +678,15 @@ class InventoryProcedureSignal(BaseModel):
     common_invalid_steps: list[str] = Field(default_factory=list)
     observable_step_span_ids: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_span_ids(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if not data.get("observable_step_span_ids") and data.get("span_ids"):
+                data["observable_step_span_ids"] = list(data["span_ids"])
+        return data
+
+
 
 class InventoryPracticeSignal(BaseModel):
     signal_id: str = ""
