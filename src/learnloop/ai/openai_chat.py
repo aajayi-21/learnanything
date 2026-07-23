@@ -24,15 +24,10 @@ from learnloop.codex.client import (
     AuthoringContext,
     CanonicalIngestContext,
     CodexUnavailable,
-<<<<<<< HEAD
     ConceptAnimationContext,
     ConceptGraphContext,
     DepthEdgeInstanceContext,
-=======
-    ConceptGraphContext,
-    DepthEdgeInstanceContext,
     ExerciseAuthoringContext,
->>>>>>> upstream/main
     GradingContext,
     ProbeDialogueTurnContext,
     ProbeFamilyTrialsContext,
@@ -48,17 +43,11 @@ from learnloop.codex.client import (
     _authoring_prompt,
     _canonical_ingest_prompt,
     _codex_output_schema,
-<<<<<<< HEAD
     _concept_animation_prompt,
     _concept_graph_structuring_prompt,
     _depth_edge_instance_prompt,
     _diagnostic_trials_prompt,
-=======
-    _concept_graph_structuring_prompt,
-    _depth_edge_instance_prompt,
-    _diagnostic_trials_prompt,
     _exercise_authoring_prompt,
->>>>>>> upstream/main
     _grading_prompt,
     _misconception_match_prompt,
     _probe_dialogue_turn_prompt,
@@ -77,15 +66,10 @@ from learnloop.codex.schemas import (
     AppendReconciliation,
     AuthoringProposal,
     ConceptGraphStructuring,
-<<<<<<< HEAD
     ManimAnimation,
     DepthEdgeInstanceBatch,
     DiagnosticTrials,
-=======
-    DepthEdgeInstanceBatch,
-    DiagnosticTrials,
     ExerciseAuthoring,
->>>>>>> upstream/main
     GradingProposal,
     MisconceptionMatch,
     ProbeDialogueTurn,
@@ -110,11 +94,8 @@ _RETRY_DELAYS_SECONDS = (1.0, 4.0)
 
 class OpenAIChatProviderClient:
     provider_type = "openai_chat"
-<<<<<<< HEAD
     # Subclass hooks: a provider type with a fixed endpoint (e.g. openrouter)
     # overrides these so profiles only need a model slug.
-=======
->>>>>>> upstream/main
     default_base_url: str | None = None
     default_api_key_env = "OPENAI_API_KEY"
 
@@ -178,7 +159,6 @@ class OpenAIChatProviderClient:
     def run_probe_family_trials(self, context: ProbeFamilyTrialsContext) -> ProbeFamilyTrials:
         return self._run_json_model(_probe_family_trials_prompt(context), ProbeFamilyTrials)
 
-<<<<<<< HEAD
     def run_source_unit_inventory(self, context: SourceUnitInventoryContext) -> SourceUnitInventory:
         return self._run_json_model(_source_unit_inventory_prompt(context), SourceUnitInventory)
 
@@ -188,8 +168,6 @@ class OpenAIChatProviderClient:
     def run_append_reconciliation(self, context: AppendReconciliationContext) -> AppendReconciliation:
         return self._run_json_model(_append_reconciliation_prompt(context), AppendReconciliation)
 
-=======
->>>>>>> upstream/main
     def run_reader_preset_synthesis(self, context: ReaderPresetSynthesisContext) -> ReaderPresetSynthesis:
         return self._run_json_model(_reader_preset_synthesis_prompt(context), ReaderPresetSynthesis)
 
@@ -199,7 +177,9 @@ class OpenAIChatProviderClient:
     def run_rung_backfill(self, context: RungBackfillContext) -> RungBackfillClassification:
         return self._run_json_model(_rung_backfill_prompt(context), RungBackfillClassification)
 
-<<<<<<< HEAD
+    def run_exercise_authoring(self, context: ExerciseAuthoringContext) -> ExerciseAuthoring:
+        return self._run_json_model(_exercise_authoring_prompt(context), ExerciseAuthoring)
+
     def run_depth_edge_instances(self, context: DepthEdgeInstanceContext) -> DepthEdgeInstanceBatch:
         return self._run_json_model(_depth_edge_instance_prompt(context), DepthEdgeInstanceBatch)
 
@@ -263,31 +243,6 @@ class OpenAIChatProviderClient:
 
     def _run_json_messages(self, messages: list[dict[str, Any]], model_type: type[BaseModel]) -> Any:
         text = self._chat_messages(messages, model_type)
-=======
-    def run_exercise_authoring(self, context: ExerciseAuthoringContext) -> ExerciseAuthoring:
-        return self._run_json_model(_exercise_authoring_prompt(context), ExerciseAuthoring)
-
-    def run_depth_edge_instances(self, context: DepthEdgeInstanceContext) -> DepthEdgeInstanceBatch:
-        return self._run_json_model(_depth_edge_instance_prompt(context), DepthEdgeInstanceBatch)
-
-    def run_source_unit_inventory(self, context: SourceUnitInventoryContext) -> SourceUnitInventory:
-        return self._run_json_model(_source_unit_inventory_prompt(context), SourceUnitInventory)
-
-    def run_source_set_synthesis(self, context: SourceSetSynthesisContext) -> SourceSetSynthesis:
-        return self._run_json_model(_source_set_synthesis_prompt(context), SourceSetSynthesis)
-
-    def run_concept_graph_structuring(self, context: ConceptGraphContext) -> ConceptGraphStructuring:
-        return self._run_json_model(
-            _concept_graph_structuring_prompt(context),
-            ConceptGraphStructuring,
-        )
-
-    def run_append_reconciliation(self, context: AppendReconciliationContext) -> AppendReconciliation:
-        return self._run_json_model(_append_reconciliation_prompt(context), AppendReconciliation)
-
-    def _run_json_model(self, prompt: str, model_type: type[BaseModel]) -> Any:
-        text = self._chat(prompt, model_type)
->>>>>>> upstream/main
         try:
             return model_type.model_validate_json(text)
         except (ValidationError, ValueError, json.JSONDecodeError):
@@ -295,19 +250,11 @@ class OpenAIChatProviderClient:
             try:
                 return model_type.model_validate_json(repaired)
             except (ValidationError, ValueError, json.JSONDecodeError) as second_exc:
-                raise CodexUnavailable(
-                    f"{self.provider_name} returned invalid {model_type.__name__} JSON"
-                ) from second_exc
+                raise CodexUnavailable(f"{self.provider_name} returned invalid {model_type.__name__} JSON") from second_exc
 
     def _chat(self, prompt: str, model_type: type[BaseModel] | None = None) -> str:
-<<<<<<< HEAD
         return self._chat_messages(
             [
-=======
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
->>>>>>> upstream/main
                 {"role": "system", "content": "Return only valid JSON. Do not include Markdown fences."},
                 {"role": "user", "content": prompt},
             ],
@@ -325,16 +272,10 @@ class OpenAIChatProviderClient:
             "model": self.model,
             "messages": messages,
         }
-<<<<<<< HEAD
         if use_response_format:
             response_format = self._response_format(model_type)
             if response_format:
                 kwargs["response_format"] = response_format
-=======
-        response_format = self._response_format(model_type)
-        if response_format:
-            kwargs["response_format"] = response_format
->>>>>>> upstream/main
         if self.profile.max_tokens is not None:
             kwargs["max_tokens"] = self.profile.max_tokens
         kwargs.update(self._reasoning_kwargs())
@@ -359,14 +300,7 @@ class OpenAIChatProviderClient:
                     _sleep(_RETRY_DELAYS_SECONDS[attempt])
                     continue
                 logger.warning(
-<<<<<<< HEAD
                     "AI provider %s (%s) request failed: %s", self.provider_name, self.model, exc
-=======
-                    "AI provider %s (%s) request failed: %s",
-                    self.provider_name,
-                    self.model,
-                    exc,
->>>>>>> upstream/main
                 )
                 raise CodexUnavailable(str(exc)) from exc
         raise CodexUnavailable(f"{self.provider_name} request retries exhausted")

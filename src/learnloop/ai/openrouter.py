@@ -9,7 +9,6 @@ OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 
 
 class OpenRouterProviderClient(OpenAIChatProviderClient):
-<<<<<<< HEAD
     """OpenAI-compatible chat client pointed at OpenRouter.
 
     Any OpenRouter model slug works as ``profile.model`` (e.g.
@@ -19,9 +18,6 @@ class OpenRouterProviderClient(OpenAIChatProviderClient):
     requested via OpenRouter's unified ``reasoning`` body instead of the
     DeepSeek-dialect ``thinking`` body (which 400s on strict providers).
     """
-=======
-    """OpenAI-compatible provider client configured for OpenRouter."""
->>>>>>> upstream/main
 
     provider_type = "openrouter"
     default_base_url = OPENROUTER_BASE_URL
