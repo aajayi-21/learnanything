@@ -6,6 +6,7 @@ from learnloop.config import load_config
 from learnloop.services.settings_store import (
     SettingsStoreError,
     apply_config_updates,
+    copy_ai_settings,
     openrouter_profile_name,
     openrouter_task_profile_values,
     upsert_env_var,
@@ -88,6 +89,74 @@ def test_apply_config_updates_missing_file(tmp_path):
     with pytest.raises(SettingsStoreError) as excinfo:
         apply_config_updates(tmp_path / "absent.toml", {("ai", "active_provider"): "x"})
     assert excinfo.value.code == "config_missing"
+
+
+def _configure_openrouter_ingest(config_path, model="anthropic/claude-sonnet-4.5"):
+    """Persist what update_ai_settings writes for the ingest use-case."""
+
+    base = load_config(config_path).ai.providers["openrouter"]
+    name = openrouter_profile_name("ingest")
+    updates = {
+        ("ai", "providers", name, key): value
+        for key, value in openrouter_task_profile_values(base, model).items()
+    }
+    updates.update(
+        {
+            ("ai", "routing", task): name
+            for task in ("canonical_ingest", "canonical_ingest_retry", "authoring")
+        }
+    )
+    apply_config_updates(config_path, updates)
+    return name
+
+
+def test_copy_ai_settings_copies_routing_and_materialized_profiles(tmp_path):
+    source_path = _config_path(tmp_path / "source")
+    target_path = _config_path(tmp_path / "target")
+    name = _configure_openrouter_ingest(source_path)
+
+    assert copy_ai_settings(source_path, target_path) is True
+
+    config = load_config(target_path)
+    assert config.ai.routing.canonical_ingest == name
+    assert config.ai.routing.canonical_ingest_retry == name
+    assert config.ai.routing.authoring == name
+    assert config.ai.providers[name].model == "anthropic/claude-sonnet-4.5"
+    assert config.ai.providers[name].api_key_env == "OPENROUTER_API_KEY"
+    # Unconfigured use-cases keep the template defaults, template comments
+    # survive, and the codex tables are untouched.
+    text = target_path.read_text(encoding="utf-8")
+    assert config.ai.routing.grading == "codex_low"
+    assert "# Any OpenRouter model slug works" in text
+    assert 'checkout_path = ""' in text
+
+
+def test_copy_ai_settings_default_source_is_semantic_noop(tmp_path):
+    source_path = _config_path(tmp_path / "source")
+    target_path = _config_path(tmp_path / "target")
+
+    copy_ai_settings(source_path, target_path)
+
+    config = load_config(target_path)
+    assert config.ai.active_provider == "codex"
+    assert config.ai.routing.canonical_ingest == "codex_medium"
+    assert config.ai.routing.grading == "codex_low"
+
+
+def test_copy_ai_settings_errors_on_missing_or_invalid_source(tmp_path):
+    target_path = _config_path(tmp_path / "target")
+
+    with pytest.raises(SettingsStoreError) as excinfo:
+        copy_ai_settings(tmp_path / "absent.toml", target_path)
+    assert excinfo.value.code == "config_missing"
+
+    bad = tmp_path / "bad.toml"
+    bad.write_text("[ai\nbroken", encoding="utf-8")
+    with pytest.raises(SettingsStoreError) as excinfo:
+        copy_ai_settings(bad, target_path)
+    assert excinfo.value.code == "config_unreadable"
+    # The failed copies never touched the target.
+    assert load_config(target_path).ai.routing.canonical_ingest == "codex_medium"
 
 
 def test_upsert_env_var_appends_and_replaces_preserving_other_lines(tmp_path):

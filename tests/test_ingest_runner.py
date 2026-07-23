@@ -768,6 +768,55 @@ def test_default_inventory_client_defaults_to_codex_and_errors_when_unavailable(
         default_inventory_client(types.SimpleNamespace(vault_root=vault_root))
 
 
+def test_default_synthesis_client_resolves_openrouter_in_inherited_new_vault(tmp_path, monkeypatch):
+    """The new-vault bug scenario: a vault created while an OpenRouter-routed
+    vault is active inherits that routing, so bootstrap synthesis resolves the
+    OpenRouter client instead of demanding the codex checkout."""
+
+    import types
+
+    from learnloop.config import load_config
+    from learnloop.services.ingest_runner import default_synthesis_client
+    from learnloop.services.settings_store import (
+        apply_config_updates,
+        copy_ai_settings,
+        openrouter_profile_name,
+        openrouter_task_profile_values,
+    )
+    from learnloop.vault.loader import init_vault
+
+    from tests.helpers import create_basic_vault
+    from tests.openai_fakes import install_fake_openai
+
+    source_root = tmp_path / "old-vault"
+    create_basic_vault(source_root)
+    base = load_config(source_root / "learnloop.toml").ai.providers["openrouter"]
+    name = openrouter_profile_name("ingest")
+    updates = {
+        ("ai", "providers", name, key): value
+        for key, value in openrouter_task_profile_values(base, "anthropic/claude-sonnet-4.5").items()
+    }
+    updates.update(
+        {
+            ("ai", "routing", task): name
+            for task in ("canonical_ingest", "canonical_ingest_retry", "authoring")
+        }
+    )
+    apply_config_updates(source_root / "learnloop.toml", updates)
+
+    new_root = init_vault(tmp_path / "new-vault")
+    assert copy_ai_settings(source_root / "learnloop.toml", new_root / "learnloop.toml") is True
+
+    monkeypatch.delenv("LEARNLOOP_AI_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-secret")
+    install_fake_openai(monkeypatch)
+
+    client = default_synthesis_client(types.SimpleNamespace(vault_root=new_root))
+
+    assert client.provider_type == "openrouter"
+    assert client.model == "anthropic/claude-sonnet-4.5"
+
+
 # --------------------------------------------------------------------------
 # Audio ingestion (transcription path)
 # --------------------------------------------------------------------------
