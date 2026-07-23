@@ -184,6 +184,9 @@ class RunnerServices:
     def animation_client(self, ctx: "JobContext") -> Any:
         return (self.animation_client_factory or default_animation_client)(ctx)
 
+    def animation_client(self, ctx: "JobContext") -> Any:
+        return (self.animation_client_factory or default_animation_client)(ctx)
+
 
 @dataclass
 class JobContext:

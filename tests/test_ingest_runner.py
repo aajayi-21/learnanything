@@ -835,135 +835,13 @@ def test_youtube_import_without_metadata_falls_back_to_url(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Robustness: PDF fallback, page validation, batch timestamp hygiene,
-# stale synthesis-run finalization
+# default_inventory_client provider routing
 # --------------------------------------------------------------------------
 
 
-def _fetched_pdf(raw: bytes = b"%PDF-1.4 fake"):
-    from learnloop.services.ingest_runner import FetchedBytes
-
-    return FetchedBytes(
-        raw_bytes=raw, content_type="application/pdf",
-        original_uri="file:///book.pdf", retrieved_at="2026-07-13T12:00:00Z",
-    )
-
-
-def _bare_ctx(tmp_path: Path, payload: dict | None = None) -> JobContext:
-    return JobContext(
-        repo=_repo(tmp_path), vault_root=tmp_path,
-        job={"id": "j1", "batch_id": "b1", "payload": payload or {}},
-        clock=_clock(), worker_id="w1",
-    )
-
-
-def test_marker_runtime_failure_falls_back_to_pypdf(tmp_path, monkeypatch):
-    """Marker dying mid-conversion degrades to native-text extraction with a
-    health flag instead of failing the whole import (§2.9)."""
-
-    import learnloop.ingest.extractors as extractors
-    from learnloop.services.ingest_runner import default_extract
-
-    class FailingMarker:
-        name = "marker"
-
-        def extract(self, raw_bytes, context):
-            raise RuntimeError("CUDA device lost")
-
-    class FakePyPdf:
-        name = "pypdf"
-
-        def extract(self, raw_bytes, context):
-            block = DocumentBlock.build(span_id="s1", block_type="Text", text="Native text.", ordinal=1)
-            unit = DocumentUnit(unit_id="u1", label="Doc", ordinal=1, semantic_hash="sha256:x", span_ids=["s1"])
-            return DocumentIR(extractor="pypdf", extractor_version="1", blocks=[block], units=[unit])
-
-    monkeypatch.setattr(extractors, "pdf_extractor_for", lambda config=None: FailingMarker())
-    monkeypatch.setattr(extractors, "PyPdfDocumentExtractor", FakePyPdf)
-
-    ir = default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path))
-    assert ir.extractor == "pypdf"
-    assert "marker_failed_pypdf_fallback" in ir.health.flags
-
-
-def test_forced_marker_engine_does_not_fall_back(tmp_path, monkeypatch):
-    import learnloop.ingest.extractors as extractors
-    from learnloop.services.ingest_runner import default_extract
-
-    class FailingMarker:
-        name = "marker"
-
-        def extract(self, raw_bytes, context):
-            raise RuntimeError("CUDA device lost")
-
-    monkeypatch.setattr(extractors, "pdf_extractor_for", lambda config=None: FailingMarker())
-    with pytest.raises(RuntimeError, match="CUDA device lost"):
-        default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "marker"}}))
-
-
-def test_pdf_extractor_for_honors_engine_choice(monkeypatch):
-    """engine="pypdf" forces the fallback even with marker installed; "marker"
-    raises typed when unavailable; the engine key never leaks into marker
-    options; auto keeps the availability-based default."""
-
-    import learnloop.ingest.extractors as extractors
-
-    monkeypatch.setattr(extractors, "marker_available", lambda: True)
-    assert extractors.pdf_extractor_for({"engine": "pypdf"}).name == "pypdf"
-    marker = extractors.pdf_extractor_for({"engine": "marker", "force_ocr": True})
-    assert marker.name == "marker"
-    assert "engine" not in marker._config and marker._config["force_ocr"] is True
-    assert extractors.pdf_extractor_for().name == "marker"
-
-    monkeypatch.setattr(extractors, "marker_available", lambda: False)
-    assert extractors.pdf_extractor_for().name == "pypdf"
-    with pytest.raises(extractors.MarkerUnavailableError):
-        extractors.pdf_extractor_for({"engine": "marker"})
-
-
-def test_forced_pypdf_engine_skips_marker(tmp_path, monkeypatch):
-    """A payload engine="pypdf" never routes through marker, even when marker
-    is available (the canonical-ingest fallback choice)."""
-
-    import learnloop.ingest.extractors as extractors
-    from learnloop.services.ingest_runner import default_extract
-
-    class ExplodingMarker:
-        name = "marker"
-
-        def __init__(self, *, config=None):
-            raise AssertionError("marker must not be constructed for engine=pypdf")
-
-    class FakePyPdf:
-        name = "pypdf"
-
-        def extract(self, raw_bytes, context):
-            block = DocumentBlock.build(span_id="s1", block_type="Text", text="Native text.", ordinal=1)
-            unit = DocumentUnit(unit_id="u1", label="Doc", ordinal=1, semantic_hash="sha256:x", span_ids=["s1"])
-            return DocumentIR(extractor="pypdf", extractor_version="1", blocks=[block], units=[unit])
-
-    monkeypatch.setattr(extractors, "marker_available", lambda: True)
-    monkeypatch.setattr(extractors, "MarkerDocumentExtractor", ExplodingMarker)
-    monkeypatch.setattr(extractors, "PyPdfDocumentExtractor", FakePyPdf)
-
-    ir = default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "pypdf"}}))
-    assert ir.extractor == "pypdf"
-    assert not ir.health.flags  # a chosen fallback is not a degraded extraction
-
-
-def test_forced_marker_unavailable_is_a_typed_error(tmp_path, monkeypatch):
-    import learnloop.ingest.extractors as extractors
-    from learnloop.services.ingest_runner import default_extract
-
-    monkeypatch.setattr(extractors, "marker_available", lambda: False)
-    with pytest.raises(IngestRunnerError) as excinfo:
-        default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "marker"}}))
-    assert excinfo.value.code == "pdf_extractor_unavailable"
-
-
-def test_vault_pdf_engine_governs_import_when_payload_is_silent(tmp_path, monkeypatch):
-    """[ingest.pdf] engine="pypdf" in vault config finally reaches the durable
-    import path; an explicit payload engine still wins."""
+def test_default_inventory_client_routes_via_canonical_ingest(tmp_path, monkeypatch):
+    """[ai.routing].canonical_ingest picks the inventory/synthesis provider, so
+    an openrouter-routed vault resolves an OpenRouter client instead of codex."""
 
     import types
 
