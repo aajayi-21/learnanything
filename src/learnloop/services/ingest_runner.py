@@ -136,6 +136,7 @@ class RunnerServices:
     synthesis_client_factory: Callable[["JobContext"], Any] | None = None
     quick_check_client_factory: Callable[["JobContext"], Any] | None = None
     rung_variant_client_factory: Callable[["JobContext"], Any] | None = None
+    exercise_import_client_factory: Callable[["JobContext"], Any] | None = None
     animation_client_factory: Callable[["JobContext"], Any] | None = None
     animation_renderer: Callable[..., Any] | None = None
 
@@ -175,14 +176,12 @@ class RunnerServices:
         return client
 
     def exercise_import_client(self, ctx: "JobContext") -> Any:
-        # Reader exercise imports ride the codex-only resolver: the task method
-        # is getattr-discovered on the SDK client, like reader quick checks.
+        # Reader exercise imports ride the inventory resolver (routed via
+        # canonical_ingest): the task method is getattr-discovered on the
+        # client, like reader quick checks.
         client = (self.exercise_import_client_factory or default_inventory_client)(ctx)
         ctx.bind_interruptible(client)
         return client
-
-    def animation_client(self, ctx: "JobContext") -> Any:
-        return (self.animation_client_factory or default_animation_client)(ctx)
 
     def animation_client(self, ctx: "JobContext") -> Any:
         return (self.animation_client_factory or default_animation_client)(ctx)

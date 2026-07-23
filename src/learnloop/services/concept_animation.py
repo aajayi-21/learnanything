@@ -99,10 +99,74 @@ def _manim_command(manim_executable: str | None) -> list[str]:
     return [sys.executable, "-m", "manim"]
 
 
-def manim_runtime(manim_executable: str | None = None, *, run=subprocess.run) -> dict[str, Any]:
+def _venv_python(venv_dir: Path) -> Path:
+    """Path to the python interpreter inside a venv (platform-specific)."""
+
+    if sys.platform == "win32":
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+def provision_animation_venv(venv_dir: Path, *, package_spec: str = "manim") -> Path:
+    """Create an isolated venv and install manim into it (blocking).
+
+    Bootstraps a fresh virtualenv from the ambient interpreter and pip-installs
+    manim, so model-authored scene code runs against a package set separate from
+    the app's own environment. Returns the venv's python path. Raises on failure
+    (callers fall back to the ambient interpreter)."""
+
+    import venv as _venv
+
+    _venv.EnvBuilder(with_pip=True, clear=False).create(str(venv_dir))
+    py = _venv_python(venv_dir)
+    subprocess.run(
+        [str(py), "-m", "pip", "install", "--upgrade", "pip", package_spec],
+        check=True,
+        capture_output=True,
+        timeout=1800,
+    )
+    return py
+
+
+def resolve_manim_command(config: Any, vault_root: Path | None = None) -> list[str]:
+    """Resolve the command prefix that runs manim, honoring animation config.
+
+    Priority: an explicit ``manim_executable`` override → a dedicated animation
+    venv (``venv_path``; isolates model-authored scene code from the app's own
+    packages) → the ambient interpreter (``sys.executable``, i.e. the Python
+    environment the app was launched from — conda/venv, per the sidecar's
+    interpreter selection). Falls back to the ambient interpreter when a
+    configured venv is missing and cannot be provisioned."""
+
+    manim_executable = getattr(config, "manim_executable", None)
+    if manim_executable:
+        return [manim_executable]
+    venv_path = getattr(config, "venv_path", None)
+    if venv_path:
+        venv_dir = Path(venv_path).expanduser()
+        if vault_root is not None and not venv_dir.is_absolute():
+            venv_dir = vault_root / venv_dir
+        py = _venv_python(venv_dir)
+        if not py.exists() and getattr(config, "auto_provision_venv", False):
+            try:
+                py = provision_animation_venv(venv_dir)
+            except (OSError, subprocess.SubprocessError):
+                py = None  # fall back to the ambient interpreter below
+        if py is not None and py.exists():
+            return [str(py), "-m", "manim"]
+    return [sys.executable, "-m", "manim"]
+
+
+def manim_runtime(
+    manim_executable: str | None = None,
+    *,
+    manim_command: list[str] | None = None,
+    run=subprocess.run,
+) -> dict[str, Any]:
     """Probe whether manim is installed/renderable — cheap, no scene involved."""
 
-    command = [*_manim_command(manim_executable), "--version"]
+    prefix = manim_command or _manim_command(manim_executable)
+    command = [*prefix, "--version"]
     try:
         result = run(command, capture_output=True, timeout=15)
     except FileNotFoundError:
@@ -126,7 +190,7 @@ def _render_env() -> dict[str, str]:
 
     keep_prefixes = ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR",
                      "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
-                     "PATH", "LANG", "LC_", "PYTHON", "VIRTUAL_ENV", "FONTCONFIG")
+                     "PATH", "LANG", "LC_", "PYTHON", "VIRTUAL_ENV", "CONDA", "FONTCONFIG")
     env = {
         key: value
         for key, value in os.environ.items()
@@ -142,6 +206,7 @@ def render_scene(
     quality: str = "ql",
     timeout_seconds: int = 300,
     manim_executable: str | None = None,
+    manim_command: list[str] | None = None,
     run=subprocess.run,
 ) -> RenderResult:
     """Render one validated scene to mp4 in a fresh temp cwd with a timeout.
@@ -149,13 +214,14 @@ def render_scene(
     The ``run`` parameter is the offline-test seam (a fake writes an mp4 into
     the expected media glob). The temp directory is always cleaned."""
 
+    prefix = manim_command or _manim_command(manim_executable)
     quality_flag = f"-q{quality[-1].lower()}" if quality else "-ql"
     workdir = Path(tempfile.mkdtemp(prefix="learnloop-manim-"))
     try:
         scene_path = workdir / "scene.py"
         scene_path.write_text(scene_code, encoding="utf-8")
         command = [
-            *_manim_command(manim_executable),
+            *prefix,
             "render",
             quality_flag,
             "--media_dir",
@@ -313,6 +379,10 @@ def generate_concept_animation(
 
     config = vault.config.animation
     render = renderer or render_scene
+    # Resolve the manim interpreter once: explicit override → dedicated isolated
+    # venv → the ambient env the app launched from (conda/venv). Passed to every
+    # render call; test-injected renderers ignore it via **kwargs.
+    manim_command = resolve_manim_command(config, vault.root)
 
     def _fail(
         stage: str, reason: str, *, stderr: str | None = None, repair_attempted: bool | None = None
@@ -385,6 +455,7 @@ def generate_concept_animation(
             quality=config.quality,
             timeout_seconds=config.timeout_seconds,
             manim_executable=config.manim_executable,
+            manim_command=manim_command,
         )
         if not result.ok and config.auto_repair:
             repository.update_concept_animation(animation_id, repair_attempted=1, clock=clock)
@@ -407,6 +478,7 @@ def generate_concept_animation(
                 quality=config.quality,
                 timeout_seconds=config.timeout_seconds,
                 manim_executable=config.manim_executable,
+                manim_command=manim_command,
             )
         if not result.ok:
             return _fail("render", "manim render failed", stderr=result.stderr_tail)
