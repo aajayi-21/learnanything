@@ -165,10 +165,18 @@ class RunnerServices:
         return client
 
     def quick_check_client(self, ctx: "JobContext") -> Any:
+<<<<<<< HEAD
         # Reader quick checks ride the inventory resolver (low-effort on codex
         # vaults, routed elsewhere): the task method is getattr-discovered on
         # the client, exactly like unit inventory.
         return (self.quick_check_client_factory or default_inventory_client)(ctx)
+=======
+        # Reader quick checks follow the same canonical-ingest provider route
+        # as unit inventory.
+        client = (self.quick_check_client_factory or default_inventory_client)(ctx)
+        ctx.bind_interruptible(client)
+        return client
+>>>>>>> upstream/main
 
     def rung_variant_client(self, ctx: "JobContext") -> Any:
         client = (self.rung_variant_client_factory or default_rung_variant_client)(ctx)
@@ -176,10 +184,16 @@ class RunnerServices:
         return client
 
     def exercise_import_client(self, ctx: "JobContext") -> Any:
+<<<<<<< HEAD
         # Reader exercise imports ride the inventory resolver (routed via
         # canonical_ingest): the task method is getattr-discovered on the
         # client, like reader quick checks.
         client = (self.exercise_import_client_factory or default_inventory_client)(ctx)
+=======
+        # Exercise completion follows the authoring route. The task method is
+        # getattr-discovered so unsupported providers still fail explicitly.
+        client = (self.exercise_import_client_factory or default_exercise_import_client)(ctx)
+>>>>>>> upstream/main
         ctx.bind_interruptible(client)
         return client
 
@@ -963,6 +977,7 @@ def default_run_legacy_ingest(
 
 
 def default_inventory_client(ctx: JobContext) -> Any:
+<<<<<<< HEAD
     """Resolve the unit-inventory/quick-check client through ai routing (§7).
 
     Routed via the ``canonical_ingest`` task (empty routing follows
@@ -1009,6 +1024,11 @@ def default_inventory_client(ctx: JobContext) -> Any:
     raise IngestRunnerError(
         runtime.message or f"AI provider {provider_name!r} is {runtime.status}."
     )
+=======
+    """Resolve unit inventory through the canonical-ingest provider route."""
+
+    return _routed_task_client(ctx, "canonical_ingest")
+>>>>>>> upstream/main
 
 
 def default_synthesis_client(ctx: JobContext) -> Any:
@@ -1036,6 +1056,12 @@ def default_rung_variant_client(ctx: JobContext) -> Any:
     judgment-heavy synthesis profile, and the learner is actively waiting."""
 
     return _routed_task_client(ctx, "rung_variant")
+
+
+def default_exercise_import_client(ctx: JobContext) -> Any:
+    """Resolve reader exercise completion through the authoring route."""
+
+    return _routed_task_client(ctx, "authoring")
 
 
 def _routed_task_client(ctx: JobContext, task: str) -> Any:

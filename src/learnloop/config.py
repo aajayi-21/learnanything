@@ -553,9 +553,12 @@ reasoning_effort = "high"
 max_tokens = 16384
 timeout_seconds = 180
 
+<<<<<<< HEAD
 # Any OpenRouter model slug works here: "anthropic/claude-sonnet-4.5",
 # "openai/gpt-5-mini", "deepseek/deepseek-chat", ... Set OPENROUTER_API_KEY in
 # the vault .env or ~/.config/learnloop/settings.env.
+=======
+>>>>>>> upstream/main
 [ai.providers.openrouter]
 type = "openrouter"
 model = "deepseek/deepseek-chat"
@@ -563,11 +566,17 @@ api_key_env = "OPENROUTER_API_KEY"
 response_format = "json_object"
 timeout_seconds = 180
 # base_url = "https://openrouter.ai/api/v1"  # default; override for proxies
+<<<<<<< HEAD
 # response_format = "json_schema"            # strict per-request schema on supporting models
 # reasoning_effort = "medium"                # OpenRouter unified reasoning effort
 # http_referer = ""                          # optional attribution header
 # x_title = "LearnLoop"                      # optional attribution header
 # input_modalities = ["audio", "pdf"]        # native media this model accepts ([ingest.native])
+=======
+# reasoning_effort = "medium"
+# http_referer = ""  # optional OpenRouter attribution header
+# x_title = "LearnLoop"
+>>>>>>> upstream/main
 
 [codex]
 provider = "sdk"
@@ -1508,6 +1517,7 @@ class AIProviderConfig(BaseModel):
     reasoning_summary: str | None = None
     max_tokens: int | None = None
     timeout_seconds: int | None = None
+<<<<<<< HEAD
     # OpenRouter attribution headers (type = "openrouter" only).
     http_referer: str | None = None
     x_title: str | None = None
@@ -1516,6 +1526,10 @@ class AIProviderConfig(BaseModel):
     # OpenRouter's /api/v1/models architecture.input_modalities can autofill
     # this in a future settings UI.
     input_modalities: list[str] = Field(default_factory=list)
+=======
+    http_referer: str | None = None
+    x_title: str | None = None
+>>>>>>> upstream/main
 
     checkout_path: str | None = None
     revision: str | None = None
@@ -1972,8 +1986,11 @@ def deepseek_pro_provider() -> AIProviderConfig:
 
 
 def openrouter_provider() -> AIProviderConfig:
+<<<<<<< HEAD
     # base_url defaults inside the client; max_tokens stays unset so
     # synthesis-sized outputs are never truncated by a blanket cap.
+=======
+>>>>>>> upstream/main
     return AIProviderConfig(
         type="openrouter",
         model="deepseek/deepseek-chat",
