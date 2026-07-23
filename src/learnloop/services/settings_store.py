@@ -19,11 +19,12 @@ existing key, so a reload alone keeps the stale value until process restart.
 from __future__ import annotations
 
 import os
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from learnloop.config import _ENV_KEY_RE, AIProviderConfig
+from learnloop.config import _ENV_KEY_RE, AIProviderConfig, CODEX_PROVIDER_NAMES
 
 
 class SettingsStoreError(ValueError):
@@ -111,6 +112,68 @@ def apply_config_updates(config_path: Path, updates: Mapping[tuple[str, ...], An
     tmp = config_path.with_suffix(config_path.suffix + ".tmp")
     tmp.write_text(tomlkit.dumps(document), encoding="utf-8")
     tmp.replace(config_path)
+
+
+def copy_ai_settings(source_path: Path, target_path: Path) -> bool:
+    """Copy the persisted ``[ai]`` provider selection from one vault's
+    ``learnloop.toml`` into another's. Returns True when anything was applied.
+
+    Vault creation uses this so a new vault inherits the provider routing the
+    user configured in the vault they created it from — the Settings tab
+    persists routing and the materialized ``openrouter_<usecase>`` profiles
+    per-vault, while API keys live in the machine-global ``settings.env``.
+    Reads the raw TOML (not ``load_config``, whose model mixes auto-seeded
+    defaults into ``[ai]``) so only explicitly persisted choices travel.
+    Codex profiles are skipped: their machine-local config is env-driven and
+    already present in the fresh template."""
+
+    try:
+        raw = tomllib.loads(source_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise SettingsStoreError("config_missing", f"{source_path} does not exist") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise SettingsStoreError(
+            "config_unreadable", f"{source_path} is not valid TOML: {exc}"
+        ) from exc
+
+    ai = raw.get("ai")
+    if not isinstance(ai, Mapping):
+        return False
+
+    updates: dict[tuple[str, ...], Any] = {}
+    for key in ("active_provider", "fallback_provider"):
+        value = ai.get(key)
+        if isinstance(value, str):
+            updates[("ai", key)] = value
+
+    known_tasks = {task for routes in USE_CASE_ROUTES.values() for task in routes}
+    routing = ai.get("routing")
+    if isinstance(routing, Mapping):
+        for task, value in routing.items():
+            if task in known_tasks and isinstance(value, str):
+                updates[("ai", "routing", task)] = value
+
+    providers = ai.get("providers")
+    if isinstance(providers, Mapping):
+        for name, table in providers.items():
+            if name in CODEX_PROVIDER_NAMES or not isinstance(table, Mapping):
+                continue
+            _flatten_into_updates(("ai", "providers", name), table, updates)
+
+    if not updates:
+        return False
+    apply_config_updates(target_path, updates)
+    return True
+
+
+def _flatten_into_updates(
+    prefix: tuple[str, ...], table: Mapping[str, Any], updates: dict[tuple[str, ...], Any]
+) -> None:
+    for key, value in table.items():
+        if isinstance(value, Mapping):
+            _flatten_into_updates((*prefix, key), value, updates)
+        else:
+            updates[(*prefix, key)] = value
 
 
 def upsert_env_var(path: Path, key: str, value: str | None) -> None:

@@ -2420,6 +2420,62 @@ def test_sidecar_create_vault_refuses_populated_non_vault_dir(tmp_path):
     assert not (junk / "learnloop.toml").exists()
 
 
+def test_sidecar_create_vault_inherits_ai_settings_from_active_vault(tmp_path, monkeypatch):
+    # The NewVault wizard creates the vault while the sidecar is still bound to
+    # the old one — the fresh vault must inherit its persisted [ai] selection,
+    # or bootstrap synthesis regresses to the template's codex routing.
+    from learnloop.config import load_config
+
+    monkeypatch.setenv("LEARNLOOP_CONFIG_DIR", str(tmp_path / "global"))
+    monkeypatch.delenv("LEARNLOOP_AI_PROVIDER", raising=False)
+    source_root = tmp_path / "vault-a"
+    create_basic_vault(source_root)
+    new_root = tmp_path / "vault-b"
+
+    responses = _settings_rpc(
+        source_root,
+        (
+            "update_ai_settings",
+            {"useCases": {"ingest": {"provider": "openrouter", "openrouterModel": "anthropic/claude-sonnet-4.5"}}},
+        ),
+        ("create_vault", {"path": str(new_root), "subject": "Calculus"}),
+    )
+    assert all("result" in response for response in responses)
+
+    config = load_config(new_root / "learnloop.toml")
+    assert config.ai.routing.canonical_ingest == "openrouter_ingest"
+    assert config.ai.routing.canonical_ingest_retry == "openrouter_ingest"
+    assert config.ai.routing.authoring == "openrouter_ingest"
+    assert config.ai.providers["openrouter_ingest"].model == "anthropic/claude-sonnet-4.5"
+    # Unconfigured use-cases keep the template default.
+    assert config.ai.routing.grading == "codex_low"
+
+
+def test_sidecar_create_vault_reopen_does_not_touch_existing_ai_settings(tmp_path, monkeypatch):
+    from learnloop.config import load_config
+
+    monkeypatch.setenv("LEARNLOOP_CONFIG_DIR", str(tmp_path / "global"))
+    monkeypatch.delenv("LEARNLOOP_AI_PROVIDER", raising=False)
+    source_root = tmp_path / "vault-a"
+    create_basic_vault(source_root)
+    existing_root = tmp_path / "vault-b"
+    create_basic_vault(existing_root)
+
+    responses = _settings_rpc(
+        source_root,
+        (
+            "update_ai_settings",
+            {"useCases": {"ingest": {"provider": "openrouter", "openrouterModel": "anthropic/claude-sonnet-4.5"}}},
+        ),
+        ("create_vault", {"path": str(existing_root)}),
+    )
+    assert all("result" in response for response in responses)
+
+    config = load_config(existing_root / "learnloop.toml")
+    assert config.ai.routing.canonical_ingest == "codex_medium"
+    assert "openrouter_ingest" not in config.ai.providers
+
+
 # --------------------------------------------------------------------------
 # Settings RPCs (get_settings / update_ai_settings / set_openrouter_api_key)
 # --------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from learnloop.ids import kebab_case
+from learnloop.services.settings_store import SettingsStoreError, copy_ai_settings
 from learnloop.vault.loader import add_subject, init_vault
 from learnloop_sidecar.context import SidecarContext
 from learnloop_sidecar.dto import EmptyParams, ParamsModel, versioned
@@ -36,6 +37,13 @@ def create_vault(ctx: SidecarContext, params: CreateVaultInput) -> dict[str, Any
     caller re-selects it (Rust ``select_vault`` respawns against the new path)
     and then ``load_vault``, mirroring how the vault switcher works elsewhere.
 
+    A brand-new vault inherits the currently-loaded vault's persisted ``[ai]``
+    provider selection (routing + non-codex profiles): the Settings tab writes
+    those per-vault, so without this the fresh vault would fall back to the
+    template's codex routing even though the user configured e.g. OpenRouter.
+    Existing vaults are never touched; with no vault loaded, template defaults
+    stand.
+
     Guard: refuse a directory that already has unrelated content and is not a
     vault, so we never scatter vault scaffolding into someone's populated folder.
     """
@@ -45,11 +53,11 @@ def create_vault(ctx: SidecarContext, params: CreateVaultInput) -> dict[str, Any
         raise SidecarError("invalid_path", "A vault directory path is required.")
 
     target = Path(raw).expanduser()
+    was_vault = (target / "learnloop.toml").exists()
     if target.exists():
         if not target.is_dir():
             raise SidecarError("invalid_path", f"{target} exists and is not a directory.")
-        already_vault = (target / "learnloop.toml").exists()
-        if not already_vault and any(target.iterdir()):
+        if not was_vault and any(target.iterdir()):
             raise SidecarError(
                 "vault_dir_not_empty",
                 (
@@ -59,6 +67,12 @@ def create_vault(ctx: SidecarContext, params: CreateVaultInput) -> dict[str, Any
             )
 
     created = init_vault(target)
+
+    if not was_vault and ctx.vault is not None and ctx.vault.root.resolve() != created:
+        try:
+            copy_ai_settings(ctx.vault.root / "learnloop.toml", created / "learnloop.toml")
+        except SettingsStoreError:
+            pass  # inheritance is best-effort; the vault keeps template defaults
 
     subject_id: str | None = None
     subject_title = (params.subject or "").strip()
