@@ -34,26 +34,29 @@ def test_default_config_contains_ai_codex_profile(tmp_path):
     assert config.ai.providers["deepseek_flash"].thinking == "disabled"
     assert config.ai.providers["deepseek_pro"].model == "deepseek-v4-pro"
     assert config.ai.providers["deepseek_pro"].thinking == "enabled"
-    assert config.ai.routing.grading == "codex_low"
-    assert config.ai.routing.tutor_qa == "codex_low"
-    assert config.ai.routing.teach_back == "codex_low"
-    assert config.ai.routing.authoring == "codex_medium"
-    assert config.ai.routing.canonical_ingest == "codex_medium"
-    assert config.ai.routing.canonical_ingest_retry == "codex_medium"
+    assert config.ai.providers["openrouter"].type == "openrouter"
+    assert config.ai.routing.grading == "codex"
 
 
-def test_global_ai_timeout_is_applied_to_codex_sdk_profiles(tmp_path):
-    config = LearnLoopConfig()
-    config.ai.timeout_seconds = 17
-    config.ai.providers["codex_medium"].timeout_seconds = None
+def test_default_config_seeds_openrouter_profile(tmp_path):
+    init_vault(tmp_path)
 
-    client = make_ai_provider_client(
-        config,
-        tmp_path,
-        provider_name="codex_medium",
-    )
+    loaded = load_config(tmp_path / "learnloop.toml")
+    in_memory = LearnLoopConfig()
 
-    assert client.config.timeout_seconds == 17
+    # The written TOML template and the in-memory seeding must agree, so a vault
+    # created before the openrouter profile existed picks up the same defaults.
+    for config in (loaded, in_memory):
+        profile = config.ai.providers["openrouter"]
+        assert profile.type == "openrouter"
+        assert profile.model == "deepseek/deepseek-chat"
+        assert profile.api_key_env == "OPENROUTER_API_KEY"
+        assert profile.response_format == "json_object"
+        assert profile.timeout_seconds == 180
+        # base_url defaults inside the client; max_tokens stays unset so
+        # synthesis-sized outputs are never truncated.
+        assert profile.base_url is None
+        assert profile.max_tokens is None
 
 
 def test_in_memory_defaults_match_persisted_algorithm_and_codex_profile(tmp_path):

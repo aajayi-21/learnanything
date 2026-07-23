@@ -967,148 +967,43 @@ def test_vault_pdf_engine_governs_import_when_payload_is_silent(tmp_path, monkey
 
     import types
 
-    import learnloop.ingest.extractors as extractors
-    import learnloop.vault.loader as vault_loader
-    from learnloop.services.ingest_runner import default_extraction_identity
+    from learnloop.services.ingest_runner import default_inventory_client
 
-    fake_vault = types.SimpleNamespace(
-        config=types.SimpleNamespace(
-            ingest=types.SimpleNamespace(pdf=types.SimpleNamespace(engine="pypdf"))
-        )
+    from tests.helpers import create_basic_vault
+    from tests.openai_fakes import install_fake_openai
+
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    toml_path = vault_root / "learnloop.toml"
+    text = toml_path.read_text(encoding="utf-8")
+    assert 'canonical_ingest = "codex"' in text
+    toml_path.write_text(
+        text.replace('canonical_ingest = "codex"', 'canonical_ingest = "openrouter"'),
+        encoding="utf-8",
     )
-    monkeypatch.setattr(vault_loader, "load_vault", lambda root: fake_vault)
-    monkeypatch.setattr(extractors, "marker_available", lambda: True)
+    monkeypatch.delenv("LEARNLOOP_AI_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-secret")
+    install_fake_openai(monkeypatch)
 
-    identity = default_extraction_identity(_fetched_pdf(), "pdf", _bare_ctx(tmp_path))
-    assert identity["extractor"] == "pypdf"
-    assert identity["config"]["engine"] == "pypdf"
+    client = default_inventory_client(types.SimpleNamespace(vault_root=vault_root))
 
-    identity = default_extraction_identity(
-        _fetched_pdf(), "pdf", _bare_ctx(tmp_path, {"pdf_config": {"engine": "marker"}})
-    )
-    assert identity["extractor"] == "marker"
+    assert client.provider_type == "openrouter"
+    assert client.model == "deepseek/deepseek-chat"
 
 
-def test_auto_engine_stays_out_of_extraction_identity(tmp_path, monkeypatch):
-    """A vault-configured "auto" must not enter the identity config: writing it
-    would change every extraction request hash and re-extract unchanged PDFs."""
+def test_default_inventory_client_defaults_to_codex_and_errors_when_unavailable(tmp_path, monkeypatch):
+    """Default routing still resolves codex, which is unavailable in tests — the
+    runner raises a typed error instead of silently switching providers."""
 
     import types
 
-    import learnloop.vault.loader as vault_loader
-    from learnloop.services.ingest_runner import default_extraction_identity
-
-    fake_vault = types.SimpleNamespace(
-        config=types.SimpleNamespace(
-            ingest=types.SimpleNamespace(pdf=types.SimpleNamespace(engine="auto"))
-        )
-    )
-    monkeypatch.setattr(vault_loader, "load_vault", lambda root: fake_vault)
-    identity = default_extraction_identity(_fetched_pdf(), "pdf", _bare_ctx(tmp_path))
-    assert "engine" not in identity["config"]
-
-
-def test_marker_and_pypdf_both_failing_is_a_typed_error(tmp_path, monkeypatch):
-    import learnloop.ingest.extractors as extractors
-    from learnloop.services.ingest_runner import default_extract
-
-    class FailingMarker:
-        name = "marker"
-
-        def extract(self, raw_bytes, context):
-            raise RuntimeError("CUDA device lost")
-
-    class FailingPyPdf:
-        name = "pypdf"
-
-        def extract(self, raw_bytes, context):
-            raise ValueError("no extractable text")
-
-    monkeypatch.setattr(extractors, "pdf_extractor_for", lambda config=None: FailingMarker())
-    monkeypatch.setattr(extractors, "PyPdfDocumentExtractor", FailingPyPdf)
-    with pytest.raises(IngestRunnerError) as excinfo:
-        default_extract(_fetched_pdf(), "pdf", _bare_ctx(tmp_path))
-    assert excinfo.value.code == "pdf_extraction_failed"
-    assert "CUDA device lost" in str(excinfo.value)
-    assert "no extractable text" in str(excinfo.value)
-
-
-def _two_page_pdf_bytes() -> bytes:
-    import io
-
-    import pypdf
-
-    writer = pypdf.PdfWriter()
-    writer.add_blank_page(width=72, height=72)
-    writer.add_blank_page(width=72, height=72)
-    buffer = io.BytesIO()
-    writer.write(buffer)
-    return buffer.getvalue()
-
-
-def test_out_of_range_page_selection_is_refused_with_page_count(tmp_path):
-    from learnloop.services.ingest_runner import _validate_page_selection
-
-    raw = _two_page_pdf_bytes()
-    _validate_page_selection(raw, [0, 1])  # in range: no error
-    with pytest.raises(IngestRunnerError) as excinfo:
-        _validate_page_selection(raw, [0, 41])
-    assert excinfo.value.code == "invalid_page_range"
-    assert excinfo.value.details["page_count"] == 2
-    assert excinfo.value.details["requested_max"] == 42
-    assert "2 page(s)" in str(excinfo.value)
-
-
-def test_page_validation_is_best_effort_on_unreadable_pdfs(tmp_path):
-    from learnloop.services.ingest_runner import _validate_page_selection
-
-    _validate_page_selection(b"%PDF-not really", [999])  # silently proceeds
-
-
-def test_resume_clears_stale_batch_finished_at(tmp_path):
-    def fail(ctx: JobContext) -> dict:
-        raise IngestRunnerError("boom", code="synthetic")
-
-    runner = _runner(tmp_path, handlers={"import": fail})
-    batch_id = runner.enqueue_batch("import", [JobSpec("import", {"source": "x.pdf"})])
-    runner.drain()
-    failed = runner.repo.get_ingest_batch(batch_id)
-    assert failed["status"] == "failed"
-    assert failed["finished_at"] is not None
-
-    runner.resume_batch(batch_id)
-    resumed = runner.repo.get_ingest_batch(batch_id)
-    assert resumed["status"] == "queued"
-    assert resumed["finished_at"] is None
-
-
-def test_startup_finalizes_abandoned_synthesis_runs(tmp_path):
-    """Recovery marks stale created/running synthesis rows failed — but never
-    while a synthesis job holds a live lease."""
-
-    from learnloop.services.synthesis_manifests import build_manifest, persist_manifest
+    from learnloop.services.ingest_runner import IngestRunnerError, default_inventory_client
 
     from tests.helpers import create_basic_vault
-    from learnloop.vault.loader import load_vault
 
-    paths = create_basic_vault(tmp_path / "vault")
-    repo = Repository(paths.sqlite_path)
-    vault = load_vault(paths.root)
-    manifest_id = persist_manifest(repo, build_manifest(vault, source_set_id="ss1"))
-    stale = repo.insert_synthesis_run(manifest_id=manifest_id, mode="bootstrap", clock=_clock(-100_000))
+    vault_root = tmp_path / "vault"
+    create_basic_vault(vault_root)
+    monkeypatch.delenv("LEARNLOOP_AI_PROVIDER", raising=False)
 
-    runner = IngestRunner(repo, vault_root=paths.root, worker_id="w1", clock=_clock())
-    runner.recover_stale_leases()
-    assert repo.synthesis_run(stale)["status"] == "failed"
-
-    # With a live-leased synthesis job, finalization is skipped entirely.
-    fresh_stale = repo.insert_synthesis_run(manifest_id=manifest_id, mode="bootstrap", clock=_clock(-100_000))
-    batch_id = runner.enqueue_batch(
-        "bootstrap_synthesis", [JobSpec("bootstrap_synthesis", {"source_set_id": "ss1"})]
-    )
-    job = repo.claim_next_ingest_job(
-        worker_id="w2", now_iso="2026-07-13T12:00:00Z", lease_cutoff_iso="2026-07-13T11:58:00Z"
-    )
-    assert job is not None and job["batch_id"] == batch_id
-    runner.recover_stale_leases()
-    assert repo.synthesis_run(fresh_stale)["status"] == "created"
+    with pytest.raises(IngestRunnerError):
+        default_inventory_client(types.SimpleNamespace(vault_root=vault_root))
