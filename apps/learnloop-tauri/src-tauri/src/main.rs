@@ -273,6 +273,7 @@ fn main() {
             get_acquisition_preview,
             get_build_plan,
             list_source_sets,
+            list_vault_epigraphs,
             get_source_set,
             upsert_source_set,
             get_source_coverage,
