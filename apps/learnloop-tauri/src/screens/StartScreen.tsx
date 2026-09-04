@@ -5,11 +5,18 @@
 // preview, and the begin action. The readiness controls feed the real
 // get_today_queue / start_session commands.
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api } from "../api/client";
 import { useCachedQuery } from "../api/useCachedQuery";
 import { TAG } from "../api/queryTags";
-import type { QueueSnapshot, ScheduledItemDto, SessionSnapshot, StreakSummary, VaultSummary } from "../api/dto";
+import type {
+  QueueSnapshot,
+  ScheduledItemDto,
+  SessionSnapshot,
+  StreakSummary,
+  VaultEpigraphDto,
+  VaultSummary
+} from "../api/dto";
 import { EmptyPlaceholder, KeyBar, SectionHeader } from "../components/ui";
 // Palette-aware colors: every token is a var(--…) string that retints with the
 // selected palette (styles/palettes.css) — replaces the old hardcoded hex map.
@@ -26,6 +33,7 @@ import {
   readAmberAtlasPalette,
   resolveCssColor
 } from "./startBackdrops/glyphAtlas";
+import { DiffusionText, wrapMono } from "./startBackdrops/DiffusionText";
 
 const LOW_MASTERY_WORDS = [
   "better", "oriented", "motivated", "prepared", "improve", "develop",
@@ -41,6 +49,48 @@ const HIGH_MASTERY_WORDS = [
 ];
 const GOD_WORD_HOLD_MS = 10_000;
 const GLITCH_CHARS = "!<>-_\\/[]{}=+*^?#$%&░▒▓█◙◇╳";
+
+// Hero text modes. `classic` is the static "Escape will make me …" typewriter;
+// the others cycle vault-generated epigraphs (written by each completed
+// synthesis, see learnloop.content.synthesis.vault_epigraphs) through the
+// diffusion-denoise effect. Persisted like the backdrop choice.
+type HeroTextMode = "classic" | "quotes" | "haiku" | "mixed";
+const HERO_TEXT_MODES: HeroTextMode[] = ["classic", "quotes", "haiku", "mixed"];
+const HERO_TEXT_STORAGE_KEY = "learnloop.startHeroText";
+const EPIGRAPH_LIMIT = 12;
+const EPIGRAPH_COLS = 30;
+const EPIGRAPH_MAX_LINES = 5;
+const EMPTY_EPIGRAPHS: VaultEpigraphDto[] = [];
+
+interface HeroTextState {
+  /** What the picker shows. */
+  chosen: HeroTextMode;
+  /** What renders: falls back to classic when the chosen rotation is empty. */
+  mode: HeroTextMode;
+  items: string[];
+  /** 3 when any haiku is in rotation so the block height never changes. */
+  minLines: number;
+  counts: { quote: number; haiku: number };
+  onSetMode: (next: HeroTextMode) => void;
+}
+
+function selectEpigraphs(rows: VaultEpigraphDto[], mode: HeroTextMode): VaultEpigraphDto[] {
+  if (mode === "classic") return [];
+  const kind = mode === "quotes" ? "quote" : mode === "haiku" ? "haiku" : null;
+  return rows
+    .filter((row) => (kind === null || row.kind === kind) && wrapMono(row.text, EPIGRAPH_COLS).length <= EPIGRAPH_MAX_LINES)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
+    .slice(0, EPIGRAPH_LIMIT);
+}
+
+function readHeroTextMode(): HeroTextMode {
+  try {
+    const stored = localStorage.getItem(HERO_TEXT_STORAGE_KEY);
+    return HERO_TEXT_MODES.includes(stored as HeroTextMode) ? (stored as HeroTextMode) : "classic";
+  } catch {
+    return "classic";
+  }
+}
 
 // Scramble-decrypt hook for the high-mastery easter egg: the text first
 // resolves left-to-right out of glyph noise, then re-glitches in short random
@@ -1279,11 +1329,12 @@ function TesseractBackdrop() {
 }
 
 // ── Hero overlay (active goal + title) shared across backdrops ─────────────
-function BackdropHeroText({ dateLine, vaultAlias, masteryWords, goalMeta }: {
+function BackdropHeroText({ dateLine, vaultAlias, masteryWords, goalMeta, heroText }: {
   dateLine: string;
   vaultAlias: string;
   masteryWords: string[];
   goalMeta: string;
+  heroText: HeroTextState;
 }) {
   return (
     <div
@@ -1317,24 +1368,37 @@ function BackdropHeroText({ dateLine, vaultAlias, masteryWords, goalMeta }: {
         >
           {vaultAlias}
         </div>
-        <div
-          style={{
-            fontSize: 38,
-            lineHeight: 1.05,
-            fontWeight: 600,
-            color: "var(--text)",
-            textShadow: "0 2px 24px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.5)",
-            letterSpacing: "-0.01em"
-          }}
-        >
-          <div style={{ opacity: 0.82 }}>Escape will make me</div>
-          <div style={{ minHeight: "1.1em" }}>
-            <CyclingTypewriterText
-              words={masteryWords}
-              wordColor={COLOR.amber}
-            />
+        {heroText.mode === "classic" ? (
+          <div
+            style={{
+              fontSize: 38,
+              lineHeight: 1.05,
+              fontWeight: 600,
+              color: "var(--text)",
+              textShadow: "0 2px 24px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.5)",
+              letterSpacing: "-0.01em"
+            }}
+          >
+            <div style={{ opacity: 0.82 }}>Escape will make me</div>
+            <div style={{ minHeight: "1.1em" }}>
+              <CyclingTypewriterText
+                words={masteryWords}
+                wordColor={COLOR.amber}
+              />
+            </div>
           </div>
-        </div>
+        ) : (
+          <div
+            style={{
+              fontSize: 22,
+              fontWeight: 500,
+              color: "var(--text)",
+              textShadow: "0 2px 24px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.5)"
+            }}
+          >
+            <DiffusionText items={heroText.items} cols={EPIGRAPH_COLS} minLines={heroText.minLines} />
+          </div>
+        )}
         <div
           style={{
             marginTop: 18,
@@ -1406,6 +1470,63 @@ function StartDebugCycler({ backdrop, onSetBackdrop }: { backdrop: BackdropName;
   );
 }
 
+// Hero-text mode picker pinned to the bottom-right of the start panel. A real
+// button (keyboard reachable); the Start screen's Enter-to-begin handler skips
+// buttons so activating this never starts a session.
+function StartHeroTextPicker({ heroText }: { heroText: HeroTextState }) {
+  const [hover, setHover] = useState(false);
+  const { chosen, counts } = heroText;
+  const available =
+    chosen === "classic" ? true
+    : chosen === "mixed" ? counts.quote + counts.haiku > 0
+    : chosen === "quotes" ? counts.quote > 0
+    : counts.haiku > 0;
+  const next = () => heroText.onSetMode(HERO_TEXT_MODES[(HERO_TEXT_MODES.indexOf(chosen) + 1) % HERO_TEXT_MODES.length]);
+  return (
+    <button
+      type="button"
+      onClick={next}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="cycle hero text"
+      aria-label={`hero text: ${chosen}. Activate to switch.`}
+      style={{
+        position: "absolute",
+        bottom: 14,
+        right: 16,
+        zIndex: 6,
+        cursor: "pointer",
+        userSelect: "none",
+        pointerEvents: "auto",
+        appearance: "none",
+        fontFamily: FONT_MONO,
+        fontSize: 11,
+        letterSpacing: "0.02em",
+        padding: "3px 9px",
+        borderRadius: 4,
+        border: `1px solid ${hover ? COLOR.amber : "color-mix(in srgb, var(--text) 18%, transparent)"}`,
+        background: hover ? "color-mix(in srgb, var(--wash-amber) 85%, transparent)" : "rgba(0,0,0,0.35)",
+        color: hover ? COLOR.amber : "color-mix(in srgb, var(--text) 60%, transparent)",
+        opacity: hover ? 1 : 0.55,
+        transition: "opacity 140ms ease, color 140ms ease, border-color 140ms ease",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6
+      }}
+    >
+      <span style={{ opacity: 0.8 }}>✦</span>
+      <span>hero:</span>
+      <span style={{ color: hover ? COLOR.amber : "color-mix(in srgb, var(--text) 85%, transparent)", opacity: available ? 1 : 0.55 }}>
+        {chosen}
+      </span>
+      {!available ? (
+        <span style={{ fontStyle: "italic", opacity: 0.6 }}>no {chosen === "mixed" ? "epigraphs" : chosen} yet</span>
+      ) : null}
+      <span style={{ opacity: 0.6 }}>›</span>
+    </button>
+  );
+}
+
 // Left panel — renders the selected backdrop with vignette, hero, and cycler.
 function BackdropPanel({
   backdrop,
@@ -1415,7 +1536,8 @@ function BackdropPanel({
   dateLine,
   vaultAlias,
   masteryWords,
-  goalMeta
+  goalMeta,
+  heroText
 }: {
   backdrop: BackdropName;
   density: number;
@@ -1425,6 +1547,7 @@ function BackdropPanel({
   vaultAlias: string;
   masteryWords: string[];
   goalMeta: string;
+  heroText: HeroTextState;
 }) {
   let inner: ReactNode;
   if (backdrop === "lorenz") inner = <LorenzBackdrop density={density} intensity={intensity} />;
@@ -1463,6 +1586,7 @@ function BackdropPanel({
         }}
       >
         <StartDebugCycler backdrop={backdrop} onSetBackdrop={onSetBackdrop} />
+        <StartHeroTextPicker heroText={heroText} />
         <div style={{ textAlign: "center", alignSelf: "stretch" }}>
           <div style={{ fontSize: 13, color: COLOR.amberLink, textDecoration: "underline", textUnderlineOffset: 3, marginBottom: 4 }}>
             session warm-up
@@ -1474,7 +1598,11 @@ function BackdropPanel({
         </div>
         <div style={{ textAlign: "center", maxWidth: 460, lineHeight: 1.6 }}>
           <div style={{ color: COLOR.text, fontSize: 13 }}>
-            <CyclingTypewriterText prefix="Escape will make me " words={masteryWords} wordColor={COLOR.amber} />
+            {heroText.mode === "classic" ? (
+              <CyclingTypewriterText prefix="Escape will make me " words={masteryWords} wordColor={COLOR.amber} />
+            ) : (
+              <DiffusionText items={heroText.items} cols={44} minLines={heroText.minLines} align="center" />
+            )}
           </div>
           <div style={{ marginTop: 4, fontStyle: "italic", color: COLOR.textItalic, fontSize: 12 }}>{goalMeta}</div>
         </div>
@@ -1496,6 +1624,7 @@ function BackdropPanel({
     >
       {inner}
       <StartDebugCycler backdrop={backdrop} onSetBackdrop={onSetBackdrop} />
+      <StartHeroTextPicker heroText={heroText} />
       <div
         style={{
           position: "absolute",
@@ -1504,7 +1633,7 @@ function BackdropPanel({
           background: "radial-gradient(ellipse at center, rgba(0,0,0,0) 30%, rgba(0,0,0,0.55) 100%)"
         }}
       />
-      <BackdropHeroText dateLine={dateLine} vaultAlias={vaultAlias} masteryWords={masteryWords} goalMeta={goalMeta} />
+      <BackdropHeroText dateLine={dateLine} vaultAlias={vaultAlias} masteryWords={masteryWords} goalMeta={goalMeta} heroText={heroText} />
     </div>
   );
 }
@@ -1666,6 +1795,7 @@ export function StartScreen({
     const stored = localStorage.getItem("learnloop.startBackdrop");
     return BACKDROP_ORDER.includes(stored as BackdropName) ? (stored as BackdropName) : "axes";
   });
+  const [heroTextChoice, setHeroTextChoice] = useState<HeroTextMode>(readHeroTextMode);
   const [energy, setEnergy] = useState(0.7);
   const [sleep, setSleep] = useState(0.5);
   const [minutes, setMinutes] = useState(30);
@@ -1687,9 +1817,30 @@ export function StartScreen({
   const preview: QueueSnapshot | null = previewQuery.data ?? null;
   const previewLoading = previewQuery.loading;
 
+  // Vault epigraphs for the hero text. Always fetched (the picker shows
+  // availability even in classic mode) and never part of the loading gate or
+  // the error toast — it is decoration. Tags: the rows are written by
+  // synthesis jobs whose markdown writes trip the vault watcher (which
+  // invalidates everything); the row insert itself is SQLite-only and
+  // invisible to the watcher, so the mount-time revalidation is the backstop.
+  const epigraphQuery = useCachedQuery(
+    ["list_vault_epigraphs", { limit: EPIGRAPH_LIMIT }],
+    () => api.listVaultEpigraphs({ limit: EPIGRAPH_LIMIT }),
+    { tags: [TAG.sources, TAG.vault] }
+  );
+  const epigraphRows = epigraphQuery.data?.epigraphs ?? EMPTY_EPIGRAPHS;
+
   useEffect(() => {
     localStorage.setItem("learnloop.startBackdrop", backdrop);
   }, [backdrop]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(HERO_TEXT_STORAGE_KEY, heroTextChoice);
+    } catch {
+      // A denied storage write must not interrupt the start screen.
+    }
+  }, [heroTextChoice]);
 
   useEffect(() => {
     if (previewQuery.error) onError(previewQuery.error.message);
@@ -1698,7 +1849,7 @@ export function StartScreen({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase();
-      if (tag === "input" || tag === "textarea") return;
+      if (tag === "input" || tag === "textarea" || tag === "button") return;
       if (event.key === "Enter") {
         event.preventDefault();
         void begin();
@@ -1726,6 +1877,22 @@ export function StartScreen({
   const masteryValues = items.filter((i) => i.mastery !== null).map((i) => i.mastery as number);
   const avgMastery = masteryValues.length > 0 ? masteryValues.reduce((a, b) => a + b, 0) / masteryValues.length : 0;
   const masteryWords = avgMastery >= 0.65 ? HIGH_MASTERY_WORDS : LOW_MASTERY_WORDS;
+
+  const heroText = useMemo<HeroTextState>(() => {
+    const rotation = selectEpigraphs(epigraphRows, heroTextChoice);
+    const items = rotation.map((row) => row.text);
+    return {
+      chosen: heroTextChoice,
+      mode: heroTextChoice !== "classic" && items.length > 0 ? heroTextChoice : "classic",
+      items,
+      minLines: rotation.some((row) => row.kind === "haiku") ? 3 : 1,
+      counts: {
+        quote: epigraphRows.filter((row) => row.kind === "quote").length,
+        haiku: epigraphRows.filter((row) => row.kind === "haiku").length
+      },
+      onSetMode: setHeroTextChoice
+    };
+  }, [epigraphRows, heroTextChoice]);
 
   const queueSummary = [
     { label: "due now", count: items.filter((i) => i.dueStatus === "due").length, color: COLOR.amber },
@@ -1770,6 +1937,7 @@ export function StartScreen({
           vaultAlias={vaultAlias(vault)}
           masteryWords={masteryWords}
           goalMeta={goalMeta}
+          heroText={heroText}
         />
 
         {/* RIGHT — readiness form + queue preview */}

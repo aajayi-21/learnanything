@@ -511,6 +511,31 @@ export interface StreakSummary {
   longest: number;
 }
 
+export type VaultEpigraphKind = "quote" | "haiku";
+
+/** One vault-generated epigraph for the Start hero: a one-line quote or a
+ *  three-line haiku about the material, written when a synthesis completes.
+ *  `text` joins haiku lines with "\n"; `lines` is the split form. */
+export interface VaultEpigraphDto {
+  id: string;
+  subjectId: string;
+  sourceSetId: string | null;
+  synthesisRunId: string | null;
+  mode: "bootstrap" | "append";
+  kind: VaultEpigraphKind;
+  text: string;
+  lines: string[];
+  promptVersion: string;
+  provider: string | null;
+  model: string | null;
+  createdAt: string;
+}
+
+export interface VaultEpigraphsDto {
+  version: number;
+  epigraphs: VaultEpigraphDto[];
+}
+
 export interface AppSnapshot {
   version: number;
   vault: VaultSummary | null;

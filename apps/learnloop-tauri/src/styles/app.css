@@ -1088,6 +1088,17 @@ button { color: inherit; }
   }
 }
 
+/* Start hero - dLLM-style denoise for vault epigraphs (startBackdrops/DiffusionText.tsx).
+   All timing is JS; the opacity transition is the reduced-motion cross-fade. */
+.start-diffusion {
+  font-variant-ligatures: none;
+  white-space: pre;
+  transition: opacity 260ms ease;
+}
+.start-diffusion.is-swapping { opacity: 0; }
+.start-diffusion-mask { color: color-mix(in srgb, var(--amber) 62%, transparent); }
+.start-diffusion-fresh { color: var(--amber); }
+
 /* ── session finish · ASCII/unicode HUD ── */
 .sfin-overlay {
   position: fixed;

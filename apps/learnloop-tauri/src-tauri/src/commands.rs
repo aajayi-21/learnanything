@@ -449,6 +449,9 @@ pub async fn list_source_sets(sidecar: State<'_, SidecarManager>) -> Result<Valu
     blocking_sidecar_call(sidecar, "list_source_sets", json!({})).await
 }
 
+// Start-screen epigraphs (newest first; `{ limit, subjectId? }`).
+sidecar_passthrough!(list_vault_epigraphs, "list_vault_epigraphs");
+
 #[tauri::command]
 pub async fn get_source_set(
     source_set_id: String,

@@ -6,7 +6,7 @@ aliases:
 status: active
 doc_version: 1.0.0
 implementation_version: mvp-0.9
-last_reviewed: 2026-08-18
+last_reviewed: 2026-09-03
 source_commit: 62fd1f6404cc3a3007c6f214ba9429c45ef0114f
 source_commit_timestamp: "2026-08-17T12:05:21-04:00"
 source_paths:
@@ -92,7 +92,7 @@ Rust's `vault_watcher` coalesces create/modify/remove bursts for Markdown, YAML,
 
 Python remains the authority for incremental versus full refresh. A backend rescan/error or directory-only mutation deliberately selects the conservative full-refresh arm. Read events do not feed back into another refresh loop.
 
-Every `learnloop://vault-files-changed` event whose mode is not `noop` also marks the whole query cache stale (coalesced to one invalidation per quiet second, since ingests write in bursts); mounted screens keep painting their cached data while they revalidate. SQLite-only mutations are invisible to the watcher, so each mutation wrapper in `client.ts` names the tags it affects — a new RPC that writes state must pick its tags there, and a new cached read must declare the tags that cover it. The Reader's per-source reads are the one sanctioned imperative use of `getOrFetch` (its open sequence has side effects); everything else reads through `useCachedQuery`.
+Every `learnloop://vault-files-changed` event whose mode is not `noop` also marks the whole query cache stale (coalesced to one invalidation per quiet second, since ingests write in bursts); mounted screens keep painting their cached data while they revalidate. SQLite-only mutations are invisible to the watcher, so each mutation wrapper in `client.ts` names the tags it affects — a new RPC that writes state must pick its tags there, and a new cached read must declare the tags that cover it. The Reader's per-source reads are the one sanctioned imperative use of `getOrFetch` (its open sequence has side effects); everything else reads through `useCachedQuery`. The Start screen's `list_vault_epigraphs` read is tagged `sources` + `vault`: its rows are written by synthesis jobs whose Markdown writes trip the watcher, while the row insert itself is SQLite-only and invisible to it, so the mount-time revalidation (`staleAfterMs` 0) is the backstop.
 
 ## Native capabilities and trust boundaries
 

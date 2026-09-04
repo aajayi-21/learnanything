@@ -3,6 +3,7 @@ import { invalidate, invalidateAll, setQueryData, type QueryTag } from "./queryC
 import { READER_PREFIX, TAG } from "./queryTags";
 import type {
   AppSnapshot,
+  VaultEpigraphsDto,
   AnswerCalibrationReportDto,
   CreateVaultInput,
   CreateVaultResult,
@@ -611,6 +612,11 @@ export const api = {
   startExtractionRepair: (input: StartExtractionRepairInput) =>
     mutatingReader(call<IngestBatchDto>("start_extraction_repair", { input }), INGEST_TAGS),
   listSourceSets: () => call<SourceSetsSnapshot>("list_source_sets"),
+  // Read-only; the rows are written by synthesis jobs, so no tags to name here.
+  listVaultEpigraphs: (input: { subjectId?: string | null; limit?: number } = {}) =>
+    call<VaultEpigraphsDto>("list_vault_epigraphs", {
+      input: { limit: input.limit ?? 12, ...(input.subjectId ? { subjectId: input.subjectId } : {}) }
+    }),
   getSourceSet: (sourceSetId: string) =>
     call<{ version: number; sourceSet: SourceSetDto }>("get_source_set", { sourceSetId }),
   upsertSourceSet: (input: SourceSetDto) =>
